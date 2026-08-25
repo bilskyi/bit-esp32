@@ -16,19 +16,34 @@ real board, not assumed.
 
 ## The one thing still open
 
-**Playback on the device.** Audio reaches the board and plays — the log says
-`idle`, which is only reachable after PCM was written to I2S — but the one time
-it was audible it came out in fragments.
+**How the reply sounds.** The transport underneath it is now clean — a press
+captured after the last fix logged:
 
-The last fix is flashed but **never tested with a button press**: the play
-buffer used to be non-blocking, so a reply arriving faster than real time was
-mostly discarded. It now blocks (letting TCP push back) and pre-buffers 150 ms
-before opening the amp. The log line to look for is:
+    thinking: sent 84992 B (2.7 s), 0 dropped, 0 failures
+    idle (play dropped 0 B)
 
-    idle (play dropped N B)
+Zero dropped bytes, so the whole reply reached I2S, and the server's fallback
+voice kicked in on that same turn (`ru-RU-DmitryNeural` refused, the alternate
+rendered it). What nobody has heard yet is the *result*: the last time this was
+listened to, it was the old build that discarded most of the audio and came out
+in fragments.
 
-`N == 0` means the whole reply arrived. If it is large, raise
-`PLAY_BUFFER_BYTES` or `PLAY_SEND_TIMEOUT` in `firmware/main/voice_main.c`.
+So: one button press, and listen. If it is still choppy the problem is no
+longer the buffer, and the next suspects are the 32-bit slot format on TX and
+the `frame[i*2 + 1] = 0` right-slot fill in `audio_out_task`.
+
+## Also unexplained
+
+The socket sometimes dies a fraction of a second into an upload:
+
+    socket error: esp_tls=97 sock_errno=1070325472
+    socket disconnected: sent 12288 B, 0 send failures, 0 dropped blocks
+
+Not throughput (no failures, no drops), not memory (110+ KB free). It recovers
+in about two seconds and the next press works. It has happened perhaps one turn
+in three, and it is the last thing standing between this and something usable.
+`sock_errno` is a garbage value, so the transport is not filling it in — worth
+enabling verbose logging on `transport_ws` and catching one.
 
 ## Resuming
 
