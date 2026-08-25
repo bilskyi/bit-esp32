@@ -1,0 +1,12 @@
+CONFIG_IDF_TARGET="esp32c3"
+
+# Most ESP32-C3 devkits expose the console over the built-in USB Serial/JTAG
+# rather than a UART bridge. If your board has a CP2102/CH340 chip instead,
+# switch this to CONFIG_ESP_CONSOLE_UART_DEFAULT.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# 1 ms tick keeps the audio task's timing predictable once playback exists.
+CONFIG_FREERTOS_HZ=1000
+
+# printf() is called from the audio loop with a double in it.
+CONFIG_NEWLIB_STDOUT_LINE_ENDING_CRLF=y
