@@ -76,7 +76,19 @@ async def run(args: argparse.Namespace) -> int:
     print(f"question: {len(pcm) / 2 / SAMPLE_RATE:.2f} s of audio, {len(pcm)} bytes")
 
     headers = {"Authorization": f"Bearer {args.token}"} if args.token else {}
-    async with websockets.connect(args.url, additional_headers=headers, max_size=None) as ws:
+    try:
+        connection = await websockets.connect(args.url, additional_headers=headers, max_size=None)
+    except websockets.exceptions.InvalidStatus as exc:
+        if exc.response.status_code in (401, 403):
+            print("rejected by the server: bad or missing device token (pass --token)")
+        else:
+            print(f"rejected by the server: HTTP {exc.response.status_code}")
+        return 1
+    except OSError as exc:
+        print(f"could not reach {args.url}: {exc}")
+        return 1
+
+    async with connection as ws:
         await ws.send(json.dumps({"type": "start"}))
 
         # Stream while "holding the button": real time pacing, so the server
