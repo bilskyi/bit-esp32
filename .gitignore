@@ -7,3 +7,11 @@ __pycache__/
 *.db-journal
 *.raw
 *.wav
+
+# Firmware build output and credentials
+firmware/build/
+firmware/sdkconfig
+firmware/sdkconfig.old
+firmware/main/secrets.h
+*.wav
+firmware/managed_components/

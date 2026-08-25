@@ -16,6 +16,8 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "numpy>=2.5.2",
+    "pyserial>=3.5",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "websockets>=13.0",

@@ -17,6 +17,12 @@ class Settings(BaseSettings):
     # Also bounds how much audio one utterance may buffer.
     session_timeout_s: float = 60.0
 
+    # Per-sentence ceiling on speech synthesis. edge-tts occasionally opens a
+    # socket to Microsoft that never answers; without a bound that hangs the
+    # whole reply, the device never receives "done", and it sits in SPEAKING
+    # until its own watchdog fires. Observed in exactly that shape.
+    tts_timeout_s: float = 10.0
+
     # Shared secret the device presents on the WebSocket handshake. Empty
     # disables the check, which is only appropriate on a laptop.
     device_token: str = ""
@@ -28,11 +34,23 @@ class Settings(BaseSettings):
     provider_mode: str = "groq"
 
     stt_model: str = "whisper-large-v3-turbo"
-    llm_model: str = "llama-3.3-70b-versatile"
+    # Groq retired the Llama models; chat/completions returns 404 for them.
+    # Measured alternatives (first token, uk/ru): gpt-oss-20b 845/420 ms,
+    # gpt-oss-120b 550/530 ms. qwen3.6 is a reasoning model and emits <think>
+    # blocks that would be spoken aloud, so it is not a candidate here.
+    llm_model: str = "openai/gpt-oss-120b"
 
     voice_uk: str = "uk-UA-OstapNeural"
     voice_ru: str = "ru-RU-DmitryNeural"
     voice_en: str = "en-US-AndrewNeural"
+
+    # Individual edge-tts voices intermittently return no audio for particular
+    # phrases - observed with ru-RU-DmitryNeural on "Привет, Катерин!", which
+    # ru-RU-SvetlanaNeural rendered without complaint. A second voice per
+    # language turns that from a lost reply into a barely noticeable retry.
+    voice_uk_alt: str = "uk-UA-PolinaNeural"
+    voice_ru_alt: str = "ru-RU-SvetlanaNeural"
+    voice_en_alt: str = "en-US-AvaNeural"
 
     @property
     def max_utterance_bytes(self) -> int:
@@ -46,3 +64,11 @@ class Settings(BaseSettings):
     @property
     def voices(self) -> dict[str, str]:
         return {"uk": self.voice_uk, "ru": self.voice_ru, "en": self.voice_en}
+
+    @property
+    def fallback_voices(self) -> dict[str, str]:
+        return {
+            "uk": self.voice_uk_alt,
+            "ru": self.voice_ru_alt,
+            "en": self.voice_en_alt,
+        }

@@ -73,6 +73,20 @@ class Session:
         self._cancel_watchdog()
         await self._set_state(State.THINKING)
         pcm, self._buf = bytes(self._buf), bytearray()
+
+        # DEBUG_DUMP_PCM=1 writes each received utterance to disk so the audio
+        # that actually crossed the network can be inspected. Bench aid only.
+        import os
+
+        if os.getenv("DEBUG_DUMP_PCM"):
+            from server.audio import pcm_to_wav
+
+            path = f"/tmp/utterance_{int(len(pcm))}.wav"
+            with open(path, "wb") as fh:
+                fh.write(pcm_to_wav(pcm, self.settings.sample_rate))
+            log.info("dumped %d bytes (%.2f s) -> %s",
+                     len(pcm), len(pcm) / 2 / self.settings.sample_rate, path)
+
         try:
             await self._respond(pcm)
         except Exception:
@@ -118,17 +132,56 @@ class Session:
         splitter = SentenceSplitter()
         spoken: list[str] = []
         voice: str | None = None
+        language: str | None = None
+
+        def is_speakable(sentence: str) -> bool:
+            """True if there is anything for a voice to actually say.
+
+            edge-tts raises NoAudioReceived for input with no pronounceable
+            content - a stray bullet, a lone quotation mark, an emoji. One such
+            fragment would otherwise abort the whole reply mid-sentence.
+            """
+            return any(ch.isalnum() for ch in sentence)
 
         async def say(sentence: str) -> None:
-            nonlocal voice
+            nonlocal voice, language
+            if not is_speakable(sentence):
+                log.debug("skipping unspeakable fragment: %r", sentence)
+                return
             if voice is None:
                 # Decided once, from the first sentence: the voice must not
                 # change partway through a reply.
-                voice = voice_for(detect_language(sentence), self.settings.voices)
+                language = detect_language(sentence)
+                voice = voice_for(language, self.settings.voices)
                 await self._set_state(State.SPEAKING)
             spoken.append(sentence)
-            async for pcm_chunk in self.tts.synthesise(sentence, voice):
-                await self.transport.send_bytes(pcm_chunk)
+
+            async def render(with_voice: str) -> None:
+                async with asyncio.timeout(self.settings.tts_timeout_s):
+                    async for pcm_chunk in self.tts.synthesise(sentence, with_voice):
+                        await self.transport.send_bytes(pcm_chunk)
+
+            try:
+                await render(voice)
+                return
+            except Exception:
+                log.warning("tts failed on %s, retrying with fallback voice", voice)
+
+            # Second attempt with the other voice for this language. The
+            # failure is per voice and per phrase, not per language, so the
+            # alternate usually renders the same text without trouble.
+            alt = self.settings.fallback_voices.get(language or "uk")
+            if not alt or alt == voice:
+                return
+            try:
+                await render(alt)
+            except Exception:
+                # One sentence the voice cannot render must not silence the
+                # rest of the reply. edge-tts raises when the text does not
+                # match the voice's language, which happens whenever the STT
+                # misfires and the model answers in a language we did not pick
+                # a voice for.
+                log.warning("tts failed for %r, skipping sentence", sentence[:60])
 
         async for delta in self.llm.stream(messages, self.settings.max_tokens):
             for sentence in splitter.feed(delta):
