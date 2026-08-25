@@ -78,3 +78,26 @@ class Mp3ToPcm:
         self._header_done = True
         self._prefix = b""
         return buf[size:]
+
+
+def pcm_to_wav(pcm: bytes, sample_rate: int = PCM_SAMPLE_RATE, channels: int = 1) -> bytes:
+    """Wrap raw PCM in a RIFF/WAVE header.
+
+    Whisper endpoints want a container, not headerless samples. Building the
+    44-byte header by hand avoids a temp file and an extra dependency.
+    """
+    import struct
+
+    byte_rate = sample_rate * channels * PCM_SAMPLE_WIDTH
+    block_align = channels * PCM_SAMPLE_WIDTH
+    return (
+        b"RIFF"
+        + struct.pack("<I", 36 + len(pcm))
+        + b"WAVEfmt "
+        + struct.pack(
+            "<IHHIIHH", 16, 1, channels, sample_rate, byte_rate, block_align, 8 * PCM_SAMPLE_WIDTH
+        )
+        + b"data"
+        + struct.pack("<I", len(pcm))
+        + pcm
+    )
