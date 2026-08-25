@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     sample_rate: int = 16000
     db_path: str = "voice.db"
 
+    # "groq" for real providers, "mock" for offline testing without an API key.
+    provider_mode: str = "groq"
+
     stt_model: str = "whisper-large-v3-turbo"
     llm_model: str = "llama-3.3-70b-versatile"
 

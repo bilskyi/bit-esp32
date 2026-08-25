@@ -10,8 +10,10 @@ import logging
 import time
 from enum import Enum
 
-from server.context import build_messages
+from server.context import build_messages, estimate_tokens
+from server.costs import Usage
 from server.lang import detect_language, voice_for
+from server.memory.summarise import extract_facts
 from server.persona import build_system_prompt
 from server.sentences import SentenceSplitter
 
@@ -38,7 +40,7 @@ class Session:
         self.state = State.IDLE
         self.history: list[dict] = []
         self.facts: list[str] = []
-        self.usage = {"turns": 0, "audio_seconds": 0.0, "prompt_tokens": 0, "tts_chars": 0}
+        self.usage = Usage()
 
         self._buf = bytearray()
         self._watchdog: asyncio.Task | None = None
@@ -79,9 +81,16 @@ class Session:
             await self.transport.send_json({"type": "done"})
             await self._set_state(State.IDLE)
 
-    async def close(self) -> None:
+    async def finish(self) -> None:
+        """Close out the session: extract durable facts, then log usage."""
         self._cancel_watchdog()
-        if self.store is not None and self.usage["turns"]:
+        if self.store is None:
+            return
+        if self.history:
+            facts = await extract_facts(self.llm, self.history)
+            if facts:
+                await self.store.add_facts(self.device_id, facts)
+        if not self.usage.is_empty:
             await self.store.log_usage(self.device_id, self.usage)
 
     # -- pipeline ----------------------------------------------------------
@@ -93,7 +102,6 @@ class Session:
         started = time.perf_counter()
         transcript = await self.stt.transcribe(pcm, self.settings.sample_rate)
         text = transcript.text.strip()
-        self.usage["audio_seconds"] += transcript.seconds
         if not text:
             log.info("empty transcript, skipping LLM")
             return
@@ -105,7 +113,7 @@ class Session:
             text,
             self.settings.max_context_tokens,
         )
-        self.usage["prompt_tokens"] += sum(len(m["content"]) // 4 for m in messages)
+        prompt_tokens = sum(estimate_tokens(m["content"]) for m in messages)
 
         splitter = SentenceSplitter()
         spoken: list[str] = []
@@ -119,7 +127,6 @@ class Session:
                 voice = voice_for(detect_language(sentence), self.settings.voices)
                 await self._set_state(State.SPEAKING)
             spoken.append(sentence)
-            self.usage["tts_chars"] += len(sentence)
             async for pcm_chunk in self.tts.synthesise(sentence, voice):
                 await self.transport.send_bytes(pcm_chunk)
 
@@ -129,9 +136,15 @@ class Session:
         for sentence in splitter.flush():
             await say(sentence)
 
+        reply = " ".join(spoken)
         self.history.append({"role": "user", "content": text})
-        self.history.append({"role": "assistant", "content": " ".join(spoken)})
-        self.usage["turns"] += 1
+        self.history.append({"role": "assistant", "content": reply})
+        self.usage.add_turn(
+            audio_seconds=transcript.seconds,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=estimate_tokens(reply),
+            tts_chars=sum(len(s) for s in spoken),
+        )
 
     # -- helpers -----------------------------------------------------------
 

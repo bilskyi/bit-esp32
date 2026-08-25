@@ -61,3 +61,19 @@ class FakeTTS:
     @property
     def voices(self) -> list[str]:
         return [v for _, v in self.spoken]
+
+
+class FakeStore:
+    def __init__(self, facts: list[str] | None = None) -> None:
+        self.facts = {"default": list(facts or [])}
+        self.added: list[tuple[str, list[str]]] = []
+        self.usage_logged: list = []
+
+    async def recent_facts(self, device_id: str, limit: int = 20) -> list[str]:
+        return list(self.facts.get(device_id, []))
+
+    async def add_facts(self, device_id: str, facts: list[str]) -> None:
+        self.added.append((device_id, facts))
+
+    async def log_usage(self, device_id: str, usage) -> None:
+        self.usage_logged.append((device_id, usage))

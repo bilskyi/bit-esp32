@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from server.config import Settings
 from server.session import Session
 from tests.fakes import FakeLLM, FakeSTT, FakeTransport, FakeTTS
@@ -132,3 +134,67 @@ async def test_a_stuck_button_ends_the_utterance_without_a_release():
     await asyncio.sleep(0.25)
     assert transport.states[-1] == "idle"
     assert "done" in transport.types
+
+
+async def test_remembered_facts_reach_the_system_prompt():
+    from tests.fakes import FakeStore
+
+    llm = FakeLLM()
+    transport = FakeTransport()
+    session = Session(
+        transport=transport,
+        stt=FakeSTT(),
+        llm=llm,
+        tts=FakeTTS(),
+        settings=Settings(_env_file=None),
+        store=FakeStore(["Lives in Kyiv"]),
+    )
+    await session.load_memory()
+    await utter(session)
+    assert "Lives in Kyiv" in llm.prompts[0][0]["content"]
+
+
+async def test_finish_extracts_and_stores_facts():
+    from tests.fakes import FakeStore
+
+    store = FakeStore()
+    llm = FakeLLM("Добре.")
+    llm.completions = ['["Likes short answers"]']
+    session, _ = build(llm=llm)
+    session.store = store
+    await utter(session)
+    llm.completions = ['["Likes short answers"]']
+    await session.finish()
+    assert store.added == [("default", ["Likes short answers"])]
+
+
+async def test_finish_logs_usage():
+    from tests.fakes import FakeStore
+
+    store = FakeStore()
+    llm = FakeLLM("Добре.")
+    session, _ = build(llm=llm)
+    session.store = store
+    await utter(session)
+    llm.completions = ["[]"]
+    await session.finish()
+    assert len(store.usage_logged) == 1
+    assert store.usage_logged[0][1].turns == 1
+
+
+async def test_finish_on_an_empty_session_stores_nothing():
+    from tests.fakes import FakeStore
+
+    store = FakeStore()
+    session, _ = build()
+    session.store = store
+    await session.finish()
+    assert store.added == [] and store.usage_logged == []
+
+
+async def test_usage_counts_audio_seconds_and_tts_chars():
+    session, _ = build(llm=FakeLLM("Добре."))
+    await utter(session, audio=b"\x00\x01" * 16000)  # 1 second
+    assert session.usage.turns == 1
+    assert session.usage.audio_seconds == pytest.approx(1.0)
+    assert session.usage.tts_chars == len("Добре.")

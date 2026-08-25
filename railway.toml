@@ -1,0 +1,11 @@
+[build]
+builder = "nixpacks"
+
+[deploy]
+startCommand = "uvicorn server.main:app --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/healthz"
+healthcheckTimeout = 30
+restartPolicyType = "on_failure"
+
+# SQLite lives on disk. Without a volume mounted at /data the memory database
+# is wiped on every redeploy — attach one and set DB_PATH=/data/voice.db.

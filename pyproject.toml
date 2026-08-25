@@ -25,6 +25,12 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+filterwarnings = [
+    "error",
+    # starlette's TestClient still imports httpx; nothing we can do from here.
+    "ignore:Using `httpx` with `starlette.testclient`:DeprecationWarning",
+    "ignore:Using `httpx` with `starlette.testclient`:UserWarning",
+]
 
 [tool.uv]
 package = false
