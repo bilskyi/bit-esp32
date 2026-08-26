@@ -77,3 +77,22 @@ class FakeStore:
 
     async def log_usage(self, device_id: str, usage) -> None:
         self.usage_logged.append((device_id, usage))
+
+
+class SlowTTS:
+    """Yields audio slowly, so a reply can be interrupted part-way through."""
+
+    def __init__(self, chunks: int = 20, delay: float = 0.02) -> None:
+        self.chunks = chunks
+        self.delay = delay
+        self.emitted = 0
+        self.finished = 0
+
+    async def synthesise(self, text: str, voice: str):
+        import asyncio
+
+        for _ in range(self.chunks):
+            await asyncio.sleep(self.delay)
+            self.emitted += 1
+            yield b"\x11\x22" * 8
+        self.finished += 1

@@ -115,6 +115,8 @@ def create_app(settings=None, stt=None, llm=None, tts=None, store=None) -> FastA
                     await session.on_start(control.get("codec", "pcm16"))
                 elif kind == "end":
                     await session.on_end()
+                elif kind == "cancel":
+                    await session.on_cancel()
                 else:
                     log.debug("ignoring control message %r", kind)
         except WebSocketDisconnect:

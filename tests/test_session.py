@@ -1,10 +1,11 @@
 import asyncio
+import time
 
 import pytest
 
 from server.config import Settings
-from server.session import Session
-from tests.fakes import FakeLLM, FakeSTT, FakeTransport, FakeTTS
+from server.session import Session, State
+from tests.fakes import FakeLLM, FakeSTT, FakeTransport, FakeTTS, SlowTTS
 
 
 def build(stt=None, llm=None, tts=None, **kw):
@@ -23,6 +24,9 @@ async def utter(session, audio=b"\x00\x01" * 1600):
     await session.on_start()
     await session.on_audio(audio)
     await session.on_end()
+    # on_end detaches the reply so the socket loop can still hear "cancel";
+    # a test driving the session directly has to wait for it.
+    await session.wait_for_reply()
 
 
 async def test_start_announces_listening():
@@ -109,6 +113,7 @@ async def test_utterance_is_capped_so_a_stuck_button_cannot_grow_forever():
     for _ in range(10):
         await session.on_audio(b"\x00\x01" * 5000)  # 10 KB each, 100 KB total
     await session.on_end()
+    await session.wait_for_reply()
     assert stt.received == [32000]
 
 
@@ -198,3 +203,66 @@ async def test_usage_counts_audio_seconds_and_tts_chars():
     assert session.usage.turns == 1
     assert session.usage.audio_seconds == pytest.approx(1.0)
     assert session.usage.tts_chars == len("Добре.")
+
+
+async def test_cancel_stops_a_reply_part_way_through():
+    """The user pressed the button while it was talking: stop talking."""
+    tts = SlowTTS(chunks=50, delay=0.01)
+    session, transport = build(tts=tts)
+    await session.on_start()
+    await session.on_audio(b"\x00\x01" * 1600)
+    await session.on_end()
+
+    await asyncio.sleep(0.05)  # let a little audio out
+    await session.on_cancel()
+
+    emitted_at_cancel = tts.emitted
+    await asyncio.sleep(0.1)  # nothing more should appear afterwards
+    assert tts.emitted == emitted_at_cancel
+    assert tts.finished == 0, "synthesis should not have run to completion"
+
+
+async def test_cancel_returns_the_session_to_idle():
+    tts = SlowTTS(chunks=50, delay=0.01)
+    session, _ = build(tts=tts)
+    await session.on_start()
+    await session.on_audio(b"\x00\x01" * 1600)
+    await session.on_end()
+    await asyncio.sleep(0.05)
+
+    await session.on_cancel()
+    assert session.state is State.IDLE
+
+
+async def test_a_press_during_a_reply_interrupts_and_listens_again():
+    tts = SlowTTS(chunks=50, delay=0.01)
+    session, _ = build(tts=tts)
+    await session.on_start()
+    await session.on_audio(b"\x00\x01" * 1600)
+    await session.on_end()
+    await asyncio.sleep(0.05)
+
+    # No explicit cancel: starting again while speaking must interrupt.
+    await session.on_start()
+    assert session.state is State.LISTENING
+    assert tts.finished == 0
+
+
+async def test_cancel_when_nothing_is_playing_is_harmless():
+    session, _ = build()
+    await session.on_cancel()
+    assert session.state is State.IDLE
+
+
+async def test_the_socket_loop_is_not_blocked_while_a_reply_plays():
+    """on_end must return promptly, or "cancel" could never be read."""
+    tts = SlowTTS(chunks=100, delay=0.01)  # a full second of synthesis
+    session, _ = build(tts=tts)
+    await session.on_start()
+    await session.on_audio(b"\x00\x01" * 1600)
+
+    started = time.monotonic()
+    await session.on_end()
+    assert time.monotonic() - started < 0.2
+
+    await session.on_cancel()

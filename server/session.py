@@ -6,6 +6,7 @@ state is dropped rather than queued.
 """
 
 import asyncio
+import contextlib
 import logging
 import time
 from enum import Enum
@@ -55,6 +56,7 @@ class Session:
         self._buf = bytearray()
         self._codec = "pcm16"
         self._adpcm = None
+        self._reply: asyncio.Task | None = None
         self._watchdog: asyncio.Task | None = None
 
     async def load_memory(self) -> None:
@@ -64,6 +66,11 @@ class Session:
     # -- events from the device -------------------------------------------
 
     async def on_start(self, codec: str = "pcm16") -> None:
+        # A press during a reply is an interruption, not a mistake: stop
+        # talking and listen. The device mutes itself before sending this, so
+        # by the time it arrives the speaker is already quiet.
+        if self.state in (State.THINKING, State.SPEAKING):
+            await self.on_cancel()
         if self.state is not State.IDLE:
             log.debug("ignoring start in state %s", self.state)
             return
@@ -107,17 +114,54 @@ class Session:
             log.info("dumped %d bytes (%.2f s) -> %s",
                      len(pcm), len(pcm) / 2 / self.settings.sample_rate, path)
 
+        # The reply runs as its own task rather than inline.
+        #
+        # on_end is awaited from the socket's receive loop, so answering inline
+        # meant nothing else could be read for the several seconds a reply
+        # takes - including the request to stop talking. Detaching it keeps the
+        # loop free to hear "cancel" while the reply is still being spoken.
+        self._reply = asyncio.create_task(self._run_reply(pcm))
+
+    async def _run_reply(self, pcm: bytes) -> None:
         try:
             await self._respond(pcm)
+        except asyncio.CancelledError:
+            log.info("reply cancelled by the device")
+            raise
         except Exception:
             log.exception("pipeline failed")
         finally:
-            await self.transport.send_json({"type": "done"})
-            await self._set_state(State.IDLE)
+            # The device has already stopped playing when it cancels, but it
+            # still needs "done" to re-arm, and the socket may be gone.
+            with contextlib.suppress(Exception):
+                await self.transport.send_json({"type": "done"})
+            with contextlib.suppress(Exception):
+                await self._set_state(State.IDLE)
+
+    async def wait_for_reply(self) -> None:
+        """Block until the reply in progress finishes.
+
+        The socket loop never needs this - it wants to stay free - but a caller
+        driving the session directly, a test or the laptop simulator, does.
+        """
+        task = self._reply
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    async def on_cancel(self) -> None:
+        """Stop the reply in progress. The user pressed the button to interrupt."""
+        task, self._reply = self._reply, None
+        if task is None or task.done():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
 
     async def finish(self) -> None:
         """Close out the session: extract durable facts, then log usage."""
         self._cancel_watchdog()
+        await self.on_cancel()
         if self.store is None:
             return
         if self.history:

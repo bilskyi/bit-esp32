@@ -133,6 +133,8 @@ static volatile uint32_t s_slowest_send = 0;
 static volatile TickType_t s_last_activity = 0;
 // Debounced button state, owned by button_task.
 static volatile bool s_button_down = false;
+// Set by net_task when the user presses during a reply; audio_out acts on it.
+static volatile bool s_abort_playback = false;
 
 static i2s_chan_handle_t s_tx;
 static i2s_chan_handle_t s_rx;
@@ -549,6 +551,17 @@ static void audio_out_task(void *arg) {
     uint32_t starved = 0;  // times the buffer ran dry mid-reply
 
     while (true) {
+        if (s_abort_playback) {
+            // Mute before discarding, so nothing half-written escapes.
+            amp_enable(false);
+            xStreamBufferReset(s_play_buf);
+            playing = false;
+            s_reply_finished = false;
+            s_abort_playback = false;
+            ESP_LOGI(TAG, "playback aborted");
+            continue;
+        }
+
         size_t got = xStreamBufferReceive(s_play_buf, coded, sizeof(coded), pdMS_TO_TICKS(20));
 
         if (got > 0) {
@@ -674,10 +687,22 @@ static void net_task(void *arg) {
         if (down != held) {
             held = down;
 
-            if (held && s_state != ST_IDLE) {
-                // Pressing during a reply is not a fault, but it does nothing,
-                // and saying so beats leaving an empty log behind.
-                ESP_LOGW(TAG, "press ignored: still in state %d", (int)s_state);
+            if (held && (s_state == ST_SPEAKING || s_state == ST_THINKING) &&
+                esp_websocket_client_is_connected(s_ws)) {
+                // A press during a reply means "stop, I want to ask again".
+                //
+                // Silence the speaker first and tell the server second: the
+                // user should hear the interruption immediately, not after a
+                // round trip. The spec rules out barge-in, but that is about
+                // detecting speech during playback, which needs echo
+                // cancellation. A deliberate button press needs none.
+                ESP_LOGI(TAG, "interrupted while in state %d", (int)s_state);
+                s_abort_playback = true;
+                esp_websocket_client_send_text(s_ws, "{\"type\":\"cancel\"}", 17,
+                                               SEND_TIMEOUT);
+                // Let audio_out mute and drain before the new utterance opens.
+                vTaskDelay(pdMS_TO_TICKS(40));
+                s_state = ST_IDLE;
             } else if (held && !esp_websocket_client_is_connected(s_ws)) {
                 // The keepalive can take the better part of a minute to notice
                 // a link that died quietly, and every press until then vanishes
