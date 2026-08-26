@@ -90,6 +90,8 @@ static volatile uint32_t s_dropped_blocks = 0;
 static volatile uint32_t s_sent_bytes = 0;
 static volatile uint32_t s_send_failures = 0;
 static volatile uint32_t s_play_dropped = 0;
+// Tick of the last sign of life from the server, for the stuck-state timer.
+static volatile TickType_t s_last_activity = 0;
 
 static i2s_chan_handle_t s_tx;
 static i2s_chan_handle_t s_rx;
@@ -238,12 +240,18 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
             s_state = ST_IDLE;
             break;
         case WEBSOCKET_EVENT_ERROR:
-            ESP_LOGE(TAG, "socket error: esp_tls=%d sock_errno=%d heap %lu",
+            // The client fills data_ptr with a readable description of what
+            // went wrong. The numeric fields alone were not enough to identify
+            // this failure across several sessions.
+            ESP_LOGE(TAG, "socket error type=%d esp_err=%d sock_errno=%d heap %lu: %.*s",
+                     (int)e->error_handle.error_type,
                      e->error_handle.esp_tls_last_esp_err,
                      e->error_handle.esp_transport_sock_errno,
-                     (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
+                     (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DEFAULT),
+                     e->data_len, e->data_ptr ? e->data_ptr : "");
             break;
         case WEBSOCKET_EVENT_DATA:
+            s_last_activity = xTaskGetTickCount();
             if (e->op_code == 0x02) {  // binary: reply audio
                 // Block rather than drop. The server synthesises far faster
                 // than real time - a 7-second reply arrives in about two - so
@@ -279,6 +287,11 @@ static void ws_start(void) {
         // Must exceed the chunk size below, or a send can wedge behind an
         // internal buffer that is smaller than what it is being handed.
         .buffer_size = 4096,
+        // Give the keepalive room to breathe while the uplink is saturated.
+        // The default 10 s is measured from a PING that our own traffic can
+        // delay, and missing the window aborts an otherwise healthy socket.
+        .ping_interval_sec = 15,
+        .pingpong_timeout_sec = 30,
     };
 
     // Auth is a bearer token in the handshake; an open socket on a public URL
@@ -390,18 +403,26 @@ static void net_task(void *arg) {
         const bool down = gpio_get_level(PIN_BUTTON) == 0;
         const TickType_t now = xTaskGetTickCount();
 
-        // Last-resort unwedge. Any state but IDLE depends on the server
-        // answering; if it never does, the button must still come back to life
-        // rather than requiring a power cycle.
+        // Last-resort unwedge, measured from the last thing the server sent
+        // rather than from the button press.
+        //
+        // A reply drains at playback speed, so a long answer legitimately
+        // takes fifteen or twenty seconds from press to silence. Timing from
+        // the press meant this fired in the middle of audio that was playing
+        // perfectly well and cut it off. Only genuine silence from the server
+        // counts as stuck.
         if (s_state == ST_IDLE) {
             busy_since = now;
-        } else if ((now - busy_since) > pdMS_TO_TICKS(STUCK_TIMEOUT_MS)) {
-            ESP_LOGW(TAG, "stuck in state %d for %d s, forcing idle", (int)s_state,
-                     STUCK_TIMEOUT_MS / 1000);
+            s_last_activity = now;
+        } else if ((now - s_last_activity) > pdMS_TO_TICKS(STUCK_TIMEOUT_MS)) {
+            ESP_LOGW(TAG, "no data from server for %d s in state %d, forcing idle",
+                     STUCK_TIMEOUT_MS / 1000, (int)s_state);
             s_reply_finished = false;
             s_state = ST_IDLE;
             busy_since = now;
+            s_last_activity = now;
         }
+        (void)busy_since;
 
         if (down != held && (now - changed) > pdMS_TO_TICKS(DEBOUNCE_MS)) {
             held = down;
@@ -413,6 +434,7 @@ static void net_task(void *arg) {
                 s_sent_bytes = 0;
                 s_send_failures = 0;
                 s_state = ST_LISTENING;
+                s_last_activity = now;
                 esp_websocket_client_send_text(s_ws, "{\"type\":\"start\"}", 16, SEND_TIMEOUT);
                 ESP_LOGI(TAG, "listening");
             } else if (!held && s_state == ST_LISTENING) {
@@ -423,6 +445,7 @@ static void net_task(void *arg) {
                 }
                 esp_websocket_client_send_text(s_ws, "{\"type\":\"end\"}", 14, SEND_TIMEOUT);
                 s_state = ST_THINKING;
+                s_last_activity = now;
                 ESP_LOGI(TAG, "thinking: sent %lu B (%.1f s), %lu dropped, %lu failures, heap %lu",
                          (unsigned long)s_sent_bytes, s_sent_bytes / 32000.0f,
                          (unsigned long)s_dropped_blocks, (unsigned long)s_send_failures,

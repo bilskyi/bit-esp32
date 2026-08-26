@@ -10,3 +10,12 @@ CONFIG_FREERTOS_HZ=1000
 
 # printf() is called from the audio loop with a double in it.
 CONFIG_NEWLIB_STDOUT_LINE_ENDING_CRLF=y
+
+# Separate the websocket client's send and receive locks.
+#
+# By default one lock covers both. Streaming microphone audio at 32 KB/s holds
+# it almost continuously, so the client's own task cannot process an incoming
+# PONG in time, decides the peer is gone, and aborts the connection. That is
+# the esp_tls=97 disconnect: it only ever happened while uploading, never idle.
+CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y
+CONFIG_ESP_WS_CLIENT_TX_LOCK_TIMEOUT_MS=2000
