@@ -28,6 +28,7 @@
 #include "esp_log.h"
 #include "esp_websocket_client.h"
 #include "esp_heap_caps.h"
+#include "esp_system.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -43,6 +44,15 @@
 #define PIN_DOUT GPIO_NUM_7
 #define PIN_MUTE GPIO_NUM_10
 #define PIN_BUTTON GPIO_NUM_3
+// Onboard LED. Verified on this board: it lights when the pin is driven LOW.
+//
+// GPIO 8 is a strapping pin, which is why the spec warns against using it.
+// That warning is about the level at reset, and idle here is LED off, which
+// leaves the pin HIGH - the level a normal boot wants. Only pressing the
+// button during a reset could interfere, and that is already true of BOOT.
+#define PIN_LED GPIO_NUM_8
+#define LED_ON 0
+#define LED_OFF 1
 
 #define SAMPLE_RATE 16000
 #define BLOCK_SAMPLES 512
@@ -135,6 +145,8 @@ static volatile TickType_t s_last_activity = 0;
 static volatile bool s_button_down = false;
 // Set by net_task when the user presses during a reply; audio_out acts on it.
 static volatile bool s_abort_playback = false;
+// When the socket last went away, for the reconnect supervisor.
+static volatile TickType_t s_offline_since = 0;
 
 static i2s_chan_handle_t s_tx;
 static i2s_chan_handle_t s_rx;
@@ -412,6 +424,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
     switch (id) {
         case WEBSOCKET_EVENT_CONNECTED:
             ESP_LOGI(TAG, "socket connected");
+            s_offline_since = 0;
             break;
         case WEBSOCKET_EVENT_DISCONNECTED:
             ESP_LOGW(TAG,
@@ -493,6 +506,99 @@ static void ws_start(void) {
     s_ws = esp_websocket_client_init(&cfg);
     ESP_ERROR_CHECK(esp_websocket_register_events(s_ws, WEBSOCKET_EVENT_ANY, ws_event, NULL));
     ESP_ERROR_CHECK(esp_websocket_client_start(s_ws));
+}
+
+// --------------------------------------------------------------------- led
+
+// One tick is 100 ms; every pattern below is expressed in ticks.
+static void led_task(void *arg) {
+    gpio_config_t cfg = {
+        .pin_bit_mask = 1ULL << PIN_LED,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&cfg));
+    gpio_set_level(PIN_LED, LED_OFF);
+
+    uint32_t tick = 0;
+    while (true) {
+        bool lit;
+
+        if (s_ws == NULL || !esp_websocket_client_is_connected(s_ws)) {
+            // Two quick blinks every two seconds: not connected, a press will
+            // go nowhere. Worth showing, because the keepalive can take most
+            // of a minute to notice a link that died quietly.
+            const uint32_t phase = tick % 20;
+            lit = (phase == 0 || phase == 2);
+        } else {
+            switch (s_state) {
+                case ST_LISTENING:
+                    lit = true;  // steady: talk now
+                    break;
+                case ST_THINKING:
+                    lit = (tick % 2) == 0;  // 5 Hz: working
+                    break;
+                case ST_SPEAKING:
+                    lit = (tick % 10) < 5;  // 1 Hz: talking, press to interrupt
+                    break;
+                case ST_IDLE:
+                default:
+                    lit = false;  // dark: ready
+                    break;
+            }
+        }
+
+        gpio_set_level(PIN_LED, lit ? LED_ON : LED_OFF);
+        vTaskDelay(pdMS_TO_TICKS(100));
+        tick++;
+    }
+}
+
+// Drags the socket back when the client's own retry gives up.
+//
+// Observed: after a server restart, or after a link stall long enough to kill
+// the connection, the client would sit reporting "not connected" indefinitely
+// while the device looked broken from outside. Its internal retry is not
+// always enough, so this tears the client down and builds it again - and if
+// even that fails for long enough, reboots, because a device that recovers by
+// itself in ninety seconds beats one that waits for a human.
+#define RECONNECT_AFTER_MS 15000
+#define REBOOT_AFTER_MS 90000
+
+static void link_task(void *arg) {
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+
+        if (s_ws == NULL) continue;
+
+        if (esp_websocket_client_is_connected(s_ws)) {
+            s_offline_since = 0;
+            continue;
+        }
+
+        const TickType_t now = xTaskGetTickCount();
+        if (s_offline_since == 0) {
+            s_offline_since = now;
+            continue;
+        }
+
+        const uint32_t down_ms = (uint32_t)(now - s_offline_since) * portTICK_PERIOD_MS;
+
+        if (down_ms > REBOOT_AFTER_MS) {
+            ESP_LOGE(TAG, "offline for %lu s, restarting", (unsigned long)(down_ms / 1000));
+            esp_restart();
+        }
+
+        if (down_ms > RECONNECT_AFTER_MS) {
+            ESP_LOGW(TAG, "offline for %lu s, rebuilding the client",
+                     (unsigned long)(down_ms / 1000));
+            esp_websocket_client_stop(s_ws);
+            esp_websocket_client_start(s_ws);
+            s_offline_since = now;  // give the fresh client its own window
+        }
+    }
 }
 
 // ------------------------------------------------------------------- tasks
@@ -806,6 +912,8 @@ void app_main(void) {
     xTaskCreate(audio_out_task, "audio_out", 4096, NULL, 5, NULL);
     xTaskCreate(net_task, "net", 4096, NULL, 4, NULL);
     xTaskCreate(button_task, "button", 2048, NULL, 6, NULL);
+    xTaskCreate(led_task, "led", 2048, NULL, 2, NULL);
+    xTaskCreate(link_task, "link", 3072, NULL, 3, NULL);
 
     ESP_LOGI(TAG, "ready - hold the button on GPIO%d and speak", PIN_BUTTON);
 }
