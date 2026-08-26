@@ -1,0 +1,707 @@
+<title>Глаза — предпросмотр панели</title>
+
+<style>
+  /* Palette taken from the hardware: an SSD1306 is near-black glass emitting a
+     cool white, so the neutrals carry a blue bias and the only warm thing on
+     the page is the amber that means "running". */
+  :root {
+    --bg: #eceff4;
+    --surface: #ffffff;
+    --sunk: #e2e7ee;
+    --ink: #0f141b;
+    --ink-2: #525d6b;
+    --ink-3: #8a94a2;
+    --rule: #d3dae3;
+    --rule-soft: #e4e9f0;
+    --live: #9a5605;
+    --live-mark: #e8912a;
+    --glass: #05080c;
+    --grid: rgba(190, 225, 255, 0.055);
+    --emit: #cfeaff;
+    --shadow: 0 1px 2px rgba(15, 20, 27, .05), 0 8px 24px -12px rgba(15, 20, 27, .18);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0d1116;
+      --surface: #151b22;
+      --sunk: #101519;
+      --ink: #e7edf4;
+      --ink-2: #97a3b2;
+      --ink-3: #6a7684;
+      --rule: #242d37;
+      --rule-soft: #1c242c;
+      --live: #f0a63f;
+      --live-mark: #e8912a;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 30px -14px rgba(0, 0, 0, .7);
+    }
+  }
+
+  /* The viewer's own toggle has to win over the OS preference, both ways. */
+  :root[data-theme="dark"] {
+    --bg: #0d1116;
+    --surface: #151b22;
+    --sunk: #101519;
+    --ink: #e7edf4;
+    --ink-2: #97a3b2;
+    --ink-3: #6a7684;
+    --rule: #242d37;
+    --rule-soft: #1c242c;
+    --live: #f0a63f;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 30px -14px rgba(0, 0, 0, .7);
+  }
+  :root[data-theme="light"] {
+    --bg: #eceff4;
+    --surface: #ffffff;
+    --sunk: #e2e7ee;
+    --ink: #0f141b;
+    --ink-2: #525d6b;
+    --ink-3: #8a94a2;
+    --rule: #d3dae3;
+    --rule-soft: #e4e9f0;
+    --live: #9a5605;
+    --shadow: 0 1px 2px rgba(15, 20, 27, .05), 0 8px 24px -12px rgba(15, 20, 27, .18);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 400 16px/1.55 "Helvetica Neue", Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .mono {
+    font-family: ui-monospace, "SF Mono", Menlo, Monaco, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .wrap {
+    max-width: 1140px;
+    margin: 0 auto;
+    padding: clamp(1.25rem, 3vw, 2.75rem) clamp(1rem, 3vw, 2rem) 4rem;
+  }
+
+  /* ---------------------------------------------------------- masthead */
+
+  .masthead {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 1.25rem 2rem;
+    padding-bottom: 1.1rem;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  h1 {
+    margin: 0;
+    font-size: clamp(1.75rem, 4.2vw, 2.6rem);
+    font-weight: 700;
+    letter-spacing: -0.033em;
+    line-height: 1.02;
+    text-wrap: balance;
+  }
+
+  .kicker {
+    display: block;
+    margin-bottom: .5rem;
+    font-family: ui-monospace, "SF Mono", Menlo, Monaco, monospace;
+    font-size: .68rem;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+
+  .readout {
+    display: grid;
+    grid-template-columns: repeat(4, auto);
+    gap: .15rem 1.35rem;
+    font-family: ui-monospace, "SF Mono", Menlo, Monaco, monospace;
+    font-variant-numeric: tabular-nums;
+    font-size: .8rem;
+  }
+  .readout dt {
+    grid-row: 1;
+    font-size: .62rem;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .readout dd { grid-row: 2; margin: 0; color: var(--ink); }
+
+  /* ------------------------------------------------------------- bench */
+
+  .bench {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 19.5rem;
+    gap: 1.75rem;
+    margin-top: 1.75rem;
+    align-items: start;
+  }
+  @media (max-width: 900px) { .bench { grid-template-columns: minmax(0, 1fr); } }
+
+  .module {
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-radius: 4px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+
+  /* The panel itself. The canvas is transparent and only lit pixels are drawn,
+     so the CSS bloom lands on the pixels rather than on a black rectangle. */
+  .stage {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: clamp(1rem, 3.5vw, 2.25rem);
+    background: var(--glass);
+    background-image:
+      repeating-linear-gradient(to right, var(--grid) 0 1px, transparent 1px var(--cell, 6px)),
+      repeating-linear-gradient(to bottom, var(--grid) 0 1px, transparent 1px var(--cell, 6px));
+    background-position: var(--gx, 0) var(--gy, 0);
+  }
+  .stage canvas {
+    display: block;
+    filter: drop-shadow(0 0 5px rgba(140, 205, 255, .38));
+  }
+
+  /* ---------------------------------------------------------- transport */
+
+  .transport {
+    display: flex;
+    align-items: center;
+    gap: .85rem;
+    padding: .7rem .85rem;
+    border-top: 1px solid var(--rule);
+    background: var(--surface);
+    flex-wrap: wrap;
+  }
+
+  button {
+    font-family: ui-monospace, "SF Mono", Menlo, Monaco, monospace;
+    font-size: .74rem;
+    letter-spacing: .06em;
+    color: var(--ink-2);
+    background: var(--sunk);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: .36rem .6rem;
+    cursor: pointer;
+  }
+  button:hover { color: var(--ink); border-color: var(--ink-3); }
+  button:focus-visible { outline: 2px solid var(--live-mark); outline-offset: 2px; }
+  button[aria-pressed="true"] {
+    color: var(--live);
+    border-color: var(--live-mark);
+    background: color-mix(in srgb, var(--live-mark) 12%, var(--sunk));
+  }
+
+  #play { min-width: 5.4rem; }
+
+  input[type="range"] {
+    flex: 1 1 8rem;
+    min-width: 6rem;
+    accent-color: var(--live-mark);
+  }
+  input[type="range"]:focus-visible { outline: 2px solid var(--live-mark); outline-offset: 3px; }
+
+  .counter {
+    font-family: ui-monospace, "SF Mono", Menlo, Monaco, monospace;
+    font-variant-numeric: tabular-nums;
+    font-size: .74rem;
+    color: var(--ink-3);
+    white-space: nowrap;
+  }
+
+  .caption {
+    padding: .95rem 1.1rem 1.15rem;
+    border-top: 1px solid var(--rule-soft);
+  }
+  .caption h2 {
+    margin: 0 0 .3rem;
+    font-size: 1.05rem;
+    font-weight: 700;
+    letter-spacing: -0.012em;
+  }
+  .caption p {
+    margin: 0;
+    max-width: 62ch;
+    color: var(--ink-2);
+    font-size: .92rem;
+  }
+
+  /* -------------------------------------------------------- scene index */
+
+  .index { padding: .35rem 0; }
+  .index h3 {
+    margin: 0;
+    padding: .7rem 1rem .55rem;
+    font-family: ui-monospace, "SF Mono", Menlo, Monaco, monospace;
+    font-size: .62rem;
+    font-weight: 400;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    border-bottom: 1px solid var(--rule-soft);
+  }
+  .index ol { list-style: none; margin: 0; padding: 0; }
+  .index li { border-bottom: 1px solid var(--rule-soft); }
+  .index li:last-child { border-bottom: 0; }
+
+  .scene {
+    display: grid;
+    grid-template-columns: 1.9rem 1fr;
+    gap: .1rem .55rem;
+    width: 100%;
+    text-align: left;
+    background: none;
+    border: 0;
+    border-left: 2px solid transparent;
+    border-radius: 0;
+    padding: .5rem .9rem .55rem .8rem;
+    color: var(--ink-2);
+    font-family: inherit;
+    font-size: .875rem;
+    letter-spacing: 0;
+  }
+  .scene:hover { background: var(--sunk); color: var(--ink); border-color: transparent; }
+  .scene .n {
+    grid-row: 1 / span 2;
+    font-family: ui-monospace, "SF Mono", Menlo, Monaco, monospace;
+    font-variant-numeric: tabular-nums;
+    font-size: .68rem;
+    color: var(--ink-3);
+    padding-top: .18rem;
+  }
+  .scene .t { font-weight: 400; }
+  .scene .m {
+    font-family: ui-monospace, "SF Mono", Menlo, Monaco, monospace;
+    font-size: .65rem;
+    letter-spacing: .04em;
+    color: var(--ink-3);
+  }
+  .scene[aria-current="true"] {
+    border-left-color: var(--live-mark);
+    background: var(--sunk);
+    color: var(--ink);
+  }
+  .scene[aria-current="true"] .t { font-weight: 700; }
+  .scene[aria-current="true"] .n { color: var(--live); }
+
+  /* --------------------------------------------------------------- notes */
+
+  .notes {
+    margin-top: 2.25rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--rule);
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(15.5rem, 1fr));
+    gap: 1.5rem 2.25rem;
+  }
+  .notes section h4 {
+    margin: 0 0 .45rem;
+    font-family: ui-monospace, "SF Mono", Menlo, Monaco, monospace;
+    font-size: .62rem;
+    font-weight: 400;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+  .notes p, .notes ul { margin: 0 0 .6rem; font-size: .9rem; color: var(--ink-2); max-width: 46ch; }
+  .notes ul { padding-left: 1.05rem; }
+  .notes li { margin-bottom: .3rem; }
+  .notes code {
+    font-family: ui-monospace, "SF Mono", Menlo, Monaco, monospace;
+    font-size: .84em;
+    color: var(--ink);
+    background: var(--sunk);
+    border-radius: 2px;
+    padding: .06em .32em;
+  }
+  .notes strong { color: var(--ink); font-weight: 700; }
+
+  .hint {
+    margin-top: 1.75rem;
+    font-family: ui-monospace, "SF Mono", Menlo, Monaco, monospace;
+    font-size: .68rem;
+    letter-spacing: .04em;
+    color: var(--ink-3);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+
+<div class="wrap">
+  <header class="masthead">
+    <div>
+      <span class="kicker">SSD1306 · 128 × 64 · 1 бит · 25 к/с</span>
+      <h1>Глаза</h1>
+    </div>
+    <dl class="readout">
+      <dt>состояние</dt><dt>эмоция</dt><dt>кадр</dt><dt>пикселей</dt>
+      <dd id="r-state">idle</dd>
+      <dd id="r-emo">neutral</dd>
+      <dd id="r-frame">0</dd>
+      <dd id="r-lit">0</dd>
+    </dl>
+  </header>
+
+  <div class="bench">
+    <div class="module">
+      <div class="stage" id="stage"><canvas id="cv"></canvas></div>
+
+      <div class="transport">
+        <button id="play" aria-pressed="true">⏸ пауза</button>
+        <input type="range" id="scrub" min="0" value="0" step="1" aria-label="Кадр">
+        <span class="counter" id="counter">0000 / 0000</span>
+        <button class="spd" data-speed="0.25" aria-pressed="false">¼×</button>
+        <button class="spd" data-speed="0.5" aria-pressed="false">½×</button>
+        <button class="spd" data-speed="1" aria-pressed="true">1×</button>
+        <button id="grid" aria-pressed="true">сетка</button>
+      </div>
+
+      <div class="caption">
+        <h2 id="c-title">—</h2>
+        <p id="c-note">—</p>
+      </div>
+    </div>
+
+    <nav class="module index" aria-label="Сцены">
+      <h3>Сценарий</h3>
+      <ol id="scenes"></ol>
+    </nav>
+  </div>
+
+  <div class="notes">
+    <section>
+      <h4>Что это</h4>
+      <p>
+        Настоящий <code>face.c</code> из прошивки, собранный на ноутбуке и прогнанный
+        по сценарию. Не пересказ на JavaScript — тот разошёлся бы с оригиналом за день.
+        Каждый кадр здесь тот же, что уйдёт в панель.
+      </p>
+      <p>
+        Кадры хранятся как XOR к предыдущему, сжатый RLE: соседние кадры моргающего
+        глаза отличаются на пару сотен байт, а не на 1024.
+      </p>
+    </section>
+    <section>
+      <h4>Что уже проверено</h4>
+      <ul>
+        <li>Геометрия целочисленная, Q8 — у ESP32-C3 нет FPU.</li>
+        <li>Панель <strong>никогда не гаснет целиком</strong>: веко не доходит до конца, полоска ресниц остаётся.</li>
+        <li><code>annoyed</code> и <code>sad</code> — зеркальные наклоны век, и это отдельная проверка.</li>
+        <li>Анимация детерминирована: ни <code>rand()</code>, ни часов.</li>
+        <li>Переживает переполнение 32-битных тиков и десятиминутный простой задачи.</li>
+      </ul>
+    </section>
+    <section>
+      <h4>Чего ещё нет</h4>
+      <p>
+        Панель не подключена. Четыре провода: <strong>SDA — GPIO 0</strong>,
+        <strong>SCL — GPIO 1</strong>, питание, земля. После этого
+        <code>idf.py -DSKETCH=face</code> покажет весь этот сценарий на самом экране,
+        без WiFi и без сервера.
+      </p>
+      <p>
+        Прошивка опрашивает шину на старте: если экрана нет, задача лица не
+        запускается и устройство ведёт себя ровно как сегодня.
+      </p>
+    </section>
+  </div>
+
+  <p class="hint">пробел — пуск и пауза · ← → — по кадру · клик по сцене — переход</p>
+</div>
+
+<script>
+const DATA = /*__FACE_DATA__*/null;
+
+(function () {
+  "use strict";
+
+  const W = DATA.w, H = DATA.h, BYTES = W * (H / 8);
+
+  // -- decode the base64 payload and index each frame's delta ---------------
+  const bin = atob(DATA.data);
+  const raw = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) raw[i] = bin.charCodeAt(i);
+
+  const off = new Int32Array(DATA.frames);
+  const len = new Int32Array(DATA.frames);
+  {
+    let p = 0;
+    for (let i = 0; i < DATA.frames; i++) {
+      len[i] = raw[p] | (raw[p + 1] << 8);
+      off[i] = p + 2;
+      p += 2 + len[i];
+    }
+  }
+
+  const fb = new Uint8Array(BYTES);
+
+  function applyDelta(target, i) {
+    let p = off[i];
+    const end = p + len[i];
+    let pos = 0;
+    while (pos < BYTES && p < end) {
+      pos += raw[p++];
+      if (pos >= BYTES || p >= end) break;
+      const l = raw[p++];
+      for (let k = 0; k < l; k++) target[pos + k] ^= raw[p + k];
+      p += l;
+      pos += l;
+    }
+  }
+
+  const POP = new Uint8Array(256);
+  for (let i = 1; i < 256; i++) POP[i] = POP[i >> 1] + (i & 1);
+
+  // One walk of the whole stream does two jobs: it snapshots the start of each
+  // scene, so a seek replays at most one scene rather than the entire film, and
+  // it recomputes the checksum the generator printed. If those disagree, the
+  // payload did not survive the trip and everything below is fiction.
+  const snap = new Map();
+  let verified = true;
+  {
+    const scratch = new Uint8Array(BYTES);
+    let next = 0, hash = 2166136261, lit = 0;
+    for (let i = 0; i < DATA.frames; i++) {
+      if (next < DATA.scenes.length && DATA.scenes[next].start === i) {
+        snap.set(i, scratch.slice());
+        next++;
+      }
+      applyDelta(scratch, i);
+      for (let k = 0; k < BYTES; k++) {
+        hash = Math.imul(hash ^ scratch[k], 16777619);
+        lit += POP[scratch[k]];
+      }
+    }
+    verified = (hash >>> 0) === DATA.hash && lit === DATA.lit;
+  }
+
+  let current = -1;
+
+  function seek(n) {
+    n = Math.max(0, Math.min(DATA.frames - 1, n | 0));
+    if (n === current) return;
+    let from = 0;
+    if (current >= 0 && n > current) {
+      from = current + 1;
+    } else {
+      let best = 0;
+      for (const k of snap.keys()) if (k <= n && k >= best) best = k;
+      fb.set(snap.get(best) || new Uint8Array(BYTES));
+      from = best;
+    }
+    for (let i = from; i <= n; i++) applyDelta(fb, i);
+    current = n;
+  }
+
+  function litCount() {
+    let n = 0;
+    for (let i = 0; i < BYTES; i++) n += POP[fb[i]];
+    return n;
+  }
+
+  // -- canvas ---------------------------------------------------------------
+  const stage = document.getElementById("stage");
+  const cv = document.getElementById("cv");
+  const ctx = cv.getContext("2d");
+  let cell = 6, showGrid = true;
+
+  function fit() {
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const avail = stage.clientWidth - parseFloat(getComputedStyle(stage).paddingLeft) * 2;
+    cell = Math.max(2, Math.min(9, Math.floor(avail / W)));
+    const w = W * cell, h = H * cell;
+    cv.style.width = w + "px";
+    cv.style.height = h + "px";
+    cv.width = Math.round(w * dpr);
+    cv.height = Math.round(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    // Line the CSS grid up with the pixels the canvas is actually drawing.
+    stage.style.setProperty("--cell", cell + "px");
+    const rect = cv.getBoundingClientRect(), host = stage.getBoundingClientRect();
+    stage.style.setProperty("--gx", Math.round(rect.left - host.left) + "px");
+    stage.style.setProperty("--gy", Math.round(rect.top - host.top) + "px");
+    paint();
+  }
+
+  function paint() {
+    const w = W * cell, h = H * cell;
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = getComputedStyle(document.documentElement)
+      .getPropertyValue("--emit").trim() || "#cfeaff";
+    const size = (showGrid && cell >= 4) ? cell - 1 : cell;
+    for (let y = 0; y < H; y++) {
+      const page = (y >> 3) * W, mask = 1 << (y & 7), py = y * cell;
+      for (let x = 0; x < W; x++) {
+        if (fb[page + x] & mask) ctx.fillRect(x * cell, py, size, size);
+      }
+    }
+  }
+
+  // -- scene index ----------------------------------------------------------
+  const list = document.getElementById("scenes");
+  const buttons = DATA.scenes.map(function (sc, i) {
+    const li = document.createElement("li");
+    const b = document.createElement("button");
+    b.className = "scene";
+    b.type = "button";
+    b.innerHTML =
+      '<span class="n">' + String(i + 1).padStart(2, "0") + "</span>" +
+      '<span class="t"></span>' +
+      '<span class="m">' + sc.state + " · " + sc.emotion + "</span>";
+    b.querySelector(".t").textContent = sc.label;
+    b.addEventListener("click", function () { go(sc.start); });
+    li.appendChild(b);
+    list.appendChild(li);
+    return b;
+  });
+
+  function sceneAt(frame) {
+    let idx = 0;
+    for (let i = 0; i < DATA.scenes.length; i++) {
+      if (DATA.scenes[i].start <= frame) idx = i;
+    }
+    return idx;
+  }
+
+  // -- readout and transport ------------------------------------------------
+  const scrub = document.getElementById("scrub");
+  const counter = document.getElementById("counter");
+  const playBtn = document.getElementById("play");
+  const gridBtn = document.getElementById("grid");
+  const rState = document.getElementById("r-state");
+  const rEmo = document.getElementById("r-emo");
+  const rFrame = document.getElementById("r-frame");
+  const rLit = document.getElementById("r-lit");
+  const cTitle = document.getElementById("c-title");
+  const cNote = document.getElementById("c-note");
+
+  scrub.max = String(DATA.frames - 1);
+
+  let shownScene = -1;
+  const pad = (n, w) => String(n).padStart(w, "0");
+
+  function render() {
+    paint();
+    const s = sceneAt(current);
+    if (s !== shownScene) {
+      shownScene = s;
+      const sc = DATA.scenes[s];
+      cTitle.textContent = sc.label;
+      cNote.textContent = sc.note;
+      rState.textContent = sc.state;
+      rEmo.textContent = sc.emotion;
+      buttons.forEach(function (b, i) { b.setAttribute("aria-current", i === s ? "true" : "false"); });
+      buttons[s].scrollIntoView({ block: "nearest" });
+    }
+    rFrame.textContent = pad(current, 4);
+    rLit.textContent = pad(litCount(), 4);
+    counter.textContent = pad(current, 4) + " / " + pad(DATA.frames - 1, 4);
+    scrub.value = String(current);
+  }
+
+  function go(n) {
+    seek(n);
+    render();
+  }
+
+  let playing = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  let speed = 1, acc = 0, last = 0;
+
+  function setPlaying(v) {
+    playing = v;
+    playBtn.textContent = v ? "⏸ пауза" : "▶ пуск";
+    playBtn.setAttribute("aria-pressed", v ? "true" : "false");
+    last = 0;
+  }
+  setPlaying(playing);
+
+  playBtn.addEventListener("click", function () { setPlaying(!playing); });
+
+  gridBtn.addEventListener("click", function () {
+    showGrid = !showGrid;
+    gridBtn.setAttribute("aria-pressed", showGrid ? "true" : "false");
+    stage.style.setProperty("--grid", showGrid ? "rgba(190,225,255,0.055)" : "transparent");
+    paint();
+  });
+
+  document.querySelectorAll(".spd").forEach(function (b) {
+    b.addEventListener("click", function () {
+      speed = parseFloat(b.dataset.speed);
+      document.querySelectorAll(".spd").forEach(function (o) {
+        o.setAttribute("aria-pressed", o === b ? "true" : "false");
+      });
+    });
+  });
+
+  scrub.addEventListener("input", function () {
+    setPlaying(false);
+    go(parseInt(scrub.value, 10));
+  });
+
+  document.addEventListener("keydown", function (e) {
+    if (e.target instanceof HTMLInputElement && e.key !== " ") return;
+    if (e.key === " ") { e.preventDefault(); setPlaying(!playing); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); setPlaying(false); go(current + 1); }
+    else if (e.key === "ArrowLeft") { e.preventDefault(); setPlaying(false); go(current - 1); }
+  });
+
+  function loop(now) {
+    if (playing) {
+      if (!last) last = now;
+      acc += (now - last) * speed;
+      last = now;
+      const step = 1000 / DATA.fps;
+      if (acc >= step) {
+        let n = current;
+        while (acc >= step) { acc -= step; n++; }
+        go(n >= DATA.frames ? 0 : n);
+      }
+    }
+    requestAnimationFrame(loop);
+  }
+
+  if (!verified) {
+    const warn = document.createElement("p");
+    warn.className = "hint";
+    warn.style.color = "var(--live)";
+    warn.textContent =
+      "контрольная сумма не сошлась: кадры повреждены при передаче, " +
+      "то, что ниже, смотреть нельзя";
+    document.querySelector(".masthead").after(warn);
+  }
+
+  // #s=<scene> or #f=<frame>, so a particular moment can be linked to.
+  function fromHash() {
+    const m = /^#([sf])=(\d+)$/.exec(location.hash);
+    if (!m) return false;
+    const n = parseInt(m[2], 10);
+    if (m[1] === "s") {
+      const sc = DATA.scenes[Math.min(n, DATA.scenes.length - 1)];
+      go(sc.start + Math.min(20, sc.count - 1));
+    } else {
+      go(n);
+    }
+    return true;
+  }
+  window.addEventListener("hashchange", function () {
+    if (fromHash()) setPlaying(false);
+  });
+
+  new ResizeObserver(fit).observe(stage);
+  fit();
+  if (fromHash()) setPlaying(false);
+  else go(0);
+  requestAnimationFrame(loop);
+})();
+</script>
