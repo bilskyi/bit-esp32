@@ -67,11 +67,24 @@
 // Never block forever on a send. The button is polled in the same loop, so an
 // unbounded wait means a release is never noticed and the device stays stuck
 // in "listening" until it is reset - which is exactly what happened.
-#define SEND_TIMEOUT pdMS_TO_TICKS(400)
+// Sends wait indefinitely on purpose.
+//
+// A bounded wait looks safer and is not: the timeout is handed straight to the
+// transport's poll_write, and a poll that expires makes esp_transport_write()
+// return 0, which the client treats as a fatal write error and tears the
+// connection down. A full TCP send buffer for a few hundred milliseconds is
+// ordinary on WiFi, so a 400 ms bound killed roughly every other upload.
+//
+// Blocking here is safe because the button is sampled by its own task, so a
+// stalled send can no longer hide a release.
+#define SEND_TIMEOUT portMAX_DELAY
 // Longest the device will wait on the server before re-arming the button.
 #define STUCK_TIMEOUT_MS 20000
 // How long the socket task may wait for room in the play buffer.
-#define PLAY_SEND_TIMEOUT pdMS_TO_TICKS(3000)
+// Short on purpose. The server now paces the reply to roughly real time, so
+// the buffer should almost never be full; blocking this task for seconds left
+// the client stuck mid-frame and broke the read side instead.
+#define PLAY_SEND_TIMEOUT pdMS_TO_TICKS(500)
 #define DRAIN_MS 150  // let the DMA ring empty before cutting the amp
 
 static const char *TAG = "voice";
@@ -90,8 +103,11 @@ static volatile uint32_t s_dropped_blocks = 0;
 static volatile uint32_t s_sent_bytes = 0;
 static volatile uint32_t s_send_failures = 0;
 static volatile uint32_t s_play_dropped = 0;
+static volatile uint32_t s_slowest_send = 0;
 // Tick of the last sign of life from the server, for the stuck-state timer.
 static volatile TickType_t s_last_activity = 0;
+// Debounced button state, owned by button_task.
+static volatile bool s_button_down = false;
 
 static i2s_chan_handle_t s_tx;
 static i2s_chan_handle_t s_rx;
@@ -392,15 +408,32 @@ static void audio_out_task(void *arg) {
     }
 }
 
+// Samples the button and nothing else, so its timing cannot be affected by a
+// send that is waiting on the network.
+static void button_task(void *arg) {
+    bool stable = false;
+    TickType_t changed = 0;
+
+    while (true) {
+        const bool down = gpio_get_level(PIN_BUTTON) == 0;
+        const TickType_t now = xTaskGetTickCount();
+        if (down != stable && (now - changed) > pdMS_TO_TICKS(DEBOUNCE_MS)) {
+            stable = down;
+            changed = now;
+            s_button_down = down;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+}
+
 static void net_task(void *arg) {
     static uint8_t chunk[1024];
     bool held = false;
-    TickType_t changed = 0;
 
     TickType_t busy_since = 0;
 
     while (true) {
-        const bool down = gpio_get_level(PIN_BUTTON) == 0;
+        const bool down = s_button_down;
         const TickType_t now = xTaskGetTickCount();
 
         // Last-resort unwedge, measured from the last thing the server sent
@@ -424,15 +457,15 @@ static void net_task(void *arg) {
         }
         (void)busy_since;
 
-        if (down != held && (now - changed) > pdMS_TO_TICKS(DEBOUNCE_MS)) {
+        if (down != held) {
             held = down;
-            changed = now;
 
             if (held && s_state == ST_IDLE && esp_websocket_client_is_connected(s_ws)) {
                 xStreamBufferReset(s_mic_buf);
                 s_dropped_blocks = 0;
                 s_sent_bytes = 0;
                 s_send_failures = 0;
+                s_slowest_send = 0;
                 s_state = ST_LISTENING;
                 s_last_activity = now;
                 esp_websocket_client_send_text(s_ws, "{\"type\":\"start\"}", 16, SEND_TIMEOUT);
@@ -446,9 +479,10 @@ static void net_task(void *arg) {
                 esp_websocket_client_send_text(s_ws, "{\"type\":\"end\"}", 14, SEND_TIMEOUT);
                 s_state = ST_THINKING;
                 s_last_activity = now;
-                ESP_LOGI(TAG, "thinking: sent %lu B (%.1f s), %lu dropped, %lu failures, heap %lu",
+                ESP_LOGI(TAG, "thinking: sent %lu B (%.1f s), %lu dropped, %lu failures, slowest send %lu ms, heap %lu",
                          (unsigned long)s_sent_bytes, s_sent_bytes / 32000.0f,
                          (unsigned long)s_dropped_blocks, (unsigned long)s_send_failures,
+                         (unsigned long)(s_slowest_send * portTICK_PERIOD_MS),
                          (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
             }
         }
@@ -458,7 +492,17 @@ static void net_task(void *arg) {
         if (s_state == ST_LISTENING) {
             size_t got = xStreamBufferReceive(s_mic_buf, chunk, sizeof(chunk), pdMS_TO_TICKS(10));
             if (got > 0) {
+                const TickType_t t0 = xTaskGetTickCount();
                 int rc = esp_websocket_client_send_bin(s_ws, (char *)chunk, got, SEND_TIMEOUT);
+                const uint32_t took = (uint32_t)(xTaskGetTickCount() - t0);
+                if (took > s_slowest_send) s_slowest_send = took;
+                // A single 1 KB frame should leave in a few milliseconds. When
+                // it does not, the uplink is the bottleneck and the microphone
+                // buffer behind it is about to overflow.
+                if (took > pdMS_TO_TICKS(200)) {
+                    ESP_LOGW(TAG, "send of %u B took %lu ms", (unsigned)got,
+                             (unsigned long)(took * portTICK_PERIOD_MS));
+                }
                 if (rc < 0) {
                     s_send_failures++;  // uplink stalled; keep polling the button
                 } else {
@@ -496,6 +540,7 @@ void app_main(void) {
     xTaskCreate(audio_in_task, "audio_in", 4096, NULL, 5, NULL);
     xTaskCreate(audio_out_task, "audio_out", 4096, NULL, 5, NULL);
     xTaskCreate(net_task, "net", 4096, NULL, 4, NULL);
+    xTaskCreate(button_task, "button", 2048, NULL, 6, NULL);
 
     ESP_LOGI(TAG, "ready - hold the button on GPIO%d and speak", PIN_BUTTON);
 }

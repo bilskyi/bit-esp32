@@ -23,6 +23,19 @@ class Settings(BaseSettings):
     # until its own watchdog fires. Observed in exactly that shape.
     tts_timeout_s: float = 10.0
 
+    # How far ahead of real time the reply audio may be sent.
+    #
+    # Synthesis runs far faster than speech, so an unpaced reply arrives as a
+    # flood: a 7-second answer lands in about two. The device has under a
+    # second of buffer, so it had to push back by stalling its socket task,
+    # which left the websocket client stuck mid-frame and killed the read.
+    # Pacing here means it never has to. The first chunk is never delayed, so
+    # time-to-first-audio is unaffected.
+    # Must stay under the device's play buffer, which holds 24576 bytes
+    # = 0.77 s. A larger lead simply overfills it and forces the device to
+    # stall its socket task, which is the problem pacing was meant to avoid.
+    playback_lead_s: float = 0.4
+
     # Shared secret the device presents on the WebSocket handshake. Empty
     # disables the check, which is only appropriate on a laptop.
     device_token: str = ""

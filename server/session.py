@@ -133,6 +133,8 @@ class Session:
         spoken: list[str] = []
         voice: str | None = None
         language: str | None = None
+        sent_bytes = 0
+        reply_started = time.monotonic()
 
         def is_speakable(sentence: str) -> bool:
             """True if there is anything for a voice to actually say.
@@ -157,9 +159,20 @@ class Session:
             spoken.append(sentence)
 
             async def render(with_voice: str) -> None:
+                nonlocal sent_bytes
                 async with asyncio.timeout(self.settings.tts_timeout_s):
                     async for pcm_chunk in self.tts.synthesise(sentence, with_voice):
                         await self.transport.send_bytes(pcm_chunk)
+                        sent_bytes += len(pcm_chunk)
+
+                        # Stay at most playback_lead_s ahead of what the device
+                        # can have played by now.
+                        bytes_per_second = self.settings.sample_rate * 2
+                        audio_sent = sent_bytes / bytes_per_second
+                        elapsed = time.monotonic() - reply_started
+                        ahead = audio_sent - elapsed
+                        if ahead > self.settings.playback_lead_s:
+                            await asyncio.sleep(ahead - self.settings.playback_lead_s)
 
             try:
                 await render(voice)
@@ -190,6 +203,11 @@ class Session:
             await say(sentence)
 
         reply = " ".join(spoken)
+        log.info(
+            "reply %d chars, %d sentences, %d B audio in %.1f s: %r",
+            len(reply), len(spoken), sent_bytes,
+            time.monotonic() - reply_started, reply[:80],
+        )
         self.history.append({"role": "user", "content": text})
         self.history.append({"role": "assistant", "content": reply})
         self.usage.add_turn(
