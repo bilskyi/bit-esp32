@@ -17,3 +17,4 @@ firmware/main/secrets.h
 firmware/managed_components/
 .superpowers/
 firmware/host/build/
+firmware/.cache/
