@@ -12,12 +12,21 @@ from enum import Enum
 
 from server.context import build_messages, estimate_tokens
 from server.costs import Usage
-from server.lang import detect_language, voice_for
+from server.lang import DEFAULT, detect_language, voice_for
 from server.memory.summarise import extract_facts
 from server.persona import build_system_prompt
 from server.sentences import SentenceSplitter
 
 log = logging.getLogger(__name__)
+
+
+# Said aloud when the model returns nothing, which happens when the transcript
+# is garbled - usually because the upload was truncated by a stalled link.
+_DIDNT_CATCH = {
+    "uk": "Вибач, я не розчув. Повтори, будь ласка.",
+    "ru": "Извини, я не расслышал. Повтори, пожалуйста.",
+    "en": "Sorry, I did not catch that. Could you say it again?",
+}
 
 
 class State(str, Enum):
@@ -201,6 +210,22 @@ class Session:
                 await say(sentence)
         for sentence in splitter.flush():
             await say(sentence)
+
+        if not spoken:
+            # The model answers a garbled transcript with an empty string, and
+            # an empty reply reaches the user as unexplained silence - which is
+            # indistinguishable from the device being broken. Say so instead.
+            # Do not trust the language of a transcript we already know is
+            # garbled: "Raskarji, Karla." looks like English and is not. The
+            # last reply that actually made sense is a far better guide.
+            prior = next(
+                (m["content"] for m in reversed(self.history) if m["role"] == "assistant"),
+                "",
+            )
+            lang = detect_language(prior) if prior else DEFAULT
+            fallback = _DIDNT_CATCH.get(lang, _DIDNT_CATCH[DEFAULT])
+            log.info("empty reply for %r, asking to repeat", text[:40])
+            await say(fallback)
 
         reply = " ".join(spoken)
         log.info(

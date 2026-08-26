@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     # Must stay under the device's play buffer, which holds 24576 bytes
     # = 0.77 s. A larger lead simply overfills it and forces the device to
     # stall its socket task, which is the problem pacing was meant to avoid.
-    playback_lead_s: float = 0.4
+    playback_lead_s: float = 1.2
 
     # Shared secret the device presents on the WebSocket handshake. Empty
     # disables the check, which is only appropriate on a laptop.

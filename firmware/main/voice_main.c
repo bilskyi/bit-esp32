@@ -56,12 +56,23 @@
 #define PCM_SHIFT 6
 
 // ~27 KB of buffers all told, inside the ~40 KB the spec allows.
-#define MIC_BUFFER_BYTES 16384   // ~0.5 s of headroom on upload
-#define PLAY_BUFFER_BYTES 24576  // ~0.77 s of jitter absorption
+// One second of upload headroom, not half.
+//
+// Measured on a congested channel: single 1 KB sends stall for 1.6-2.3 s while
+// RSSI stays at -55 dBm. At half a second of buffer such a stall discarded
+// 1572 blocks and the server received a truncated utterance that Whisper read
+// as "Что-то...". A second of slack turns most of those stalls into latency
+// instead of lost speech.
+#define MIC_BUFFER_BYTES 32768   // ~1.0 s of headroom on upload
+#define PLAY_BUFFER_BYTES 49152  // ~1.5 s, sized to ride out a stalled link
 // Do not open the amplifier until this much reply is in hand. The spec budgets
 // 150 ms of playback buffer; starting earlier means the first word stutters
 // while the network catches up.
-#define PREBUFFER_BYTES 4800     // 150 ms at 16 kHz mono 16-bit
+// 150 ms was the spec's budget and is not enough here: sends stall for
+// several hundred milliseconds at a time, so playback starts and immediately
+// runs dry. Three quarters of a second of head start costs that much extra
+// latency once, at the beginning, instead of stuttering throughout.
+#define PREBUFFER_BYTES 24000    // 0.75 s at 16 kHz mono 16-bit
 
 #define DEBOUNCE_MS 25
 // Never block forever on a send. The button is polled in the same loop, so an
@@ -218,14 +229,18 @@ static void wifi_start(void) {
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    // Minimum modem sleep, which is also the default.
+    // Minimum modem sleep. Do not "fix" the stalls by turning this off.
     //
-    // WIFI_PS_NONE was tried here on the theory that beacon parking was
-    // starving the uplink. It was not: the real cause of the dropped audio was
-    // an unbounded send blocking the task loop. Keeping the radio awake did
-    // measurably destabilise this board instead - five reconnects during boot
-    // and the socket dying within half a second of streaming - most likely
-    // because the amplifier shares the USB supply.
+    // WIFI_PS_NONE has now been tried twice on the theory that beacon parking
+    // causes the send stalls. The second attempt, with the keepalive bug
+    // already fixed, was measured: one 1 KB send took 32 seconds, 986 audio
+    // blocks were dropped, and the device then failed to open a connection at
+    // all, retrying every seven seconds with ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT
+    // until it was reflashed. Keeping the radio awake does not make this link
+    // faster, it makes it unusable - most likely supply, since the amplifier
+    // shares USB power.
+    //
+    // The stalls are real but must be absorbed, not eliminated.
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));
 
     ESP_LOGI(TAG, "connecting to \"%s\" (2.4 GHz only)", WIFI_SSID);
@@ -341,7 +356,14 @@ static void audio_in_task(void *arg) {
         }
         // Half duplex: the microphone is read continuously to keep the DMA
         // ring from overflowing, but only kept while the button is down.
-        if (s_state != ST_LISTENING) continue;
+        //
+        // Both conditions matter. s_state is owned by net_task, which can sit
+        // inside a send for many seconds on a congested link - during which it
+        // cannot notice that the button came up. Checking the debounced button
+        // directly stops recording the instant it is released, so a three
+        // second question stays three seconds instead of growing to twenty-two
+        // and burying the uplink in audio nobody asked for.
+        if (s_state != ST_LISTENING || !s_button_down) continue;
 
         const size_t n = got / sizeof(int32_t) / 2;
         for (size_t i = 0; i < n; i++) {
@@ -401,10 +423,17 @@ static void audio_out_task(void *arg) {
         }
 
         if (playing && !s_reply_finished) {
-            // Buffer empty while the reply is still coming: the speaker is
-            // about to go quiet mid-word. Counting these separates "playing
-            // slowly" from "waiting for data".
+            // Buffer empty while the reply is still coming.
+            //
+            // The I2S peripheral does not stop when it runs out of data - the
+            // DMA ring keeps cycling whatever was in it, so an underrun is
+            // heard as the last fragment repeating, fast, for as long as the
+            // gap lasts. That is the "ца-ца-ца" that ran for twenty seconds.
+            // Feeding it silence turns a stuck syllable into an honest pause.
             starved++;
+            memset(frame, 0, sizeof(frame));
+            size_t written = 0;
+            i2s_channel_write(s_tx, frame, sizeof(frame), &written, pdMS_TO_TICKS(100));
         }
 
         // Nothing left and the server says the reply is over.
@@ -487,6 +516,18 @@ static void net_task(void *arg) {
         if (down != held) {
             held = down;
 
+            if (held && s_state != ST_IDLE) {
+                // Pressing during a reply is not a fault, but it does nothing,
+                // and saying so beats leaving an empty log behind.
+                ESP_LOGW(TAG, "press ignored: still in state %d", (int)s_state);
+            } else if (held && !esp_websocket_client_is_connected(s_ws)) {
+                // The keepalive can take the better part of a minute to notice
+                // a link that died quietly, and every press until then vanishes
+                // without a trace. From the outside that is indistinguishable
+                // from broken hardware, so it must at least be visible here.
+                ESP_LOGW(TAG, "press ignored: socket is down, reconnecting");
+            }
+
             if (held && s_state == ST_IDLE && esp_websocket_client_is_connected(s_ws)) {
                 xStreamBufferReset(s_mic_buf);
                 s_dropped_blocks = 0;
@@ -495,6 +536,12 @@ static void net_task(void *arg) {
                 s_slowest_send = 0;
                 s_state = ST_LISTENING;
                 s_last_activity = now;
+                // RSSI at the moment of the press, to separate a weak or noisy
+                // link from a supply that sags once the radio starts working.
+                wifi_ap_record_t ap;
+                if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+                    ESP_LOGI(TAG, "rssi %d dBm, channel %d", ap.rssi, ap.primary);
+                }
                 esp_websocket_client_send_text(s_ws, "{\"type\":\"start\"}", 16, SEND_TIMEOUT);
                 ESP_LOGI(TAG, "listening");
             } else if (!held && s_state == ST_LISTENING) {
@@ -511,6 +558,12 @@ static void net_task(void *arg) {
                          (unsigned long)s_dropped_blocks, (unsigned long)s_send_failures,
                          (unsigned long)(s_slowest_send * portTICK_PERIOD_MS),
                          (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
+                wifi_ap_record_t ap_after;
+                if (esp_wifi_sta_get_ap_info(&ap_after) == ESP_OK) {
+                    // A drop between press and release points at the radio
+                    // losing ground while transmitting, not at distance.
+                    ESP_LOGI(TAG, "rssi after upload: %d dBm", ap_after.rssi);
+                }
             }
         }
 

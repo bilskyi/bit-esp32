@@ -45,20 +45,73 @@ def normalise(text: str) -> str:
     return " ".join(text.split())
 
 
+# Keep a little room after the last audible sample so speech is never clipped
+# and consecutive sentences do not run together.
+_TAIL_MARGIN_S = 0.08
+_SILENCE_LEVEL = 200  # int16; the pad is true digital silence, not room tone
+
+
+def _trim_trailing_silence(pcm: bytes, rate: int) -> bytes:
+    """Drop the silent padding at the end of a sentence."""
+    if not pcm:
+        return pcm
+    import array
+
+    samples = array.array("h")
+    samples.frombytes(pcm[: len(pcm) // 2 * 2])
+    last = -1
+    for i in range(len(samples) - 1, -1, -1):
+        if abs(samples[i]) > _SILENCE_LEVEL:
+            last = i
+            break
+    if last < 0:
+        return b""  # the whole holdback was padding
+    keep = min(len(samples), last + 1 + int(rate * _TAIL_MARGIN_S))
+    return samples[:keep].tobytes()
+
+
 class EdgeTTS:
-    def __init__(self, communicate=edge_tts.Communicate, rate: int = 16000) -> None:
+    def __init__(
+        self,
+        communicate=edge_tts.Communicate,
+        rate: int = 16000,
+        speed: str = "+25%",
+    ) -> None:
         self._communicate = communicate
         self._rate = rate
+        # These voices speak slowly by default: "Привет! Всё хорошо, спасибо.
+        # Чем могу помочь?" - 45 characters - takes 6.3 seconds, about half
+        # conversational pace. That is not a decoding artefact; the MP3 really
+        # is that long. Speeding it up shortens every reply, which matters
+        # twice over on a congested link, where a 13-second answer is 443 KB
+        # that has to survive stalls of a second or more.
+        self._speed = speed
 
     async def synthesise(self, text: str, voice: str) -> AsyncIterator[bytes]:
         decoder = Mp3ToPcm(self._rate)
-        stream = self._communicate(normalise(text), voice).stream()
+        stream = self._communicate(normalise(text), voice, rate=self._speed).stream()
+
+        # The service pads roughly 0.7 s of silence onto the end of every
+        # sentence. Sent verbatim that is ~22 KB of nothing per sentence, and
+        # on a congested link nothing still has to survive the stalls. Holding
+        # the last half second back lets the tail be trimmed without giving up
+        # streaming: everything before the holdback goes out immediately.
+        hold = bytearray()
+        holdback = int(self._rate * 0.5) * 2
+
         async for event in stream:
             if event.get("type") != "audio":
                 continue  # WordBoundary and friends carry no audio
             pcm = decoder.feed(event["data"])
-            if pcm:
-                yield pcm
-        tail = decoder.flush()
-        if tail:
-            yield tail
+            if not pcm:
+                continue
+            hold += pcm
+            if len(hold) > holdback:
+                out = bytes(hold[:-holdback])
+                del hold[:-holdback]
+                yield out
+
+        hold += decoder.flush()
+        trimmed = _trim_trailing_silence(bytes(hold), self._rate)
+        if trimmed:
+            yield trimmed
