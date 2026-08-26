@@ -25,6 +25,34 @@ Nine consecutive turns:
 For contrast, earlier the same day: one reply played 7.4 s of audio over 17.4 s
 with 308 underruns.
 
+## The blocking issue is radio, and it is physical
+
+Measured with everything else working:
+
+    laptop  -> router:   0% loss,  3.6 ms
+    laptop  -> Railway:  0% loss,   47 ms, healthz in 300 ms
+    laptop  -> device:  67% loss, 2200 ms
+
+The laptop is fine on the same network and Railway is fine from it. Only the
+device's own link is broken - and the device reports -49 to -63 dBm while it
+happens, so it hears the access point perfectly well. Strong signal with heavy
+loss is interference, not distance.
+
+The board sits in the laptop's USB port. USB 3.0 is a well documented broadband
+noise source at exactly 2.4 GHz, centimetres from a PCB antenna. Worth trying,
+in order: a USB extension cable to move the board away, a USB 2.0 port or a
+separate supply, keeping it off metal, and changing the router from channel 2
+to 11.
+
+This matters more since the move to Railway. A TLS handshake needs several
+round trips in succession; on a link losing two thirds of its packets it falls
+apart where plain TCP still scraped through. The same board managed nine clean
+turns with 3-8 ms sends earlier the same day, so the hardware is capable and
+the environment changed.
+
+`firmware/main/secrets.h` can be pointed back at the LAN server for a session
+that has to work today.
+
 ## What is left
 
 - **A socket drop roughly once per ten turns.** A send stalls past the timeout
