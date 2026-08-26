@@ -122,6 +122,10 @@ async def run(args: argparse.Namespace) -> int:
             if event.get("type") == "state":
                 marks[event["value"]] = now
                 print(f"  state {event['value']:<10} +{(now - released) * 1000:7.0f} ms")
+            elif event.get("type") == "emotion":
+                # Drives the face. It has to arrive before "speaking", or the
+                # eyes change expression a beat after the first word.
+                print(f"  emotion {event['value']:<8} +{(now - released) * 1000:7.0f} ms")
             elif event.get("type") == "done":
                 print(f"  done             +{(now - released) * 1000:7.0f} ms")
                 break

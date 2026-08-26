@@ -690,7 +690,20 @@ static void face_task(void *arg) {
         }
 
         face_tick(&s_face, t);
-        ssd1306_flush(&s_panel, face_framebuffer(&s_face));
+
+        // A panel that stops acknowledging - a wire off, a brownout - must be
+        // visible in the log without filling it. Say so on the way down and on
+        // the way back, and nothing in between.
+        static bool panel_ok = true;
+        const esp_err_t ferr = ssd1306_flush(&s_panel, face_framebuffer(&s_face));
+        if ((ferr == ESP_OK) != panel_ok) {
+            panel_ok = (ferr == ESP_OK);
+            if (panel_ok) {
+                ESP_LOGI(TAG, "panel back");
+            } else {
+                ESP_LOGW(TAG, "panel stopped answering: %s", esp_err_to_name(ferr));
+            }
+        }
 
         // Pace against the clock, so a slow flush eats the idle time instead
         // of stretching the frame.

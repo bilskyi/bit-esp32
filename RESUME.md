@@ -9,6 +9,10 @@ and English mid-session, interruptible mid-reply, with an LED showing state.
 The server is deployed. What is not solved is the radio link, and that is where
 the last two days went.
 
+**It also has a face now** — a pair of animated eyes for the OLED, written and
+tested but never yet shown on glass, because the panel is not wired. Four
+wires and one flash will tell. See "The face" below.
+
 ---
 
 ## Where things run
@@ -36,10 +40,14 @@ token and `SERVER_URI`. Only that last line differs between LAN and cloud.
 | Amp shutdown | 10 | MAX98357A `SD` |
 | Button to GND | 3 | push-to-talk |
 | Status LED | 8 | onboard, **lights on LOW** |
-| *free for I2C* | 0, 1 | proposed SDA/SCL for the OLED |
+| I2C SDA | 0 | SSD1306 `SDA` — **not connected yet** |
+| I2C SCL | 1 | SSD1306 `SCL` — **not connected yet** |
 
-Mic on **3V3**, amp on **5V**. Do not use GPIO 9 (BOOT), 18/19 (USB), 2
-(strapping).
+Mic on **3V3**, amp on **5V**. The OLED takes 3V3 too. Do not use GPIO 9
+(BOOT), 18/19 (USB), 2 (strapping).
+
+GPIO 0 and 1 are the 32 kHz crystal pins, which is only a problem if the RTC
+is told to use one. `CONFIG_RTC_CLK_SRC_INT_RC=y`, so they are genuinely free.
 
 ## Measured, so nobody re-derives it
 
@@ -50,8 +58,11 @@ Mic on **3V3**, amp on **5V**. Do not use GPIO 9 (BOOT), 18/19 (USB), 2
 | Playback | real time, nine consecutive turns with zero underruns |
 | First audio | median 1.5 s local, 1854 ms through Railway |
 | Server memory | 31 MB idle, 74 MB through a conversation |
-| Free heap on device | 92-98 KB with TLS on |
+| Free heap on device | 92-98 KB with TLS on, **before the face** |
 | Codec | IMA ADPCM both directions, 4:1, verified against `audioop` |
+| Emotion tag | model tagged 8/8 replies, three languages, nothing leaked |
+| Tag latency cost | 60-110 ms to the first sentence, measured against a control |
+| `voice` image | 1013 KB, 51% of the app partition free |
 
 ---
 
@@ -91,6 +102,92 @@ means radio, and no amount of code will fix it.
 
 ---
 
+## The face
+
+Built, tested, and **never yet seen on a real panel**. Everything below is
+either verified on the laptop or verified by the compiler; nothing is verified
+by looking at glass, because there is no glass connected.
+
+### What it does
+
+A pair of eyes, no mouth. Dropping the mouth gave the eyes all 64 pixels of
+height instead of about 24, which is the difference between a lid slant reading
+as an emotion and reading as a rendering artefact. Loudness still drives the
+face — it drives the eyes.
+
+| State | Eyes |
+|---|---|
+| idle | blink every 2.5–6 s, sometimes twice; random saccades; breathing; after 45 s the last emotion is let go, at 90 s sleepy, at 180 s asleep |
+| listening | wide, pupils dilated, gaze locked forward; **your** loudness widens them |
+| thinking | rolls up and away, re-aims every ~700 ms, one eye a touch narrower |
+| speaking | the emotion, with the reply's own loudness squashing the eyes per syllable |
+| interrupted | 350 ms flinch: snap wide, pupil to 55%, then decay |
+| no connection | lids shut to a bar; **a press cracks them open and lets them fall** |
+
+Nine emotions the server may send: `neutral happy excited curious confused
+surprised sad annoyed sleepy`. The model picks one per reply.
+
+### How it is put together
+
+| File | Depends on | Does |
+|---|---|---|
+| `main/face.c` | **nothing** | framebuffer, drawing, animation, emotions |
+| `main/ssd1306.c` | `driver/i2c_master` | init, probe, per-page flush |
+| `main/face_main.c` | both | the `face` bring-up sketch |
+| `host/face_test.c` | `face.c` | 469 invariant checks |
+| `host/face_preview.c` | `face.c` | the animation, as a web page |
+| `server/emotion.py` | — | tag off the stream, heuristic fallback |
+
+`face.c` includes no ESP-IDF header and uses no float — the C3 has no FPU, so
+everything is Q8 fixed point with an integer square root. That is what lets the
+same code run on the laptop, which mattered a lot while the panel was in a box.
+
+### Verified
+
+- 469 host checks, 0 failures. `cd firmware/host && make test`.
+- All four sketches build with **zero warnings**.
+- 189 server tests. One reads the emotion names straight out of `face.c`, because
+  the device matches them by substring and a rename would not raise anywhere —
+  the face would just quietly stop changing.
+- End to end against the real pipeline: `emotion happy` arrives at the same
+  instant as `state speaking`, 370 ms before the first audio.
+- gpt-oss tagged 8/8 replies across three languages with nothing leaking into
+  the spoken text.
+
+### Not verified, and only the panel can settle it
+
+1. **Whether anything appears at all.** Wire it and run `idf.py -DSKETCH=face`.
+   The sketch says which of three things to check if the bus stays silent.
+2. **Frame time.** 23 ms for a full frame at 400 kHz is arithmetic. The sketch
+   prints min/avg/max every ten seconds against the 40 ms budget. Most modules
+   run happily at two or three times the datasheet clock, which would cut it to
+   under 10 ms — measure before believing it.
+3. **Free heap.** It was 92–98 KB with TLS on. The face adds roughly 8 KB
+   (a 1 KB shadow, a 1 KB scratch, `face_t`, a 3 KB stack, the I2C driver).
+   TLS handshakes want tens of KB transiently, so watch the number in the
+   `socket disconnected` line.
+
+**The device does not need any of this.** `voice_main` probes the bus before
+WiFi; if nothing answers at 0x3C or 0x3D it logs one line and never starts the
+task. Flashing today, with no display attached, behaves exactly as yesterday.
+
+### Looking at it without hardware
+
+```bash
+cd firmware/host && make          # test, then write build/face-preview.html
+open build/face-preview.html      # 17 scenes, scrubbable, frame by frame
+```
+
+Also published, for a phone:
+<https://claude.ai/code/artifact/15e55cb6-6593-450a-be68-5ded3f50015d>
+
+It runs the real `face.c`, not a reimplementation — a JavaScript copy would
+have drifted from the original within a day. The page recomputes the
+generator's checksum over its own decoded frames, so a payload that did not
+survive the trip says so rather than showing plausible nonsense.
+
+---
+
 ## Agreed next, in order
 
 ### 1. Build-time switch between LAN and cloud
@@ -103,41 +200,7 @@ plain TCP scraped through, and it adds a DNS dependency.
 Wanted: `idf.py -DSERVER=lan` and `-DSERVER=cloud`, choosing between two URIs in
 `secrets.h`. Roughly twenty minutes. Do not make them pick one forever.
 
-### 2. A face on the 0.96" OLED
-
-The user has an SSD1306 128x64 I2C display and wants the assistant to have a
-face. Researched; conclusions:
-
-- **Do not pull Arduino into the project.**
-  [FluxGarage RoboEyes](https://github.com/FluxGarage/RoboEyes) is the
-  well-known animated-eyes library but is Arduino/C++ on Adafruit GFX with no
-  ESP-IDF port; same for [Irisoled](https://github.com/orji123/Irisoled) and
-  [RobotEyes-animation](https://github.com/pstarz7/RobotEyes-animation-for-Arduino).
-  There is a [MicroPython port](https://github.com/mchobby/micropython-roboeyes),
-  which does not help us either.
-- **Use** [`espressif/esp_lcd`](https://components.espressif.com/components/espressif/esp_lvgl_port/versions/2.3.2/examples/i2c_oled?language=en)
-  with its stock SSD1306 driver, or
-  [`k0i05/esp_ssd1306`](https://components.espressif.com/components/k0i05/esp_ssd1306),
-  and draw the eyes directly. RoboEyes' logic is rounded rectangles plus blink
-  timers — a couple of hundred lines, and it stays in our C.
-- **It fits the existing architecture exactly.** `led_task` already ticks every
-  100 ms off `s_state`; the face is the same shape.
-
-| State | Face |
-|---|---|
-| idle | calm eyes, occasional blink, slow drift |
-| listening | wide open, pupils forward |
-| thinking | glance up and away |
-| speaking | **mouth moving in time with loudness** |
-| no connection | eyes closed, asleep |
-
-The speaking case is the one worth doing properly: `audio_out_task` already
-holds the decoded samples, so a per-block RMS costs almost nothing and the
-mouth tracks real speech instead of faking it.
-
-Wiring: four wires — power, ground, **SDA on GPIO 0, SCL on GPIO 1**.
-
-### 3. Cleanup, once the link is sound
+### 2. Cleanup, once the link is sound
 
 - Remove instrumentation: `send of ... took`, `starved`, `rssi`, reply logging.
 - `capture` uses mono slot mode while `voice` uses stereo. Both work, but they
@@ -158,8 +221,16 @@ deactivate 2>/dev/null; unset VIRTUAL_ENV      # ESP-IDF refuses to share a venv
 . ~/esp/esp-idf/export.sh                      # source it, never pipe it
 cd firmware && idf.py -DSKETCH=voice -p /dev/cu.usbmodem1101 flash monitor
 
-# sketches: voice, capture, playback, diag, stream, mute, led
+# sketches: voice, face, capture, playback, diag, stream, mute, led
 # mute silences the amplifier if it is ever left making noise
+# face needs no WiFi and no server: use it the moment the panel is wired
+```
+
+```bash
+# the eyes, on the laptop
+cd firmware/host
+make test        # 469 invariants, no board needed
+make preview     # build/face-preview.html, every state and emotion
 ```
 
 ```bash
@@ -200,6 +271,14 @@ afplay /System/Library/Sounds/Ping.aiff
   exclude `firmware/`, because `secrets.h` holds the WiFi password and
   git-ignoring it is not enough.
 - **Watch the disk.** A build once failed on `No space left on device`.
+- **A blank OLED reads as broken, not as asleep.** A blink that closes fully
+  leaves 128x64 of nothing, and this project has already lost days to symptoms
+  that looked like dead hardware. The lid stops just short of shut so a lash
+  line always remains, and a test fails if it ever does not.
+- **On one bit, a pupil that reaches the eye's edge stops being a pupil.** Its
+  black joins the black around the eye and the shape reads as a helmet. The
+  first `happy` did exactly that and looked like a scowl; the lower lid now
+  stops two pixels short of the pupil.
 
 ## What actually caused the trouble, in order of how long it hid
 
