@@ -1,0 +1,11 @@
+# Custom table because the default gives the app 1 MB and TLS does not fit.
+#
+# The build without TLS is already 940 KB - 10% headroom. Adding the certificate
+# bundle and mbedTLS for wss:// needs a few hundred KB more. The chip carries
+# 4 MB of flash, so there is no reason to be tight: 2 MB for the app leaves
+# room for this and for whatever comes after.
+#
+# Name,     Type, SubType,  Offset,   Size
+nvs,        data, nvs,      0x9000,   0x6000
+phy_init,   data, phy,      0xf000,   0x1000
+factory,    app,  factory,  0x10000,  0x200000

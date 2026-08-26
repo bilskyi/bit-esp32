@@ -24,6 +24,7 @@
 
 #include "driver/gpio.h"
 #include "driver/i2s_std.h"
+#include "esp_crt_bundle.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_websocket_client.h"
@@ -501,6 +502,14 @@ static void ws_start(void) {
     if (strlen(DEVICE_TOKEN) > 0) {
         snprintf(headers, sizeof(headers), "Authorization: Bearer %s\r\n", DEVICE_TOKEN);
         cfg.headers = headers;
+    }
+
+    // wss:// verifies the server against the root certificates bundled into
+    // the image. Plain ws:// on the bench needs none of this, so it is
+    // attached only when the URI actually asks for TLS.
+    if (strncmp(SERVER_URI, "wss://", 6) == 0) {
+        cfg.crt_bundle_attach = esp_crt_bundle_attach;
+        ESP_LOGI(TAG, "TLS enabled, verifying against the bundled roots");
     }
 
     s_ws = esp_websocket_client_init(&cfg);

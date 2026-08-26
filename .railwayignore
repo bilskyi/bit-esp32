@@ -1,0 +1,17 @@
+# The server is the only thing that belongs in the image.
+#
+# firmware/ matters most: secrets.h holds the WiFi password. It is git-ignored,
+# but "railway up" uploads a directory, not a commit, so it must be excluded
+# here as well.
+firmware/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+*.wav
+*.db
+voice.db
+.env
+docs/
+RESUME.md

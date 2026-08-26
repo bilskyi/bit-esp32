@@ -23,3 +23,13 @@ CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y
 # and the client tears down a perfectly healthy connection - the log says so
 # outright: "Could not lock ws-client within 2000 timeout for PONG".
 CONFIG_ESP_WS_CLIENT_TX_LOCK_TIMEOUT_MS=15000
+
+# The board carries 4 MB; the default 2 MB setting wastes half of it and
+# leaves no room to grow the app partition for TLS.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# wss:// against Railway verifies the server against the bundled root CAs.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
