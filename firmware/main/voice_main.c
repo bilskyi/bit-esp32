@@ -74,8 +74,13 @@
 // 1572 blocks and the server received a truncated utterance that Whisper read
 // as "Что-то...". A second of slack turns most of those stalls into latency
 // instead of lost speech.
-#define MIC_BUFFER_BYTES 32768   // ~1.0 s of headroom on upload
-#define PLAY_BUFFER_BYTES 49152  // ~1.5 s, sized to ride out a stalled link
+// Sized in compressed bytes since ADPCM arrived: 16 KB is two seconds of
+// speech, which is what a second of stall tolerance was meant to buy before
+// compression made every byte worth four. Halving both buffers gives back
+// 32 KB of heap, and TLS needs it - free heap fell from 69 KB to 30 KB the
+// moment wss:// was switched on, and a handshake wants tens of KB transiently.
+#define MIC_BUFFER_BYTES 16384
+#define PLAY_BUFFER_BYTES 32768  // ~4 s of speech once compressed
 // Do not open the amplifier until this much reply is in hand. The spec budgets
 // 150 ms of playback buffer; starting earlier means the first word stutters
 // while the network catches up.
