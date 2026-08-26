@@ -23,12 +23,14 @@ class GroqLLM:
         max_retries: int = 4,
         sleep: Callable = asyncio.sleep,
         timeout: float = 30.0,
+        reasoning_effort: str = "low",
     ) -> None:
         self._key = api_key
         self._model = model
         self._client = client or httpx.AsyncClient(timeout=timeout)
         self._max_retries = max_retries
         self._sleep = sleep
+        self._reasoning_effort = reasoning_effort
 
     def _payload(self, messages: list[dict], max_tokens: int, stream: bool) -> dict:
         return {
@@ -37,6 +39,13 @@ class GroqLLM:
             "max_tokens": max_tokens,
             "temperature": 0.7,
             "stream": stream,
+            # gpt-oss reasons before it answers, and the reasoning is billed
+            # against the same budget. Measured on "Расскажи мне про космос."
+            # at max_tokens=150: the default effort spent 511 characters
+            # thinking and emitted 12 of answer; "low" spent 64 and emitted
+            # 359. Every unanswered open question - turbulence, space - was
+            # this, not the network.
+            "reasoning_effort": self._reasoning_effort,
         }
 
     @property

@@ -12,6 +12,7 @@ from enum import Enum
 
 from server.context import build_messages, estimate_tokens
 from server.costs import Usage
+from server.codec import AdpcmDecoder
 from server.lang import DEFAULT, detect_language, voice_for
 from server.memory.summarise import extract_facts
 from server.persona import build_system_prompt
@@ -52,6 +53,8 @@ class Session:
         self.usage = Usage()
 
         self._buf = bytearray()
+        self._codec = "pcm16"
+        self._adpcm = None
         self._watchdog: asyncio.Task | None = None
 
     async def load_memory(self) -> None:
@@ -60,17 +63,25 @@ class Session:
 
     # -- events from the device -------------------------------------------
 
-    async def on_start(self) -> None:
+    async def on_start(self, codec: str = "pcm16") -> None:
         if self.state is not State.IDLE:
             log.debug("ignoring start in state %s", self.state)
             return
         self._buf.clear()
+        # The device announces its codec per utterance. Absent the field it is
+        # raw PCM, which keeps the laptop simulator working unchanged.
+        self._codec = codec
+        self._adpcm = AdpcmDecoder() if codec == "adpcm" else None
         await self._set_state(State.LISTENING)
         self._arm_watchdog()
 
     async def on_audio(self, chunk: bytes) -> None:
         if self.state is not State.LISTENING:
             return  # half-duplex: nothing to do with audio while replying
+
+        if self._adpcm is not None:
+            chunk = self._adpcm.feed(chunk)
+
         room = self.settings.max_utterance_bytes - len(self._buf)
         if room <= 0:
             return

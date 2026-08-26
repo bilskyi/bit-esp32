@@ -112,7 +112,7 @@ def create_app(settings=None, stt=None, llm=None, tts=None, store=None) -> FastA
                     continue
                 kind = control.get("type")
                 if kind == "start":
-                    await session.on_start()
+                    await session.on_start(control.get("codec", "pcm16"))
                 elif kind == "end":
                     await session.on_end()
                 else:
