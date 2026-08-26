@@ -102,7 +102,7 @@
 // forever, and the log fills with "Could not lock ws-client ... for CLOSE"
 // while the device sits there unable to even hang up. Five seconds means a
 // truly stuck link costs one reconnect instead of a wedge.
-#define SEND_TIMEOUT pdMS_TO_TICKS(5000)
+#define SEND_TIMEOUT pdMS_TO_TICKS(12000)
 // Longest the device will wait on the server before re-arming the button.
 #define STUCK_TIMEOUT_MS 20000
 // How long the socket task may wait for room in the play buffer.
