@@ -31,13 +31,16 @@
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "esp_wifi.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
 
+#include "face.h"
 #include "secrets.h"
+#include "ssd1306.h"
 
 #define PIN_BCLK GPIO_NUM_4
 #define PIN_WS GPIO_NUM_5
@@ -54,6 +57,12 @@
 #define PIN_LED GPIO_NUM_8
 #define LED_ON 0
 #define LED_OFF 1
+
+// The OLED. Both pins were free; nothing else on this board wants them.
+#define PIN_SDA GPIO_NUM_0
+#define PIN_SCL GPIO_NUM_1
+#define FACE_I2C_HZ 400000
+#define FACE_FRAME_MS 40  // 25 fps
 
 #define SAMPLE_RATE 16000
 #define BLOCK_SAMPLES 512
@@ -153,6 +162,42 @@ static volatile bool s_button_down = false;
 static volatile bool s_abort_playback = false;
 // When the socket last went away, for the reconnect supervisor.
 static volatile TickType_t s_offline_since = 0;
+
+// -- the face ---------------------------------------------------------------
+//
+// face_task owns the face_t and the panel and touches nothing else. Everything
+// it needs arrives through the volatile scalars below, written by whichever
+// task happens to know: the socket task knows the emotion, net_task knows an
+// interruption happened, the audio tasks know how loud things are. Nobody else
+// ever reaches into the animation, so there is no lock and nothing to wedge
+// the audio path.
+static ssd1306_t s_panel;
+static face_t s_face;
+static bool s_have_panel = false;
+
+static volatile uint8_t s_face_emotion = FACE_EMO_NEUTRAL;
+// Bumped on every emotion frame, so the same emotion twice in a row still
+// counts as the conversation being alive.
+static volatile uint32_t s_face_emotion_seq = 0;
+static volatile bool s_face_startle = false;
+// Mean absolute sample of the last audio block, either direction.
+static volatile uint16_t s_audio_level = 0;
+
+static inline uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
+
+// Cheap loudness for the face. Only the shape matters - face.c normalises it
+// against its own decaying peak - so the mean absolute sample does as well as
+// an RMS and costs no multiply.
+static uint16_t block_level(const int16_t *pcm, size_t n) {
+    if (n == 0) return 0;
+    uint32_t sum = 0;
+    for (size_t i = 0; i < n; i++) {
+        int32_t v = pcm[i];
+        if (v < 0) v = -v;  // via int32: negating INT16_MIN as int16 overflows
+        sum += (uint32_t)v;
+    }
+    return (uint16_t)(sum / n);
+}
 
 static i2s_chan_handle_t s_tx;
 static i2s_chan_handle_t s_rx;
@@ -467,7 +512,23 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
                     s_play_dropped += (uint32_t)e->data_len - queued;
                 }
             } else if (e->op_code == 0x01) {  // text: control
-                if (memmem(e->data_ptr, e->data_len, "done", 4)) {
+                // Emotion first, and only inside a frame that says it is one.
+                // Scanning every text frame for every emotion name would be
+                // asking for a collision the day a new state is added.
+                if (memmem(e->data_ptr, e->data_len, "emotion", 7)) {
+                    const face_emotion_t em =
+                        face_emotion_scan(e->data_ptr, e->data_len);
+                    if (em != FACE_EMO_COUNT) {
+                        s_face_emotion = (uint8_t)em;
+                        s_face_emotion_seq++;
+                    } else {
+                        // The server promised one of nine names. Anything else
+                        // means the two halves have drifted apart, and a face
+                        // that silently keeps its old expression hides that.
+                        ESP_LOGW(TAG, "unknown emotion: %.*s", e->data_len,
+                                 e->data_ptr ? e->data_ptr : "");
+                    }
+                } else if (memmem(e->data_ptr, e->data_len, "done", 4)) {
                     s_reply_finished = true;
                 } else if (memmem(e->data_ptr, e->data_len, "speaking", 8)) {
                     s_state = ST_SPEAKING;
@@ -570,6 +631,74 @@ static void led_task(void *arg) {
     }
 }
 
+// -------------------------------------------------------------------- face
+
+// The same shape as led_task: a fixed tick that reads s_state and draws. It
+// runs below the audio tasks and the button, holds no lock, and the I2C write
+// blocks on a semaphore rather than spinning, so a slow panel costs frames
+// here and nothing anywhere else.
+static void face_task(void *arg) {
+    face_init(&s_face, now_ms());
+
+    face_state_t shown = FACE_ST_IDLE;
+    uint32_t emotion_seq = 0;
+    bool button = false;
+
+    while (true) {
+        const uint32_t t = now_ms();
+
+        // A press that goes nowhere still deserves an answer, so the socket
+        // being down is a state of its own rather than an absence of one.
+        const bool linked = s_ws != NULL && esp_websocket_client_is_connected(s_ws);
+        face_state_t want = FACE_ST_OFFLINE;
+        if (linked) {
+            switch (s_state) {
+                case ST_LISTENING: want = FACE_ST_LISTENING; break;
+                case ST_THINKING:  want = FACE_ST_THINKING;  break;
+                case ST_SPEAKING:  want = FACE_ST_SPEAKING;  break;
+                case ST_IDLE:
+                default:           want = FACE_ST_IDLE;      break;
+            }
+        }
+        if (want != shown) {
+            face_set_state(&s_face, want, t);
+            shown = want;
+        }
+
+        const uint32_t seq = s_face_emotion_seq;
+        if (seq != emotion_seq) {
+            emotion_seq = seq;
+            face_set_emotion(&s_face, (face_emotion_t)s_face_emotion, t);
+        }
+
+        const bool down = s_button_down;
+        if (down != button) {
+            face_set_button(&s_face, down, t);
+            button = down;
+        }
+
+        if (s_face_startle) {
+            s_face_startle = false;
+            face_startle(&s_face, t);
+        }
+
+        // Only while there is audio. Outside those states face.c lets the
+        // energy decay on its own, which is what stops the eyes freezing
+        // mid-syllable when a reply ends.
+        if (want == FACE_ST_LISTENING || want == FACE_ST_SPEAKING) {
+            face_feed_energy(&s_face, s_audio_level);
+        }
+
+        face_tick(&s_face, t);
+        ssd1306_flush(&s_panel, face_framebuffer(&s_face));
+
+        // Pace against the clock, so a slow flush eats the idle time instead
+        // of stretching the frame.
+        const uint32_t spent = now_ms() - t;
+        vTaskDelay(pdMS_TO_TICKS(spent >= FACE_FRAME_MS ? 1 : FACE_FRAME_MS - spent));
+    }
+}
+
 // Drags the socket back when the client's own retry gives up.
 //
 // Observed: after a server restart, or after a link stall long enough to kill
@@ -645,6 +774,9 @@ static void audio_in_task(void *arg) {
             pcm[i] = (int16_t)v;
         }
 
+        // Hand the face your voice, so the eyes widen when you get louder.
+        s_audio_level = block_level(pcm, n);
+
         // Compress before buffering, so the buffer holds four times as much
         // speech for the same RAM and the uplink carries a quarter as much.
         static uint8_t coded[BLOCK_SAMPLES / 2];
@@ -675,6 +807,7 @@ static void audio_out_task(void *arg) {
             // Mute before discarding, so nothing half-written escapes.
             amp_enable(false);
             xStreamBufferReset(s_play_buf);
+            s_audio_level = 0;
             playing = false;
             s_reply_finished = false;
             s_abort_playback = false;
@@ -701,6 +834,12 @@ static void audio_out_task(void *arg) {
                 s_play_dropped = 0;
             }
             const size_t n = adpcm_decode_block(coded, got, pcm);
+
+            // This is why the face needed no mouth: the reply's own loudness
+            // squashes the eyes on every syllable, from the samples that are
+            // about to be played rather than from a guess about timing.
+            s_audio_level = block_level(pcm, n);
+
             for (size_t i = 0; i < n; i++) {
                 // int16 into the top half of a 32-bit slot; left channel only,
                 // which is what the amplifier selects with SD driven high.
@@ -731,6 +870,7 @@ static void audio_out_task(void *arg) {
         if (playing && s_reply_finished) {
             vTaskDelay(pdMS_TO_TICKS(DRAIN_MS));  // do not clip the last word
             amp_enable(false);
+            s_audio_level = 0;
             playing = false;
             s_reply_finished = false;
             s_state = ST_IDLE;
@@ -817,6 +957,11 @@ static void net_task(void *arg) {
                 // detecting speech during playback, which needs echo
                 // cancellation. A deliberate button press needs none.
                 ESP_LOGI(TAG, "interrupted while in state %d", (int)s_state);
+                // Flag it rather than calling face_startle here: face_task
+                // owns the animation, and this is a different task. It also
+                // has to be recorded now, because a moment later the state
+                // will be ST_IDLE and the reason for the change will be gone.
+                s_face_startle = true;
                 s_abort_playback = true;
                 esp_websocket_client_send_text(s_ws, "{\"type\":\"cancel\"}", 17,
                                                SEND_TIMEOUT);
@@ -838,6 +983,7 @@ static void net_task(void *arg) {
                 s_sent_bytes = 0;
                 s_send_failures = 0;
                 s_slowest_send = 0;
+                s_audio_level = 0;  // do not open on the last reply's loudness
                 s_state = ST_LISTENING;
                 s_last_activity = now;
                 // RSSI at the moment of the press, to separate a weak or noisy
@@ -919,6 +1065,21 @@ void app_main(void) {
     configASSERT(s_mic_buf && s_play_buf);
 
     audio_init();
+
+    // The panel is optional, and it is asked about before WiFi so there is a
+    // face to watch while the radio associates.
+    //
+    // Nothing below may be allowed to stop the device. It worked for two days
+    // without a display and has to keep working without one: if nothing
+    // answers on the bus, say so once and never start the task.
+    if (ssd1306_init(&s_panel, PIN_SDA, PIN_SCL, FACE_I2C_HZ) == ESP_OK) {
+        s_have_panel = true;
+        xTaskCreate(face_task, "face", 3072, NULL, 2, NULL);
+    } else {
+        ESP_LOGW(TAG, "no OLED on SDA %d / SCL %d - running without a face",
+                 (int)PIN_SDA, (int)PIN_SCL);
+    }
+
     wifi_start();
     ws_start();
 
@@ -929,5 +1090,6 @@ void app_main(void) {
     xTaskCreate(led_task, "led", 2048, NULL, 2, NULL);
     xTaskCreate(link_task, "link", 3072, NULL, 3, NULL);
 
-    ESP_LOGI(TAG, "ready - hold the button on GPIO%d and speak", PIN_BUTTON);
+    ESP_LOGI(TAG, "ready - hold the button on GPIO%d and speak%s", PIN_BUTTON,
+             s_have_panel ? "" : " (no display)");
 }
