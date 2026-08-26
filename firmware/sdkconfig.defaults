@@ -18,4 +18,8 @@ CONFIG_NEWLIB_STDOUT_LINE_ENDING_CRLF=y
 # PONG in time, decides the peer is gone, and aborts the connection. That is
 # the esp_tls=97 disconnect: it only ever happened while uploading, never idle.
 CONFIG_ESP_WS_CLIENT_SEPARATE_TX_LOCK=y
-CONFIG_ESP_WS_CLIENT_TX_LOCK_TIMEOUT_MS=2000
+# A send occasionally stalls for over a second on WiFi while holding the
+# client lock. At the default two seconds the keepalive PONG gives up waiting,
+# and the client tears down a perfectly healthy connection - the log says so
+# outright: "Could not lock ws-client within 2000 timeout for PONG".
+CONFIG_ESP_WS_CLIENT_TX_LOCK_TIMEOUT_MS=15000

@@ -303,11 +303,16 @@ static void ws_start(void) {
         // Must exceed the chunk size below, or a send can wedge behind an
         // internal buffer that is smaller than what it is being handed.
         .buffer_size = 4096,
-        // Give the keepalive room to breathe while the uplink is saturated.
-        // The default 10 s is measured from a PING that our own traffic can
-        // delay, and missing the window aborts an otherwise healthy socket.
-        .ping_interval_sec = 15,
-        .pingpong_timeout_sec = 30,
+        // Keepalive must not police a peer that is merely busy.
+        //
+        // Uploading holds the client lock in bursts, and a stalled send once
+        // blocked a PONG for long enough that the client declared the server
+        // gone and dropped a working connection. A dead link is still caught:
+        // reads fail and the transport reports it. This only stops a missed
+        // PONG from being a death sentence.
+        .ping_interval_sec = 20,
+        .pingpong_timeout_sec = 60,
+        .disable_pingpong_discon = true,
     };
 
     // Auth is a bearer token in the handshake; an open socket on a public URL
@@ -359,12 +364,18 @@ static void audio_out_task(void *arg) {
     static uint8_t pcm[BLOCK_SAMPLES * 2];
     static int32_t frame[BLOCK_SAMPLES * 2];
     bool playing = false;
+    TickType_t play_started = 0;
+    uint32_t played_bytes = 0;
+    uint32_t starved = 0;  // times the buffer ran dry mid-reply
 
     while (true) {
         size_t got = xStreamBufferReceive(s_play_buf, pcm, sizeof(pcm), pdMS_TO_TICKS(20));
 
         if (got > 0) {
             if (!playing) {
+                play_started = xTaskGetTickCount();
+                played_bytes = 0;
+                starved = 0;
                 // Hold the amp shut until enough audio is queued to play
                 // through the next gap in delivery.
                 while (xStreamBufferBytesAvailable(s_play_buf) < PREBUFFER_BYTES &&
@@ -385,7 +396,15 @@ static void audio_out_task(void *arg) {
             }
             size_t written = 0;
             i2s_channel_write(s_tx, frame, n * 2 * sizeof(int32_t), &written, portMAX_DELAY);
+            played_bytes += (uint32_t)got;
             continue;
+        }
+
+        if (playing && !s_reply_finished) {
+            // Buffer empty while the reply is still coming: the speaker is
+            // about to go quiet mid-word. Counting these separates "playing
+            // slowly" from "waiting for data".
+            starved++;
         }
 
         // Nothing left and the server says the reply is over.
@@ -395,7 +414,15 @@ static void audio_out_task(void *arg) {
             playing = false;
             s_reply_finished = false;
             s_state = ST_IDLE;
-            ESP_LOGI(TAG, "idle (play dropped %lu B)", (unsigned long)s_play_dropped);
+            {
+                const uint32_t ms = (uint32_t)(xTaskGetTickCount() - play_started) * portTICK_PERIOD_MS;
+                ESP_LOGI(TAG,
+                         "idle: played %lu B (%.1f s of audio) in %.1f s, "
+                         "starved %lu times, dropped %lu B",
+                         (unsigned long)played_bytes, played_bytes / 32000.0f,
+                         ms / 1000.0f, (unsigned long)starved,
+                         (unsigned long)s_play_dropped);
+            }
         } else if (s_reply_finished) {
             // The reply finished without producing a single byte of audio -
             // a TTS failure, most often. Nothing was playing, so the branch
