@@ -451,11 +451,16 @@ static void net_task(void *arg) {
 void app_main(void) {
     ESP_ERROR_CHECK(nvs_flash_init());
 
-    // Verbose transport logging while the upload path is under investigation.
-    esp_log_level_set("websocket_client", ESP_LOG_DEBUG);
-    esp_log_level_set("transport_ws", ESP_LOG_DEBUG);
-    esp_log_level_set("transport", ESP_LOG_DEBUG);
-    esp_log_level_set("transport_base", ESP_LOG_DEBUG);
+    // Deliberately quiet on the hot path. The console is USB Serial/JTAG and
+    // its writes are synchronous: with the transport at DEBUG level, every
+    // audio frame emitted several log lines, and a host that was not draining
+    // them fast enough blocked the task servicing the socket. The upload then
+    // died a fraction of a second in, which is exactly the failure this
+    // logging had been added to investigate.
+    esp_log_level_set("websocket_client", ESP_LOG_WARN);
+    esp_log_level_set("transport_ws", ESP_LOG_WARN);
+    esp_log_level_set("transport", ESP_LOG_WARN);
+    esp_log_level_set("transport_base", ESP_LOG_WARN);
 
     s_mic_buf = xStreamBufferCreate(MIC_BUFFER_BYTES, 1);
     s_play_buf = xStreamBufferCreate(PLAY_BUFFER_BYTES, 1);
