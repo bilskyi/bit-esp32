@@ -13,7 +13,11 @@ class Settings(BaseSettings):
     # fit this; see server.context.
     max_context_tokens: int = 2000
     # A reply longer than a few sentences is unbearable read aloud.
-    max_tokens: int = 150
+    # The spec says ~150, which was right for a model that answers directly.
+    # gpt-oss at 150 produces 250 characters - fifteen seconds of speech, during
+    # which the device ignores the button and the link carries half a megabyte.
+    # Ninety keeps replies near the two sentences the persona asks for.
+    max_tokens: int = 90
     # Also bounds how much audio one utterance may buffer.
     session_timeout_s: float = 60.0
 

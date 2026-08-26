@@ -72,7 +72,8 @@
 // several hundred milliseconds at a time, so playback starts and immediately
 // runs dry. Three quarters of a second of head start costs that much extra
 // latency once, at the beginning, instead of stuttering throughout.
-#define PREBUFFER_BYTES 24000    // 0.75 s at 16 kHz mono 16-bit
+// Counted in compressed bytes now: 0.75 s of speech is 6000 of them.
+#define PREBUFFER_CODED 6000
 
 #define DEBOUNCE_MS 25
 // Never block forever on a send. The button is polled in the same loop, so an
@@ -237,6 +238,46 @@ static size_t adpcm_encode_block(const int16_t *in, size_t n, uint8_t *out) {
         const uint8_t hi = adpcm_encode_sample(in[i]);
         const uint8_t lo = adpcm_encode_sample(in[i + 1]);
         out[written++] = (uint8_t)((hi << 4) | lo);
+    }
+    return written;
+}
+
+// Decoder state for the reply stream. Separate from the encoder's: the two
+// directions are independent streams and must not share a predictor.
+static int32_t s_adpcm_rx_pred = 0;
+static int32_t s_adpcm_rx_index = 0;
+
+static void adpcm_rx_reset(void) {
+    s_adpcm_rx_pred = 0;
+    s_adpcm_rx_index = 0;
+}
+
+static inline int16_t adpcm_decode_code(uint8_t code) {
+    const int32_t step = ADPCM_STEP[s_adpcm_rx_index];
+
+    int32_t vpdiff = step >> 3;
+    if (code & 4) vpdiff += step;
+    if (code & 2) vpdiff += step >> 1;
+    if (code & 1) vpdiff += step >> 2;
+
+    s_adpcm_rx_pred += (code & 8) ? -vpdiff : vpdiff;
+    if (s_adpcm_rx_pred > 32767) s_adpcm_rx_pred = 32767;
+    if (s_adpcm_rx_pred < -32768) s_adpcm_rx_pred = -32768;
+
+    s_adpcm_rx_index += ADPCM_INDEX[code];
+    if (s_adpcm_rx_index < 0) s_adpcm_rx_index = 0;
+    if (s_adpcm_rx_index > 88) s_adpcm_rx_index = 88;
+
+    return (int16_t)s_adpcm_rx_pred;
+}
+
+// Expands in place-ish: n coded bytes become 2n samples. Earlier sample in the
+// high nibble, matching the server.
+static size_t adpcm_decode_block(const uint8_t *in, size_t n, int16_t *out) {
+    size_t written = 0;
+    for (size_t i = 0; i < n; i++) {
+        out[written++] = adpcm_decode_code((in[i] >> 4) & 0x0F);
+        out[written++] = adpcm_decode_code(in[i] & 0x0F);
     }
     return written;
 }
@@ -492,7 +533,10 @@ static void audio_in_task(void *arg) {
 }
 
 static void audio_out_task(void *arg) {
-    static uint8_t pcm[BLOCK_SAMPLES * 2];
+    // The play buffer now holds compressed audio, so the same RAM rides out
+    // four times as long a gap: 48 KB is about six seconds of speech.
+    static uint8_t coded[BLOCK_SAMPLES / 2];
+    static int16_t pcm[BLOCK_SAMPLES];
     static int32_t frame[BLOCK_SAMPLES * 2];
     bool playing = false;
     TickType_t play_started = 0;
@@ -500,16 +544,17 @@ static void audio_out_task(void *arg) {
     uint32_t starved = 0;  // times the buffer ran dry mid-reply
 
     while (true) {
-        size_t got = xStreamBufferReceive(s_play_buf, pcm, sizeof(pcm), pdMS_TO_TICKS(20));
+        size_t got = xStreamBufferReceive(s_play_buf, coded, sizeof(coded), pdMS_TO_TICKS(20));
 
         if (got > 0) {
             if (!playing) {
                 play_started = xTaskGetTickCount();
                 played_bytes = 0;
                 starved = 0;
+                adpcm_rx_reset();
                 // Hold the amp shut until enough audio is queued to play
                 // through the next gap in delivery.
-                while (xStreamBufferBytesAvailable(s_play_buf) < PREBUFFER_BYTES &&
+                while (xStreamBufferBytesAvailable(s_play_buf) < PREBUFFER_CODED &&
                        !s_reply_finished) {
                     vTaskDelay(pdMS_TO_TICKS(10));
                 }
@@ -517,17 +562,16 @@ static void audio_out_task(void *arg) {
                 playing = true;
                 s_play_dropped = 0;
             }
-            const size_t n = got / sizeof(int16_t);
-            const int16_t *src = (const int16_t *)pcm;
+            const size_t n = adpcm_decode_block(coded, got, pcm);
             for (size_t i = 0; i < n; i++) {
                 // int16 into the top half of a 32-bit slot; left channel only,
                 // which is what the amplifier selects with SD driven high.
-                frame[i * 2] = (int32_t)src[i] << 16;
+                frame[i * 2] = (int32_t)pcm[i] << 16;
                 frame[i * 2 + 1] = 0;
             }
             size_t written = 0;
             i2s_channel_write(s_tx, frame, n * 2 * sizeof(int32_t), &written, portMAX_DELAY);
-            played_bytes += (uint32_t)got;
+            played_bytes += (uint32_t)(n * sizeof(int16_t));
             continue;
         }
 

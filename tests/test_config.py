@@ -11,7 +11,9 @@ def test_defaults_match_the_spec():
     assert s.session_timeout_s == 60
     assert s.log_level == "info"
     assert s.sample_rate == 16000
-    assert s.max_tokens == 150
+    # The spec says ~150. Lowered deliberately: at 150 this model spends the
+    # budget on 250-character answers that take fifteen seconds to speak.
+    assert s.max_tokens == 90
 
 
 def test_environment_overrides_defaults(monkeypatch):

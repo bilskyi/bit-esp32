@@ -12,7 +12,7 @@ from enum import Enum
 
 from server.context import build_messages, estimate_tokens
 from server.costs import Usage
-from server.codec import AdpcmDecoder
+from server.codec import AdpcmDecoder, AdpcmEncoder
 from server.lang import DEFAULT, detect_language, voice_for
 from server.memory.summarise import extract_facts
 from server.persona import build_system_prompt
@@ -155,6 +155,10 @@ class Session:
         language: str | None = None
         sent_bytes = 0
         reply_started = time.monotonic()
+        # Reply audio goes back compressed too when the device asked for it.
+        # A spoken answer is far larger than the question - 340 KB against
+        # 15 KB - so the downlink benefits more from this than the uplink did.
+        encoder = AdpcmEncoder() if self._codec == "adpcm" else None
 
         def is_speakable(sentence: str) -> bool:
             """True if there is anything for a voice to actually say.
@@ -182,8 +186,14 @@ class Session:
                 nonlocal sent_bytes
                 async with asyncio.timeout(self.settings.tts_timeout_s):
                     async for pcm_chunk in self.tts.synthesise(sentence, with_voice):
-                        await self.transport.send_bytes(pcm_chunk)
+                        # Pacing counts audio, not bytes on the wire, so the
+                        # figure has to be taken before compression.
                         sent_bytes += len(pcm_chunk)
+                        if encoder is not None:
+                            pcm_chunk = encoder.feed(pcm_chunk)
+                            if not pcm_chunk:
+                                continue
+                        await self.transport.send_bytes(pcm_chunk)
 
                         # Stay at most playback_lead_s ahead of what the device
                         # can have played by now.

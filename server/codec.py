@@ -88,3 +88,86 @@ class AdpcmDecoder:
     def feed(self, data: bytes) -> bytes:
         pcm, self._predictor, self._index = _decode(data, self._predictor, self._index)
         return pcm
+
+
+def _encode(pcm: bytes, predictor: int, index: int) -> tuple[bytes, int, int]:
+    """Compress 16-bit PCM to 4-bit ADPCM, returning the trailing state."""
+    n = len(pcm) // 2
+    if n == 0:
+        return b"", predictor, index
+
+    out = bytearray(n // 2)
+    pos = 0
+    pending = 0
+    have_pending = False
+
+    for i in range(n):
+        sample = int.from_bytes(pcm[i * 2 : i * 2 + 2], "little", signed=True)
+        step = _STEP_TABLE[index]
+        diff = sample - predictor
+
+        code = 0
+        if diff < 0:
+            code = 8
+            diff = -diff
+
+        # Three magnitude bits, each worth half the previous, with the
+        # reconstruction accumulated so encoder and decoder stay in lockstep.
+        vpdiff = step >> 3
+        if diff >= step:
+            code |= 4
+            diff -= step
+            vpdiff += step
+        step >>= 1
+        if diff >= step:
+            code |= 2
+            diff -= step
+            vpdiff += step
+        step >>= 1
+        if diff >= step:
+            code |= 1
+            vpdiff += step
+
+        predictor = predictor - vpdiff if code & 8 else predictor + vpdiff
+        predictor = max(-32768, min(32767, predictor))
+
+        index += _INDEX_TABLE[code]
+        index = max(0, min(88, index))
+
+        if have_pending:
+            out[pos] = (pending << 4) | code
+            pos += 1
+            have_pending = False
+        else:
+            pending = code
+            have_pending = True
+
+    return bytes(out[:pos]), predictor, index
+
+
+def pcm_to_adpcm(pcm: bytes, predictor: int = 0, index: int = 0) -> bytes:
+    """Compress 16-bit little-endian PCM to 4-bit ADPCM."""
+    return _encode(pcm, predictor, index)[0]
+
+
+class AdpcmEncoder:
+    """Stateful encoder, so a reply can be compressed as it is synthesised.
+
+    Carries the coder state and any odd trailing sample between calls: chunk
+    boundaries must not be audible, and a sample dropped at a seam would shift
+    every nibble after it.
+    """
+
+    def __init__(self) -> None:
+        self._predictor = 0
+        self._index = 0
+        self._odd = b""
+
+    def feed(self, pcm: bytes) -> bytes:
+        data = self._odd + pcm
+        usable = len(data) // 4 * 4  # whole sample pairs only
+        self._odd = data[usable:]
+        coded, self._predictor, self._index = _encode(
+            data[:usable], self._predictor, self._index
+        )
+        return coded

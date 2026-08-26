@@ -11,7 +11,7 @@ import struct
 
 import pytest
 
-from server.codec import adpcm_to_pcm
+from server.codec import AdpcmEncoder, adpcm_to_pcm, pcm_to_adpcm
 
 audioop = pytest.importorskip("audioop", reason="removed in Python 3.13")
 
@@ -63,3 +63,42 @@ def test_reconstruction_stays_close_to_the_original():
     # ADPCM is lossy, but a 4:1 coder should stay well inside a few percent of
     # full scale on a tone this simple.
     assert err < 0.03 * 32768
+
+
+def test_encoder_matches_reference_on_a_tone():
+    pcm = sine(4000)
+    assert pcm_to_adpcm(pcm) == audioop.lin2adpcm(pcm, 2, None)[0]
+
+
+def test_encoder_matches_reference_on_silence():
+    pcm = b"\x00\x00" * 1000
+    assert pcm_to_adpcm(pcm) == audioop.lin2adpcm(pcm, 2, None)[0]
+
+
+def test_encoder_matches_reference_on_full_scale_swings():
+    pcm = struct.pack("<2000h", *([32767, -32768] * 1000))
+    assert pcm_to_adpcm(pcm) == audioop.lin2adpcm(pcm, 2, None)[0]
+
+
+def test_encoder_halves_then_decoder_restores_length():
+    pcm = sine(2000)
+    coded = pcm_to_adpcm(pcm)
+    assert len(coded) == len(pcm) // 4
+    assert len(adpcm_to_pcm(coded)) == len(pcm)
+
+
+def test_round_trip_stays_recognisable():
+    pcm = sine(8000)
+    out = adpcm_to_pcm(pcm_to_adpcm(pcm))
+    a = struct.unpack(f"<{len(pcm) // 2}h", pcm)
+    b = struct.unpack(f"<{len(out) // 2}h", out)
+    err = math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)) / len(a))
+    assert err < 0.03 * 32768
+
+
+def test_encoder_streams_in_chunks_without_seams():
+    """A chunked encode must equal encoding the whole thing at once."""
+    pcm = sine(4000)
+    enc = AdpcmEncoder()
+    chunked = b"".join(enc.feed(pcm[i : i + 512]) for i in range(0, len(pcm), 512))
+    assert chunked == pcm_to_adpcm(pcm)

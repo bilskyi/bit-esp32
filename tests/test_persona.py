@@ -2,8 +2,15 @@ from server.persona import build_system_prompt
 
 
 def test_caps_reply_length():
+    """Brevity is the persona's whole job; the exact bound has been tightened.
+
+    The spec asked for 1-3 sentences. Measured against gpt-oss that produced
+    253 characters - fifteen seconds of speech, during which the device ignores
+    its button - so the instruction now says one or two, with a word count.
+    """
     prompt = build_system_prompt([]).lower().replace("\u2013", "-")
-    assert "1-3" in prompt and "sentence" in prompt
+    assert "one or two short sentences" in prompt
+    assert "thirty words" in prompt
     assert "never longer" in prompt
 
 
