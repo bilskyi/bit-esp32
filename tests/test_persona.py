@@ -34,3 +34,27 @@ def test_stays_small_enough_to_leave_room_for_history():
 
     facts = [f"Fact number {i}" for i in range(5)]
     assert estimate_tokens(build_system_prompt(facts)) < 400
+
+
+def test_asks_for_an_emotion_tag_naming_every_emotion():
+    """The nine names have to match server.emotion, which has to match face.h.
+    A name the prompt offers but the vocabulary does not know is a face that
+    silently keeps its old expression."""
+    from server.emotion import EMOTIONS
+
+    prompt = build_system_prompt([])
+    for name in EMOTIONS:
+        assert f"[{name}]" in prompt, name
+
+
+def test_puts_the_tag_rule_before_everything_else():
+    """It has to be the very first token of the reply, so it is the first
+    thing the model is told."""
+    prompt = build_system_prompt([])
+    rules = prompt.split("Rules:", 1)[1]
+    assert rules.lstrip().startswith("- Start every reply with how you feel")
+
+
+def test_says_the_tag_is_not_to_be_spoken():
+    prompt = build_system_prompt([]).lower()
+    assert "never spoken" in prompt

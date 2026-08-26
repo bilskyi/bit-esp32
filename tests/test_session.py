@@ -266,3 +266,84 @@ async def test_the_socket_loop_is_not_blocked_while_a_reply_plays():
     assert time.monotonic() - started < 0.2
 
     await session.on_cancel()
+
+
+# ---------------------------------------------------------------- the emotion
+
+def emotions(transport):
+    return [m["value"] for m in transport.json if m.get("type") == "emotion"]
+
+
+def frame_types(transport):
+    return [m["type"] for m in transport.json]
+
+
+async def test_the_emotion_reaches_the_device_before_the_speaking_state():
+    """The face has to be right when the first word arrives, not a beat after
+    it."""
+    session, transport = build(llm=FakeLLM("[curious] А в тебе як?"))
+    await utter(session)
+
+    types = frame_types(transport)
+    assert "emotion" in types
+    speaking = next(
+        i for i, m in enumerate(transport.json)
+        if m.get("type") == "state" and m["value"] == "speaking"
+    )
+    assert types.index("emotion") < speaking
+    assert emotions(transport) == ["curious"]
+
+
+async def test_the_tag_never_reaches_the_voice():
+    """edge-tts pronounces "happy" perfectly happily."""
+    tts = FakeTTS()
+    session, _ = build(llm=FakeLLM("[happy] Все добре. Дякую!"), tts=tts)
+    await utter(session)
+
+    assert tts.spoken
+    for text, _ in tts.spoken:
+        assert "[" not in text and "]" not in text
+        assert "happy" not in text.lower()
+
+
+async def test_a_tag_in_the_middle_of_the_reply_is_removed_too():
+    tts = FakeTTS()
+    session, _ = build(llm=FakeLLM("Все добре [excited] а в тебе?"), tts=tts)
+    await utter(session)
+    for text, _ in tts.spoken:
+        assert "[" not in text
+
+
+async def test_the_tag_is_kept_out_of_the_stored_history():
+    """History is fed back to the model and used for language detection, so a
+    stray tag would compound."""
+    session, _ = build(llm=FakeLLM("[sad] Не знаю."))
+    await utter(session)
+    replies = [m["content"] for m in session.history if m["role"] == "assistant"]
+    assert replies == ["Не знаю."]
+
+
+async def test_an_untagged_reply_still_gets_an_emotion():
+    """Every reply produces exactly one emotion frame, tag or no tag."""
+    session, transport = build(llm=FakeLLM("Авжеж, зробимо!"))
+    await utter(session)
+    assert emotions(transport) == ["excited"]
+
+
+async def test_an_unknown_tag_falls_back_to_the_heuristic():
+    session, transport = build(llm=FakeLLM("[smug] А в тебе як?"))
+    await utter(session)
+    assert emotions(transport) == ["curious"]
+
+
+async def test_exactly_one_emotion_frame_per_reply():
+    session, transport = build(llm=FakeLLM("[happy] Перше. Друге. Третє."))
+    await utter(session)
+    assert emotions(transport) == ["happy"]
+
+
+async def test_a_reply_the_model_could_not_give_looks_sad():
+    """The "did not catch that" fallback goes through the same path."""
+    session, transport = build(llm=FakeLLM(""))
+    await utter(session)
+    assert emotions(transport) == ["sad"]

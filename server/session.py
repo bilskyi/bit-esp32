@@ -14,6 +14,7 @@ from enum import Enum
 from server.context import build_messages, estimate_tokens
 from server.costs import Usage
 from server.codec import AdpcmDecoder, AdpcmEncoder
+from server.emotion import LeadingTag, from_text, strip_tags
 from server.lang import DEFAULT, detect_language, voice_for
 from server.memory.summarise import extract_facts
 from server.persona import build_system_prompt
@@ -194,6 +195,9 @@ class Session:
         prompt_tokens = sum(estimate_tokens(m["content"]) for m in messages)
 
         splitter = SentenceSplitter()
+        # Sits ahead of the splitter: the model's feeling arrives as a tag on
+        # the very first token, and nothing downstream should ever see it.
+        tag = LeadingTag()
         spoken: list[str] = []
         voice: str | None = None
         language: str | None = None
@@ -215,6 +219,10 @@ class Session:
 
         async def say(sentence: str) -> None:
             nonlocal voice, language
+            # Belt and braces. The sniffer takes the tag off the head of the
+            # stream; this catches one the model put anywhere else, because
+            # edge-tts will pronounce "curious" without hesitation.
+            sentence = strip_tags(sentence)
             if not is_speakable(sentence):
                 log.debug("skipping unspeakable fragment: %r", sentence)
                 return
@@ -223,6 +231,14 @@ class Session:
                 # change partway through a reply.
                 language = detect_language(sentence)
                 voice = voice_for(language, self.settings.voices)
+                # The face has to be right before the first word arrives, so
+                # the emotion goes out ahead of the speaking state. By now the
+                # tag has almost always resolved; when it has not, the first
+                # sentence is a better thing to guess from than nothing.
+                emotion = tag.emotion or from_text(sentence)
+                await self.transport.send_json({"type": "emotion", "value": emotion})
+                log.info("emotion %s (%s)", emotion,
+                         "tagged" if tag.emotion else "guessed")
                 await self._set_state(State.SPEAKING)
             spoken.append(sentence)
 
@@ -277,8 +293,10 @@ class Session:
                 log.warning("tts failed for %r, skipping sentence", sentence[:60])
 
         async for delta in self.llm.stream(messages, self.settings.max_tokens):
-            for sentence in splitter.feed(delta):
+            for sentence in splitter.feed(tag.feed(delta)):
                 await say(sentence)
+        for sentence in splitter.feed(tag.flush()):
+            await say(sentence)
         for sentence in splitter.flush():
             await say(sentence)
 
