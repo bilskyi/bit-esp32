@@ -184,8 +184,14 @@ class Session:
 
             async def render(with_voice: str) -> None:
                 nonlocal sent_bytes
-                async with asyncio.timeout(self.settings.tts_timeout_s):
+                loop = asyncio.get_running_loop()
+                # Start on the short budget; relax it the moment audio arrives.
+                async with asyncio.timeout(self.settings.tts_first_chunk_s) as limit:
+                    started = False
                     async for pcm_chunk in self.tts.synthesise(sentence, with_voice):
+                        if not started:
+                            started = True
+                            limit.reschedule(loop.time() + self.settings.tts_timeout_s)
                         # Pacing counts audio, not bytes on the wire, so the
                         # figure has to be taken before compression.
                         sent_bytes += len(pcm_chunk)

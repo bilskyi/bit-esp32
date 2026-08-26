@@ -72,8 +72,13 @@
 // several hundred milliseconds at a time, so playback starts and immediately
 // runs dry. Three quarters of a second of head start costs that much extra
 // latency once, at the beginning, instead of stuttering throughout.
-// Counted in compressed bytes now: 0.75 s of speech is 6000 of them.
-#define PREBUFFER_CODED 6000
+// Counted in compressed bytes: 0.4 s of speech is 3200 of them.
+//
+// Three quarters of a second was needed when the server trickled audio at a
+// 1.2 s lead and the buffer never got ahead. Now that it fills to four
+// seconds, a shorter head start is safe - and it comes straight off the wait
+// before the first word.
+#define PREBUFFER_CODED 3200
 
 #define DEBOUNCE_MS 25
 // Never block forever on a send. The button is polled in the same loop, so an

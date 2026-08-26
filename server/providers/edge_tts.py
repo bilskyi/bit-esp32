@@ -97,7 +97,9 @@ class EdgeTTS:
         # the last half second back lets the tail be trimmed without giving up
         # streaming: everything before the holdback goes out immediately.
         hold = bytearray()
-        holdback = int(self._rate * 0.5) * 2
+        # A quarter second is enough to catch the padding and costs half as
+        # much delay before the first word as holding back half a second did.
+        holdback = int(self._rate * 0.25) * 2
 
         async for event in stream:
             if event.get("type") != "audio":
