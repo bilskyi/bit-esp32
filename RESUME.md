@@ -55,22 +55,31 @@ that has to work today.
 
 ## What is left
 
-- **A socket drop roughly once per ten turns.** A send stalls past the timeout
-  and the client tears the connection down; it recovers in about three seconds,
-  but the press during that window is lost. The timeout was just raised from
-  5 s to 12 s because the stall that triggered the last one measured 5006 ms.
-  Unverified.
-- **No feedback on the device.** Pressing while it is still speaking logs
-  `press ignored: still in state 3` and does nothing visible, which reads as
-  "it broke". Most boards have an LED on GPIO 8; the spec always intended state
-  to drive one.
-- **Railway.** The server still runs on the laptop. Deploying needs `wss://`,
-  which needs a custom partition table - the binary is 933 KB of a 1 MB
-  partition and the chip has 2 MB - plus DEVICE_TOKEN and a volume for SQLite.
-- **Instrumentation should come out** once this is stable: `send of ... took`,
-  `starved`, `rssi`, the reply logging.
+- **The radio, above.** Everything else is tuned; this is what stands between
+  the current state and a device that simply works.
+- **Instrumentation should come out** once the link is sound: `send of ...
+  took`, `starved`, `rssi`, the reply logging. They earned their place but they
+  are noise now.
 - **`capture` uses mono slot mode, `voice` uses stereo.** Both work; they
-  should agree.
+  should agree before anyone reads the code and believes the wrong one.
+- **Facts on Railway start empty.** The volume is new, so the assistant has to
+  learn the name again. Nothing to fix, just surprising the first time.
+
+## Done since the last note
+
+- **Button interrupts a reply.** Press while it is speaking and it stops and
+  listens - 14 ms from press to silence on hardware. Needed replies to run off
+  the socket loop, which needed on_end to stop blocking, which broke thirteen
+  tests honestly and gained five.
+- **LED on GPIO 8 shows state.** Dark ready, steady listening, fast thinking,
+  slow speaking, two blinks when there is no connection. It paid for itself
+  within the hour by showing a disconnection that had been invisible.
+- **A supervisor drags the socket back.** The client's own retry gives up; this
+  rebuilds it after fifteen seconds offline and reboots after ninety. Verified
+  by killing the server for twenty-five seconds.
+- **Deployed to Railway** at `voice-server-production-e023.up.railway.app`,
+  token-protected, SQLite on a volume at `/data`. The server holds 31 MB idle
+  and 74 MB through a conversation, so the Hobby plan's $5 is not at risk.
 
 ## What actually caused the trouble, in order of how long it hid
 
