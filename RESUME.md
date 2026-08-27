@@ -250,8 +250,10 @@ flicking about once a second reads as nervous rather than thoughtful.
   already falls asleep on its own 90 s timer.
 - End to end against the real pipeline: `emotion happy` arrives at the same
   instant as `state speaking`, 370 ms before the first audio.
-- gpt-oss tagged 8/8 replies across three languages with nothing leaking into
-  the spoken text.
+- gpt-oss tags essentially every reply across three languages, with nothing
+  leaking into the spoken text. The 8/8 this line used to claim has been
+  superseded by 29/30 over a thirty-question corpus; the one miss was a
+  genuinely empty reply, not an untagged one.
 
 **The device still does not need any of it.** `voice_main` probes the bus before
 WiFi; if nothing answers at 0x3C or 0x3D it logs one line and never starts the
