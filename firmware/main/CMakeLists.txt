@@ -27,7 +27,7 @@ endif()
 # Provisioning is part of the real device only. The bring-up sketches exist to
 # isolate one piece of hardware each, and a WiFi stack in them would defeat it.
 if(SKETCH STREQUAL "voice")
-    list(APPEND SKETCH_SRCS "provision_logic.c" "setup_screen.c" "config_store.c")
+    list(APPEND SKETCH_SRCS "provision_logic.c" "setup_screen.c" "config_store.c" "provision.c")
 endif()
 
 idf_component_register(SRCS ${SKETCH_SRCS}
