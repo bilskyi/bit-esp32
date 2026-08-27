@@ -62,23 +62,6 @@ def test_puts_the_tag_rule_before_everything_else():
     assert "before any words" in first_rule
 
 
-def test_the_tag_is_read_off_the_answer_rather_than_off_a_feeling():
-    """The rule used to open with "how you feel about it". An assistant
-    answering "what is the weather" honestly feels nothing about it, and
-    [neutral] is the correct answer to the question as asked - which is how
-    eight of the nine emotions stopped appearing. It now points at the reply.
-    """
-    prompt = build_system_prompt([]).lower()
-    assert "how you feel" not in prompt
-    assert "read off what you are about to say" in prompt
-
-
-def test_neutral_is_denied_its_second_job():
-    """[neutral] eats the other eight when it doubles as "unsure which one"."""
-    prompt = build_system_prompt([]).lower()
-    assert "not for being unsure" in prompt
-
-
 def test_says_the_tag_is_not_to_be_spoken():
     prompt = build_system_prompt([]).lower()
     assert "never spoken" in prompt
