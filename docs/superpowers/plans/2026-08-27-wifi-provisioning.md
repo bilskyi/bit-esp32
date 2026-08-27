@@ -481,14 +481,22 @@ bool pl_unlock_check(pl_unlock_t *u, const char *entered) {
     if (u->unlocked) return true;
     if (u->tries_used >= PL_UNLOCK_MAX_TRIES) return false;
 
+    // Find how far entered actually goes before comparing against it, capped
+    // at PL_CODE_LEN + 1 so a caller passing something enormous costs nothing.
+    // The walk stops at the terminator, so it only ever reads a byte once
+    // every byte before it is known to exist.
+    size_t len = 0;
+    while (len <= PL_CODE_LEN && entered[len] != '\0') len++;
+
     // Compare the whole code every time rather than returning early, so the
-    // time taken says nothing about how many digits were right.
-    int diff = 0;
+    // time taken says nothing about how many digits were right. A wrong
+    // length folds into diff via len rather than being checked by indexing
+    // past where entered was just shown to end.
+    int diff = (len == PL_CODE_LEN) ? 0 : 1;
     for (int i = 0; i < PL_CODE_LEN; i++) {
-        diff |= (unsigned char)entered[i] ^ (unsigned char)u->code[i];
-        if (entered[i] == '\0') { diff |= 1; break; }
+        unsigned char e = ((size_t)i < len) ? (unsigned char)entered[i] : 0;
+        diff |= e ^ (unsigned char)u->code[i];
     }
-    if (entered[PL_CODE_LEN] != '\0') diff |= 1;
 
     u->tries_used++;
     if (diff == 0) {
@@ -498,6 +506,16 @@ bool pl_unlock_check(pl_unlock_t *u, const char *entered) {
     return false;
 }
 ```
+
+**This function was wrong in the first draft of this plan and the bug shipped
+before it was caught.** The original broke out of the comparison loop on the
+terminator and then read `entered[PL_CODE_LEN]` anyway, so a short code read one
+byte past its allocation — confirmed under AddressSanitizer as a
+`heap-buffer-overflow` at this line. The existing wrong-length test did not
+catch it because it passes a string literal, and a literal has enough bytes
+after it that the read lands inside the same page. That is why the host
+harness now builds everything under `-fsanitize=address,undefined` as well as
+plain, and why the regression test allocates on the heap.
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
