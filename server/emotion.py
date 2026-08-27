@@ -85,14 +85,17 @@ _CONFUSED = (
 
 # Checked before the exclamation mark, because "Ого!" would otherwise be read
 # as excitement.
-_SURPRISED = (
-    "ого",
-    "нічого собі",
-    "оце так",
-    "ничего себе",
-    "надо же",
-    "wow",
-    "no way",
+#
+# Matched on word boundaries, unlike the other lists here, because the
+# shortness that makes an interjection recognisable is exactly what makes it
+# dangerous as a substring: "ого" alone is a bare three characters, and it
+# hides inside "нічого", "нікого" and "когось" - three of the commonest
+# words in an ordinary Ukrainian reply. \b is enough to fix it; the longer
+# entries do not need it, but keeping the whole tuple in one pattern keeps
+# the rule in one place instead of splitting it by length.
+_SURPRISED = re.compile(
+    r"\b(ого|нічого собі|оце так|ничего себе|надо же|wow|no way)\b",
+    re.IGNORECASE,
 )
 
 # Greeting, thanks, warmth. Checked before the exclamation mark for the same
@@ -172,7 +175,7 @@ def from_text(text: str) -> str:
         return "sad"
     if any(phrase in low for phrase in _CONFUSED):
         return "confused"
-    if any(phrase in low for phrase in _SURPRISED):
+    if _SURPRISED.search(clean):
         return "surprised"
     if any(phrase in low for phrase in _HAPPY):
         return "happy"

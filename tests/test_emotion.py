@@ -164,6 +164,25 @@ def test_a_reaction_is_surprised(text):
     assert from_text(text) == "surprised"
 
 
+def test_ogo_does_not_hide_inside_an_ordinary_word():
+    """"ого" is a bare three characters, and it happens to be a substring of
+    some of the commonest words in an ordinary Ukrainian reply: "нічого"
+    (nothing), "нікого" (nobody), "когось" (someone). Matched by substring
+    instead of by word boundary, _SURPRISED would fire on all three -
+    stealing an everyday statement into a reaction it never made."""
+    assert from_text("Нічого страшного, спробуємо ще раз.") != "surprised"
+    assert from_text("Я нікого не бачив.") != "surprised"
+
+
+def test_ogo_does_not_steal_a_reply_that_is_actually_happy():
+    """The precedence case: _SURPRISED is checked before _HAPPY, so if "ого"
+    matched inside "нічого" by substring, this reply would be misread as
+    surprise even though it literally contains "дякую" (thanks). This is
+    the test that proves the substring trap is gone rather than merely
+    moved further down the chain."""
+    assert from_text("Дякую, нічого не потрібно.") == "happy"
+
+
 @pytest.mark.parametrize(
     "text",
     ["Привіт! Радий тебе чути.", "Спасибо, что спросил.", "Thanks, glad to help."],
