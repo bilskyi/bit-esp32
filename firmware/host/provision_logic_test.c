@@ -3,6 +3,7 @@
 //   cd firmware/host && make test
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "../main/provision_logic.h"
@@ -203,6 +204,22 @@ static void test_unlock_rejects_wrong_length(void) {
     CHECK(!pl_unlock_check(&u, "42710"), "long code accepted");
 }
 
+static void test_unlock_rejects_wrong_length_heap_allocated(void) {
+    // A string literal like "427" above sits in a read-only page with other
+    // data after it, so a read one byte past its end still lands on mapped
+    // memory and nothing catches it. This heap-allocates "427" at exactly 4
+    // bytes - the 3 characters plus its terminator, with nothing beyond the
+    // allocation - which is what let ASAN catch pl_unlock_check reading
+    // entered[PL_CODE_LEN] after the comparison loop had already found the
+    // terminator and broken out early.
+    pl_unlock_t u;
+    pl_unlock_init(&u, "4271");
+    char *entered = malloc(4);
+    memcpy(entered, "427", 4);
+    CHECK(!pl_unlock_check(&u, entered), "short code accepted");
+    free(entered);
+}
+
 int main(void) {
     test_url_decode_plain();
     test_url_decode_plus_is_space();
@@ -231,6 +248,7 @@ int main(void) {
     test_unlock_stays_unlocked();
     test_unlock_locks_out_after_five_failures();
     test_unlock_rejects_wrong_length();
+    test_unlock_rejects_wrong_length_heap_allocated();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

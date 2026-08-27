@@ -102,14 +102,24 @@ bool pl_unlock_check(pl_unlock_t *u, const char *entered) {
     if (u->unlocked) return true;
     if (u->tries_used >= PL_UNLOCK_MAX_TRIES) return false;
 
+    // Find how far entered actually goes before comparing against it, capped
+    // at PL_CODE_LEN + 1 so a caller passing something enormous costs
+    // nothing. The walk stops the moment it sees the terminator, so it only
+    // ever reads a byte once every byte before it is known - from having
+    // been read as non-NUL - to exist; unlike a plain index into entered, it
+    // can never land past the allocation a short entered points at.
+    size_t len = 0;
+    while (len <= PL_CODE_LEN && entered[len] != '\0') len++;
+
     // Compare the whole code every time rather than returning early, so the
-    // time taken says nothing about how many digits were right.
-    int diff = 0;
+    // time taken says nothing about how many digits were right. A code of
+    // the wrong length is folded into diff via len instead of being checked
+    // by reading past where entered was just shown to end.
+    int diff = (len == PL_CODE_LEN) ? 0 : 1;
     for (int i = 0; i < PL_CODE_LEN; i++) {
-        diff |= (unsigned char)entered[i] ^ (unsigned char)u->code[i];
-        if (entered[i] == '\0') { diff |= 1; break; }
+        unsigned char e = ((size_t)i < len) ? (unsigned char)entered[i] : 0;
+        diff |= e ^ (unsigned char)u->code[i];
     }
-    if (entered[PL_CODE_LEN] != '\0') diff |= 1;
 
     u->tries_used++;
     if (diff == 0) {
