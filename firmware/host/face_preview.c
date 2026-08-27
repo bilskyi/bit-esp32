@@ -34,51 +34,74 @@ typedef struct {
     uint32_t capture_ms;
     uint32_t startle_at;  // ms into the capture; 0 means never
     uint32_t press_at;
+    // How far to let boot get before recording. FACE_BOOT_LINK plus
+    // `boot_through` means "get past the whole power-on sequence first", which
+    // is what every scene about ordinary behaviour wants. A scene with
+    // boot_through cleared records the power-on itself.
+    face_boot_t boot_to;
+    bool boot_through;
+    // Milliseconds into the capture at which the next stage arrives, so one
+    // scene can play the real boot: the numbers below are the device's own,
+    // read out of its log.
+    uint32_t wifi_at;
+    uint32_t link_at;
 } scene_t;
 
 // The script. Order matters only in that it reads as a tour: what it does, then
 // what it feels, then what goes wrong.
 static const scene_t SCENES[] = {
+    // The power-on sequence comes first because it is what you see first, and
+    // because the three stages below are the whole argument for tying it to
+    // real progress rather than to a timer.
+    {"Включение", "Искры разлетаются в полосу, полоса прогревается и распадается на глаза. Открытость = готовность: щёлочка, половина, распахнулись и моргнули.",
+     FACE_ST_IDLE, FACE_EMO_NEUTRAL, EN_NONE, 0, 8000, 0, 0, FACE_BOOT_PANEL, false, 2127, 5002},
+
+    {"Включение: нет WiFi", "Панель ответила, сети нет. Глаза так и остались щёлочками, а зрачки продолжают рыскать — видно, что ищет, а не спит.",
+     FACE_ST_IDLE, FACE_EMO_NEUTRAL, EN_NONE, 0, 7000, 0, 0, FACE_BOOT_PANEL, false, 0, 0},
+
+    {"Включение: нет сервера", "WiFi есть, сервер молчит. Глаза встали на половине и не идут дальше — сразу ясно, на каком шаге застряло.",
+     FACE_ST_IDLE, FACE_EMO_NEUTRAL, EN_NONE, 0, 7000, 0, 0, FACE_BOOT_WIFI, false, 0, 0},
+
     {"Спокойствие", "Моргание, микросаккады, дыхание. Ничего не происходит — и это видно.",
-     FACE_ST_IDLE, FACE_EMO_NEUTRAL, EN_NONE, 0, 9000, 0, 0},
+     FACE_ST_IDLE, FACE_EMO_NEUTRAL, EN_NONE, 0, 9000, 0, 0, FACE_BOOT_LINK, true, 0, 0},
 
     {"Слушает", "Глаза шире, зрачок расширен, взгляд заперт вперёд. Ширина идёт за громкостью твоего голоса.",
-     FACE_ST_LISTENING, FACE_EMO_NEUTRAL, EN_VOICE, 0, 6000, 0, 0},
+     FACE_ST_LISTENING, FACE_EMO_NEUTRAL, EN_VOICE, 0, 6000, 0, 0, FACE_BOOT_LINK, true, 0, 0},
 
     {"Думает", "Взгляд вверх и в сторону, перенаводится каждые ~700 мс. Один глаз чуть уже другого.",
-     FACE_ST_THINKING, FACE_EMO_NEUTRAL, EN_NONE, 0, 5200, 0, 0},
+     FACE_ST_THINKING, FACE_EMO_NEUTRAL, EN_NONE, 0, 5200, 0, 0, FACE_BOOT_LINK, true, 0, 0},
 
     {"Говорит: neutral", "Громкость ответа сжимает глаза на каждом слоге. Рот не понадобился.",
-     FACE_ST_SPEAKING, FACE_EMO_NEUTRAL, EN_SPEECH, 0, 3600, 0, 0},
+     FACE_ST_SPEAKING, FACE_EMO_NEUTRAL, EN_SPEECH, 0, 3600, 0, 0, FACE_BOOT_LINK, true, 0, 0},
     {"Говорит: happy", "Полумесяц срезан снизу — веко поднято, а не глаз уменьшен.",
-     FACE_ST_SPEAKING, FACE_EMO_HAPPY, EN_SPEECH, 0, 3600, 0, 0},
+     FACE_ST_SPEAKING, FACE_EMO_HAPPY, EN_SPEECH, 0, 3600, 0, 0, FACE_BOOT_LINK, true, 0, 0},
     {"Говорит: excited", "Шире и выше, зрачок сжат, намёк на полумесяц.",
-     FACE_ST_SPEAKING, FACE_EMO_EXCITED, EN_SPEECH, 0, 3600, 0, 0},
+     FACE_ST_SPEAKING, FACE_EMO_EXCITED, EN_SPEECH, 0, 3600, 0, 0, FACE_BOOT_LINK, true, 0, 0},
     {"Говорит: curious", "Взгляд уведён в сторону и вверх, глаза чуть разной высоты.",
-     FACE_ST_SPEAKING, FACE_EMO_CURIOUS, EN_SPEECH, 0, 3600, 0, 0},
+     FACE_ST_SPEAKING, FACE_EMO_CURIOUS, EN_SPEECH, 0, 3600, 0, 0, FACE_BOOT_LINK, true, 0, 0},
     {"Говорит: confused", "Асимметрия сильнее всего: один глаз почти на полторы высоты другого.",
-     FACE_ST_SPEAKING, FACE_EMO_CONFUSED, EN_SPEECH, 0, 3600, 0, 0},
+     FACE_ST_SPEAKING, FACE_EMO_CONFUSED, EN_SPEECH, 0, 3600, 0, 0, FACE_BOOT_LINK, true, 0, 0},
     {"Говорит: surprised", "Самая высокая поза, 56 из 64 пикселей, и самый мелкий зрачок.",
-     FACE_ST_SPEAKING, FACE_EMO_SURPRISED, EN_SPEECH, 0, 3600, 0, 0},
+     FACE_ST_SPEAKING, FACE_EMO_SURPRISED, EN_SPEECH, 0, 3600, 0, 0, FACE_BOOT_LINK, true, 0, 0},
     {"Говорит: sad", "Внешнее веко опущено, взгляд вниз, зрачок расширен.",
-     FACE_ST_SPEAKING, FACE_EMO_SAD, EN_SPEECH, 0, 3600, 0, 0},
+     FACE_ST_SPEAKING, FACE_EMO_SAD, EN_SPEECH, 0, 3600, 0, 0, FACE_BOOT_LINK, true, 0, 0},
     {"Говорит: annoyed", "Зеркало грусти: опущено внутреннее веко. Это единственное отличие, и его проверяет тест.",
-     FACE_ST_SPEAKING, FACE_EMO_ANNOYED, EN_SPEECH, 0, 3600, 0, 0},
+     FACE_ST_SPEAKING, FACE_EMO_ANNOYED, EN_SPEECH, 0, 3600, 0, 0, FACE_BOOT_LINK, true, 0, 0},
     {"Говорит: sleepy", "Плоское веко на 43% высоты, взгляд вниз.",
-     FACE_ST_SPEAKING, FACE_EMO_SLEEPY, EN_SPEECH, 0, 3600, 0, 0},
+     FACE_ST_SPEAKING, FACE_EMO_SLEEPY, EN_SPEECH, 0, 3600, 0, 0, FACE_BOOT_LINK, true, 0, 0},
 
     {"Перебили", "Кнопка нажата посреди ответа: глаза распахиваются, зрачок сжимается, 350 мс — и отпускает.",
-     FACE_ST_SPEAKING, FACE_EMO_HAPPY, EN_SPEECH, 1200, 4200, 1400, 0},
+     FACE_ST_SPEAKING, FACE_EMO_HAPPY, EN_SPEECH, 1200, 4200, 1400, 0, FACE_BOOT_LINK, true, 0, 0},
 
     {"Нет связи", "Веки сомкнуты до полоски. Нажатие приоткрывает их и отпускает: услышал, сделать ничего не могу.",
-     FACE_ST_OFFLINE, FACE_EMO_NEUTRAL, EN_NONE, 3000, 5200, 0, 1400},
+     FACE_ST_OFFLINE, FACE_EMO_NEUTRAL, EN_NONE, 3000, 5200, 0, 1400, FACE_BOOT_LINK, true, 0, 0},
 
     {"Минута молчания", "Через 45 с последняя эмоция отпущена — лицо вернулось к neutral само.",
-     FACE_ST_IDLE, FACE_EMO_EXCITED, EN_NONE, 50000, 3200, 0, 0},
+     FACE_ST_IDLE, FACE_EMO_EXCITED, EN_NONE, 50000, 3200, 0, 0, FACE_BOOT_LINK, true, 0, 0},
     {"Полторы минуты", "Через 90 с — sleepy.",
-     FACE_ST_IDLE, FACE_EMO_EXCITED, EN_NONE, 95000, 3200, 0, 0},
+     FACE_ST_IDLE, FACE_EMO_EXCITED, EN_NONE, 95000, 3200, 0, 0, FACE_BOOT_LINK, true, 0, 0},
     {"Три минуты", "Через 180 с глаза закрыты. Полоска остаётся: пустая панель читается не как «спит», а как «сломалось».",
-     FACE_ST_IDLE, FACE_EMO_EXCITED, EN_NONE, 185000, 3200, 0, 0},
+     FACE_ST_IDLE, FACE_EMO_EXCITED, EN_NONE, 185000, 3200, 0, 0, FACE_BOOT_LINK, true, 0, 0},
 };
 
 #define NSCENES (sizeof(SCENES) / sizeof(SCENES[0]))
@@ -215,6 +238,20 @@ int main(int argc, char **argv) {
         face_t f;
         uint32_t t = 100000;
         face_init(&f, t);
+
+        if (sc->boot_through) {
+            // The power-on sequence owns the panel until it finishes, so a
+            // scene about anything else has to get past it first - exactly as
+            // the device does.
+            face_boot_stage(&f, FACE_BOOT_LINK, t);
+            while (face_is_booting(&f) && (t - f.boot_start) < 20000u) {
+                t += TICK_MS;
+                face_tick(&f, t);
+            }
+        } else {
+            face_boot_stage(&f, sc->boot_to, t);
+        }
+
         face_set_emotion(&f, sc->emotion, t);
         face_set_state(&f, sc->state, t);
 
@@ -223,7 +260,9 @@ int main(int argc, char **argv) {
             face_tick(&f, t);
         }
         // Aging the face must not also age the state change out of existence.
-        face_set_state(&f, sc->state, t);
+        // A boot scene has no state to re-assert: the power-on sequence owns
+        // the panel and ignores states until it hands over.
+        if (sc->boot_through) face_set_state(&f, sc->state, t);
 
         ranges[s].start = total;
         bool startled = false, pressed = false;
@@ -235,6 +274,9 @@ int main(int argc, char **argv) {
                 face_startle(&f, t);
                 startled = true;
             }
+            if (sc->wifi_at && e >= sc->wifi_at) face_boot_stage(&f, FACE_BOOT_WIFI, t);
+            if (sc->link_at && e >= sc->link_at) face_boot_stage(&f, FACE_BOOT_LINK, t);
+
             if (sc->press_at && !pressed && e >= sc->press_at) {
                 face_set_button(&f, true, t);
                 pressed = true;

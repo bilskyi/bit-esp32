@@ -182,6 +182,9 @@ static volatile uint32_t s_face_emotion_seq = 0;
 static volatile bool s_face_startle = false;
 // Mean absolute sample of the last audio block, either direction.
 static volatile uint16_t s_audio_level = 0;
+// How far boot has got. Set by the three places that already log these very
+// milestones; the face opens its eyes exactly that far.
+static volatile uint8_t s_boot_stage = FACE_BOOT_PANEL;
 
 static inline uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
@@ -461,6 +464,7 @@ static void wifi_start(void) {
     ESP_LOGI(TAG, "connecting to \"%s\" (2.4 GHz only)", WIFI_SSID);
     xEventGroupWaitBits(s_wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
     ESP_LOGI(TAG, "wifi up");
+    s_boot_stage = FACE_BOOT_WIFI;  // eyes to half open: an IP, but no server yet
 }
 
 // --------------------------------------------------------------- websocket
@@ -476,6 +480,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
         case WEBSOCKET_EVENT_CONNECTED:
             ESP_LOGI(TAG, "socket connected");
             s_offline_since = 0;
+            s_boot_stage = FACE_BOOT_LINK;  // the face can finish waking up
             break;
         case WEBSOCKET_EVENT_DISCONNECTED:
             ESP_LOGW(TAG,
@@ -646,6 +651,11 @@ static void face_task(void *arg) {
 
     while (true) {
         const uint32_t t = now_ms();
+
+        // The power-on sequence owns the panel until it hands over, and it
+        // needs to know how far the device has got. Idempotent, so there is
+        // nothing to latch here.
+        face_boot_stage(&s_face, (face_boot_t)s_boot_stage, t);
 
         // A press that goes nowhere still deserves an answer, so the socket
         // being down is a state of its own rather than an absence of one.

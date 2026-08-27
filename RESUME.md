@@ -134,6 +134,7 @@ face — it drives the eyes.
 
 | State | Eyes |
 |---|---|
+| powering on | two sparks shoot outward into a bar across the panel, the bar warms up and collapses back into eyes, then **how far the eyes open is how far the device has got** — see below |
 | idle | blink every 2.5–6 s, sometimes twice; random saccades; breathing; after 45 s the last emotion is let go, at 90 s sleepy, at 180 s asleep |
 | listening | wide, pupils dilated, gaze locked forward; **your** loudness widens them |
 | thinking | **squints hard** (46 → 38 px), brow furrows, gaze holds up and away and rolls to a new place every 1.4–2.4 s |
@@ -151,7 +152,7 @@ surprised sad annoyed sleepy`. The model picks one per reply.
 | `main/face.c` | **nothing** | framebuffer, drawing, animation, emotions |
 | `main/ssd1306.c` | `driver/i2c_master` | init, probe, per-page flush |
 | `main/face_main.c` | both | the `face` bring-up sketch |
-| `host/face_test.c` | `face.c` | 469 invariant checks |
+| `host/face_test.c` | `face.c` | 487 invariant checks |
 | `host/face_preview.c` | `face.c` | the animation, as a web page |
 | `server/emotion.py` | — | tag off the stream, heuristic fallback |
 
@@ -172,6 +173,47 @@ still in its box and is still the fastest way to change how the eyes look.
   against the 67% recorded before it existed. I2C switching GPIO 0 and 1 next
   to the antenna was a fair thing to suspect, and it was not the cause.
 
+### Powering on, and why it is not decoration
+
+Five seconds pass between the panel answering and the socket connecting, and
+before this the face said nothing about them: the eyes appeared open, shut
+immediately because `s_ws` was still `NULL`, lay shut, and opened again. It
+read as "woke up, changed its mind, woke up again".
+
+Now the openness *is* the progress. `face_boot_stage()` takes three values and
+they are set by the three places that already log those very milestones:
+
+| | | |
+|---|---|---|
+| `FACE_BOOT_PANEL` | 232 ms | the display answered; eyes are a slit, pupils sweeping |
+| `FACE_BOOT_WIFI` | 2127 ms | an IP arrived; eyes half open |
+| `FACE_BOOT_LINK` | 5002 ms | socket connected; eyes open, one blink, a look around |
+
+That is the whole payoff: **stuck on WiFi and stuck on the server look
+different, and both look different from working.** Measured on the preview,
+the three hold at 964, 1896 and 3200 lit pixels and do not drift. A boot
+animation on a timer would have shown the same thing in all three cases.
+
+The stage only moves forward, so a socket that dies later is the ordinary
+offline state rather than a claim that the device rebooted. A test checks that.
+
+Three things the sequence is built on, all of which fall out of the renderer
+rather than being added to it:
+
+- `hs` far above 1 makes the two eyes overlap into a single bar across the
+  panel. That is the one shape in the whole vocabulary that cannot be mistaken
+  for a mood, so "power came on" is unambiguous from the first frame — where
+  two slits would have been indistinguishable from "no connection".
+- No pupil is drawn below 14 px of eye height, so the pupils vanish for the bar
+  and arrive by themselves as the eyes grow.
+- `vs` is floored at 12, so the warm-up flicker can thin the bar but never
+  blank it. Found by measuring rather than by reading: the first attempt tried
+  to blank a frame and the clamp quietly refused.
+
+Width collapses before height grows, and deliberately not on one curve. Run
+them together and the pupils arrive while the shape is still a full-width bar,
+which reads as a letterbox with two holes rather than as eyes being born.
+
 ### Why "thinking" reads, and what nearly went wrong
 
 The first version moved only the pupil, and it did that well: measured, it held
@@ -189,7 +231,7 @@ flicking about once a second reads as nervous rather than thoughtful.
 
 ### Verified off the bench
 
-- 469 host checks, 0 failures. `cd firmware/host && make test`.
+- 487 host checks, 0 failures. `cd firmware/host && make test`.
 - All four sketches build with **zero warnings**.
 - 189 server tests. One reads the emotion names straight out of `face.c`, because
   the device matches them by substring and a rename would not raise anywhere —
@@ -261,7 +303,7 @@ cd firmware && idf.py -DSKETCH=voice -p /dev/cu.usbmodem1101 flash monitor
 ```bash
 # the eyes, on the laptop
 cd firmware/host
-make test        # 469 invariants, no board needed
+make test        # 487 invariants, no board needed
 make preview     # build/face-preview.html, every state and emotion
 ```
 

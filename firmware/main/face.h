@@ -52,6 +52,23 @@ typedef enum {
     FACE_ST_COUNT
 } face_state_t;
 
+// How far the device has got since power came on.
+//
+// The face plays a power-on sequence until it reaches FACE_BOOT_LINK, and how
+// far the eyes open is how far the device has got. That is not decoration:
+// five seconds pass between the panel answering and the socket connecting, and
+// this is the only thing that can say where in those five seconds it is. Stuck
+// on WiFi and stuck on the server look different from each other, and both
+// look different from working.
+//
+// The stage only ever moves forward. A socket that drops later is the ordinary
+// FACE_ST_OFFLINE, not a reboot.
+typedef enum {
+    FACE_BOOT_PANEL = 0,  // the display answered; nothing else is up
+    FACE_BOOT_WIFI,       // an IP arrived
+    FACE_BOOT_LINK,       // the socket is connected - ready to talk
+} face_boot_t;
+
 // One eye's shape, all Q8. Emotions are rows of this; blinking, breathing,
 // gaze and loudness are modulations applied on top.
 typedef struct {
@@ -73,6 +90,12 @@ typedef struct {
     face_state_t state;
     face_emotion_t emotion;
     bool button;
+
+    // -- the power-on sequence, until the socket comes up
+    bool booting;
+    uint8_t boot_stage;
+    uint32_t boot_start;   // when the panel came up and drawing became possible
+    uint32_t boot_reached; // when the current stage was reached
 
     // -- timing, all in milliseconds from the same clock the owner passes in
     uint32_t now;
@@ -119,6 +142,15 @@ void face_set_button(face_t *f, bool down, uint32_t now_ms);
 // from the button, because by the time the state has changed the reason for the
 // change is gone.
 void face_startle(face_t *f, uint32_t now_ms);
+
+// How far the device has got. Safe to call every frame with the same value;
+// only an advance does anything, and the stage never goes backwards.
+void face_boot_stage(face_t *f, face_boot_t stage, uint32_t now_ms);
+
+// True until the power-on sequence has finished playing. Nothing depends on
+// this inside face.c - it is here so the owner can tell whether the face is
+// still reporting the boot or has taken over the ordinary states.
+static inline bool face_is_booting(const face_t *f) { return f->booting; }
 
 // Raw block RMS, in int16 sample units. Normalised internally against a slowly
 // decaying peak, so the microphone near -46 dBFS and a reply near full scale

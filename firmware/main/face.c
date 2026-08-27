@@ -85,6 +85,11 @@ static uint32_t rnd(face_t *f) {
     return x;
 }
 
+// Interpolate a to b, k in 0..256.
+static int32_t lerp_q8(int32_t a, int32_t b, int32_t k) {
+    return a + (((b - a) * k) >> FP);
+}
+
 static int16_t clamp16(int32_t v, int32_t lo, int32_t hi) {
     if (v < lo) v = lo;
     if (v > hi) v = hi;
@@ -523,6 +528,128 @@ static void overlay_state(face_t *f, face_pose_t *t) {
     }
 }
 
+// ------------------------------------------------------------------ power on
+
+// Two sparks shoot outward into a bar, the bar warms up and collapses back
+// into eyes, and then the eyes open exactly as far as the device is ready.
+//
+// Everything here is the ordinary pose model; nothing new is drawn. Three
+// things fall out of the renderer for free and the sequence is built around
+// them:
+//
+//   `hs` far above 1 makes the two eyes overlap into a single bar across the
+//   whole panel. That is the one shape in the entire vocabulary that cannot be
+//   mistaken for a mood, so "power came on" is unambiguous from the very first
+//   frame the panel is able to draw.
+//
+//   No pupil is drawn below 14 px of eye height, so the pupils vanish for the
+//   bar and arrive by themselves as the eyes grow.
+//
+//   `vs` is floored at 12, so the bar can thin but never vanish - the same
+//   clamp that stops a blink leaving a dead panel. The warm-up flicker is six
+//   rows to two and back, which is the deepest pulse the renderer allows.
+//
+// The waiting pose is a slit with the pupil riding low and sweeping, because
+// two motionless slits are precisely what "no connection" already looks like,
+// and the first thing shown after power-on must not be that.
+#define BOOT_SPARK 90    // the filaments light
+#define BOOT_SHOOT 190   // they race outward and meet
+#define BOOT_WARM 140    // the bar catches
+#define BOOT_SNAP 180    // the bar collapses back to two dashes
+#define BOOT_GROW 160    // and they grow upward into eyes
+#define BOOT_FLOURISH (BOOT_SPARK + BOOT_SHOOT + BOOT_WARM + BOOT_SNAP + BOOT_GROW)
+#define BOOT_OPEN 420    // opening once the socket lands
+#define BOOT_SETTLE 1500 // the blink and the look around after that
+
+// How ready the device is, 0..256. It holds rather than easing between
+// stages: the device has no idea how far along an association is, and a bar
+// creeping along would be inventing progress it cannot know about.
+static int32_t boot_readiness(const face_t *f) {
+    switch (f->boot_stage) {
+        case FACE_BOOT_LINK: {
+            const uint32_t e = since(f->now, f->boot_reached);
+            return lerp_q8(140, ONE, smoothstep(e, BOOT_OPEN));
+        }
+        case FACE_BOOT_WIFI: return 140;
+        default:             return 38;
+    }
+}
+
+static void boot_pose(face_t *f, face_pose_t *p) {
+    p->hs = ONE; p->vs = ONE; p->gx = 0; p->gy = 0;
+    p->slant = 0; p->happy = 0; p->lid = 0; p->pup = ONE; p->asym = 0;
+
+    const uint32_t e = since(f->now, f->boot_start);
+    const int32_t r = boot_readiness(f);
+
+    if (e < BOOT_SPARK) {
+        p->hs = (int16_t)lerp_q8(44, 120, smoothstep(e, BOOT_SPARK));
+        p->vs = 7;
+        return;
+    }
+    if (e < BOOT_SPARK + BOOT_SHOOT) {
+        p->hs = (int16_t)lerp_q8(120, 900, smoothstep(e - BOOT_SPARK, BOOT_SHOOT));
+        p->vs = 7;
+        return;
+    }
+    if (e < BOOT_SPARK + BOOT_SHOOT + BOOT_WARM) {
+        const uint32_t k = e - BOOT_SPARK - BOOT_SHOOT;
+        p->hs = 900;
+        p->vs = (int16_t)(k < 40u ? 34 : k < 80u ? 12 : 38);
+        return;
+    }
+    if (e < BOOT_FLOURISH - BOOT_GROW) {
+        // Width first, height second, and deliberately not on one curve: run
+        // them together and the pupils arrive while the shape is still a
+        // full-width bar, which reads as a letterbox with two holes in it.
+        const int32_t k = smoothstep(e - BOOT_SPARK - BOOT_SHOOT - BOOT_WARM, BOOT_SNAP);
+        p->hs = (int16_t)(k < 190 ? lerp_q8(900, 228, k * ONE / 190)
+                                  : lerp_q8(228, ONE, (k - 190) * ONE / 66));
+        p->vs = 38;
+        return;
+    }
+    if (e < BOOT_FLOURISH) {
+        const int32_t k = smoothstep(e - (BOOT_FLOURISH - BOOT_GROW), BOOT_GROW);
+        p->vs = (int16_t)lerp_q8(38, 225, k);
+        p->lid = (int16_t)lerp_q8(0, 165, k);
+        p->gy = (int16_t)lerp_q8(0, 140, k);
+        return;
+    }
+
+    // Waiting, then opening. `away` is how far from ready it still is.
+    const int32_t away = ONE - r;
+    const int32_t span = ONE - 38;
+    p->vs = (int16_t)lerp_q8(ONE, 225, away * ONE / span);
+    p->lid = (int16_t)(165 * away / span);
+    p->gy = (int16_t)(140 * away / span);
+    p->gx = (int16_t)((fsin(phase_of(f->now, 1800u)) * 200 * away / span) >> FP);
+    p->pup = (int16_t)lerp_q8(ONE, 218, away * ONE / span);
+
+    if (f->boot_stage != FACE_BOOT_LINK) return;
+
+    // Ready: one blink, then a look around, then hand over to the ordinary
+    // states with the pose already where they expect it.
+    const uint32_t done = since(f->now, f->boot_reached);
+    if (done < BOOT_OPEN) return;
+
+    const uint32_t s = done - BOOT_OPEN;
+    if (s < 260u) {
+        if (s < 110u) p->lid = (int16_t)((smoothstep(s, 110) * 250) >> FP);
+        else if (s < 160u) p->lid = 250;
+        else p->lid = (int16_t)(((ONE - smoothstep(s - 160u, 100)) * 250) >> FP);
+    } else if (s < BOOT_SETTLE) {
+        const uint32_t u = s - 260u;
+        p->gx = (int16_t)((fsin(phase_of(u, 2480u)) * 150) >> FP);
+        p->gy = (int16_t)(-((fsin(phase_of(u, 1240u)) * 50) >> FP));
+    } else {
+        f->booting = false;   // the ordinary state machine takes it from here
+        f->cur = *p;
+        f->last_activity = f->now;
+        f->next_blink = f->now + blink_interval(f);
+        f->next_sacc = f->now;
+    }
+}
+
 static void slew(face_pose_t *c, const face_pose_t *t, int32_t fast, int32_t slow) {
 #define TOWARD(field, a) c->field = (int16_t)(c->field + (((int32_t)(t->field - c->field) * (a)) >> FP))
     TOWARD(hs, fast);
@@ -562,7 +689,16 @@ void face_init(face_t *f, uint32_t now_ms) {
     f->next_think_aim = now_ms;
     f->think_dir = 150;
 
-    face_render_pose(f->fb, &f->cur);
+    // face_init is called the moment the panel answers, which is exactly when
+    // the power-on sequence should start.
+    f->booting = true;
+    f->boot_stage = FACE_BOOT_PANEL;
+    f->boot_start = now_ms;
+    f->boot_reached = now_ms;
+
+    face_pose_t first;
+    boot_pose(f, &first);
+    face_render_pose(f->fb, &first);
 }
 
 void face_set_state(face_t *f, face_state_t state, uint32_t now_ms) {
@@ -595,6 +731,14 @@ void face_set_button(face_t *f, bool down, uint32_t now_ms) {
         }
     }
     f->button = down;
+}
+
+void face_boot_stage(face_t *f, face_boot_t stage, uint32_t now_ms) {
+    f->now = now_ms;
+    if (!f->booting) return;                  // the sequence has already ended
+    if ((uint8_t)stage <= f->boot_stage) return;  // forward only
+    f->boot_stage = (uint8_t)stage;
+    f->boot_reached = now_ms;
 }
 
 void face_startle(face_t *f, uint32_t now_ms) {
@@ -647,6 +791,20 @@ void face_tick(face_t *f, uint32_t now_ms) {
     if (since(now_ms, f->last_energy) > 80u) {
         if (f->e_fast) f->e_fast = (uint8_t)(f->e_fast - (f->e_fast >> 1) - 1);
         if (f->e_slow) f->e_slow = (uint8_t)(f->e_slow - (f->e_slow >> 2) - 1);
+    }
+
+    // The power-on sequence owns the face until it hands over. It is not a
+    // state the server can ask for and not an emotion: it reports where the
+    // device itself has got to, and nothing else may talk over it.
+    if (f->booting) {
+        face_pose_t boot;
+        boot_pose(f, &boot);
+        boot.lid = clamp16(boot.lid, 0, 250);
+        boot.vs = clamp16(boot.vs, 12, 900);
+        boot.hs = clamp16(boot.hs, 12, 900);
+        boot.pup = clamp16(boot.pup, 40, 700);
+        face_render_pose(f->fb, &boot);
+        return;
     }
 
     if (f->startle_until && due(now_ms, f->startle_until)) f->startle_until = 0;
