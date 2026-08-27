@@ -250,10 +250,11 @@ flicking about once a second reads as nervous rather than thoughtful.
   already falls asleep on its own 90 s timer.
 - End to end against the real pipeline: `emotion happy` arrives at the same
   instant as `state speaking`, 370 ms before the first audio.
-- gpt-oss tags essentially every reply across three languages, with nothing
-  leaking into the spoken text. The 8/8 this line used to claim has been
-  superseded by 29/30 over a thirty-question corpus; the one miss was a
-  genuinely empty reply, not an untagged one.
+- gpt-oss tags 29/30 replies across three languages, with nothing leaking
+  into the spoken text. The 8/8 this line used to claim has been superseded
+  by that thirty-question corpus. The survey recorded the one miss as an
+  empty reply — the model returned nothing, so there was nothing to tag —
+  not a reply the tagger failed to catch.
 
 **The device still does not need any of it.** `voice_main` probes the bus before
 WiFi; if nothing answers at 0x3C or 0x3D it logs one line and never starts the
@@ -448,7 +449,15 @@ over thirty questions, three runs each, the reframe made the `neutral` share
 worse on every paired draw — the worst old run beat the best rewrite by
 thirteen points. The old wording is what ships.
 
+The rewrite also made replies shorter, the other way round: median 52, 66, 72
+characters for the old wording against 40, 48, 51 for the rewrite, about a
+third shorter. Brevity does outrank variety in this project, so that is a
+real gain — but it was not what the change was for, and it was not worth a
+worse face. If shorter replies are wanted, the brevity rule is the honest
+place to ask for them.
+
 The premise behind the rewrite was also wrong: it assumed the model had
-collapsed onto two or three emotions. The survey found six or seven of nine
-every run. `excited` and `surprised` never appeared in any of the six runs —
+collapsed onto two or three emotions. The kept wording reached six or seven
+of nine on every run (7, 7, 6); the reverted wording dropped to five twice
+(5, 5, 6). `excited` and `surprised` never appeared in any of the six runs —
 that is the real gap, not `neutral`-collapse.
