@@ -25,13 +25,59 @@
 
 **Files:**
 - Create: `scripts/emotion_survey.py`
-- Test: none. This is a bench tool that talks to the real Groq API, like `scripts/mic_to_stt.py` and `scripts/fake_device.py`, neither of which has one. Its verification is the run itself, and its deliverable is the baseline it prints.
+- Create: `tests/test_emotion_survey.py`
+
+The script's *behaviour* has no unit test: it talks to the real Groq API, like `scripts/mic_to_stt.py` and `scripts/fake_device.py`, neither of which has one either. Its verification is the run itself. Its **corpus**, however, is hand-edited data that nothing else checks, and a duplicated line or nine questions in one language would quietly bias every distribution the script prints while looking exactly as authoritative. That gets a test, and it needs no network.
 
 **Interfaces:**
-- Consumes: `server.config.Settings`, `server.context.build_messages`, `server.context.estimate_tokens`, `server.emotion.EMOTIONS`, `server.emotion.LeadingTag`, `server.emotion.from_text`, `server.persona.build_system_prompt`, `server.providers.groq_llm.GroqLLM`.
-- Produces: a JSON array of row objects with keys `lang`, `question`, `reply`, `tagged`, `emotion`, `chars`, `brackets`. Task 2 re-runs this script and compares two such files.
+- Consumes: `server.config.Settings`, `server.context.build_messages`, `server.context.estimate_tokens`, `server.emotion.EMOTIONS`, `server.emotion.LeadingTag`, `server.emotion.from_text`, `server.lang.VOICES` (test only), `server.persona.build_system_prompt`, `server.providers.groq_llm.GroqLLM`.
+- Produces: `scripts.emotion_survey.CORPUS: list[tuple[str, str]]` — `(language, question)` pairs. A JSON array of row objects with keys `lang`, `question`, `reply`, `tagged`, `emotion`, `chars`, `brackets`. Task 2 re-runs this script and compares two such files.
 
-- [ ] **Step 1: Write the script**
+- [ ] **Step 1: Write the failing corpus test**
+
+Create `tests/test_emotion_survey.py`:
+
+```python
+"""The survey's corpus is data, and data gets edited by hand.
+
+A duplicated line, or nine questions in one language instead of ten, would
+bias every distribution the script prints - and the number would look exactly
+as authoritative as a correct one. Nothing else checks it.
+"""
+
+from collections import Counter
+
+from scripts.emotion_survey import CORPUS
+
+
+def test_the_corpus_is_thirty_questions_ten_per_language():
+    assert len(CORPUS) == 30
+    assert Counter(lang for lang, _ in CORPUS) == {"uk": 10, "ru": 10, "en": 10}
+
+
+def test_no_question_appears_twice():
+    questions = [question for _, question in CORPUS]
+    assert len(set(questions)) == len(questions)
+
+
+def test_every_language_is_one_the_server_can_speak():
+    """A fourth language in the corpus would be answered in Ukrainian by the
+    persona's own rule, so its rows would measure the wrong thing."""
+    from server.lang import VOICES
+
+    assert {lang for lang, _ in CORPUS} == set(VOICES)
+```
+
+`scripts/` has no `__init__.py` and does not need one: pytest is configured
+with `pythonpath = ["."]`, which makes `scripts.emotion_survey` importable as
+a namespace package. Verified against `scripts.mic_to_stt`.
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `uv run pytest tests/test_emotion_survey.py -q`
+Expected: collection error, `ModuleNotFoundError: No module named 'scripts.emotion_survey'`.
+
+- [ ] **Step 3: Write the script**
 
 Create `scripts/emotion_survey.py`:
 
@@ -201,7 +247,12 @@ if __name__ == "__main__":
     raise SystemExit(asyncio.run(main()))
 ```
 
-- [ ] **Step 2: Smoke-run it on three questions**
+- [ ] **Step 4: Run the corpus test to verify it passes**
+
+Run: `uv run pytest tests/test_emotion_survey.py -q`
+Expected: 3 passed.
+
+- [ ] **Step 5: Smoke-run it on three questions**
 
 Run: `uv run python scripts/emotion_survey.py --limit 3`
 
@@ -210,7 +261,7 @@ reply in Ukrainian, then the distribution block. If it prints
 `GROQ_API_KEY is not set`, the `.env` in the repo root is missing or empty —
 stop and say so rather than working around it.
 
-- [ ] **Step 3: Take the baseline**
+- [ ] **Step 6: Take the baseline**
 
 Run: `uv run python scripts/emotion_survey.py --out /tmp/emotion-before.json`
 
@@ -219,16 +270,15 @@ the commit message** — the count of distinct emotions, the tagged/guessed
 split, and the median and max reply length. These are the numbers Task 2 is
 judged against; nothing else records them.
 
-- [ ] **Step 4: Confirm nothing else broke**
+- [ ] **Step 7: Run the whole suite**
 
 Run: `uv run pytest -q`
-Expected: all tests pass. (The script is not imported by anything, so this is
-a guard against an accidental edit, not a real risk.)
+Expected: all tests pass, with three more than before.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add scripts/emotion_survey.py
+git add scripts/emotion_survey.py tests/test_emotion_survey.py
 git commit -m "$(cat <<'EOF'
 Count the faces the model actually asks for
 
@@ -241,8 +291,13 @@ prompt edit breaks: whether the model tagged at all, how long the replies
 got, and whether a bracket reached text that would have been spoken.
 Brevity is the one to watch - it outranks variety here.
 
+The corpus is hand-edited data and nothing else checks it, so it has a
+test: thirty questions, ten per language, no duplicates, no language the
+server has no voice for. A biased corpus prints a number that looks as
+authoritative as a correct one.
+
 Baseline, today's prompt:
-<paste the summary block from step 3>
+<paste the summary block from step 6>
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 EOF
@@ -788,7 +843,8 @@ EOF
 | The prompt rewrite, exact wording | Task 2, Step 3 |
 | Token budget stays under 400 | Global Constraints; Task 2, Step 4 |
 | Glossary deferred, cap not raised | Global Constraints; Task 2, Step 6 |
-| The survey: corpus, LeadingTag reuse, four reported figures, JSON, sequential | Task 1, Step 1 |
+| The survey: corpus, LeadingTag reuse, four reported figures, JSON, sequential | Task 1, Step 3 |
+| The corpus is data and gets a test of its own | Task 1, Step 1 |
 | Heuristic: seven emotions, the ordering, the two exclusions | Task 3, Step 3 |
 | Tests: per-language reachability, three precedence tests, the registry test | Task 3, Step 1 |
 | `test_puts_the_tag_rule_before_everything_else` rewritten to guard position | Task 2, Step 1 |
