@@ -22,7 +22,11 @@ def test_no_question_appears_twice():
 
 def test_every_language_is_one_the_server_can_speak():
     """A fourth language in the corpus would be answered in Ukrainian by the
-    persona's own rule, so its rows would measure the wrong thing."""
+    persona's own rule, so its rows would measure the wrong thing. The intent
+    is that the corpus asks for no voice the server lacks - not that it uses
+    every voice the server has, which a fourth voice added to VOICES would
+    break for no reason. The balance across the three it does use is already
+    pinned by test_the_corpus_is_thirty_questions_ten_per_language above."""
     from server.lang import VOICES
 
-    assert {lang for lang, _ in CORPUS} == set(VOICES)
+    assert {lang for lang, _ in CORPUS} <= set(VOICES)
