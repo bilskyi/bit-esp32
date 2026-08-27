@@ -194,6 +194,12 @@ different, and both look different from working.** Measured on the preview,
 the three hold at 964, 1896 and 3200 lit pixels and do not drift. A boot
 animation on a timer would have shown the same thing in all three cases.
 
+The value holds between stages but **eases across every one of them, on one
+curve**. The first version eased only the last transition and let the others
+step: the WiFi milestone moved the face 932 lit pixels in a single 40 ms frame
+while every other frame moved by fewer than ten, and it read as a cut because
+it was one. It is now spread over 400 ms, worst single frame 174 px.
+
 The stage only moves forward, so a socket that dies later is the ordinary
 offline state rather than a claim that the device rebooted. A test checks that.
 

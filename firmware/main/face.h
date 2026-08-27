@@ -96,6 +96,7 @@ typedef struct {
     uint8_t boot_stage;
     uint32_t boot_start;   // when the panel came up and drawing became possible
     uint32_t boot_reached; // when the current stage was reached
+    int16_t boot_from;     // readiness at that moment, so stages ease not step
 
     // -- timing, all in milliseconds from the same clock the owner passes in
     uint32_t now;

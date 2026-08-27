@@ -561,18 +561,27 @@ static void overlay_state(face_t *f, face_pose_t *t) {
 #define BOOT_OPEN 420    // opening once the socket lands
 #define BOOT_SETTLE 1500 // the blink and the look around after that
 
-// How ready the device is, 0..256. It holds rather than easing between
-// stages: the device has no idea how far along an association is, and a bar
-// creeping along would be inventing progress it cannot know about.
-static int32_t boot_readiness(const face_t *f) {
-    switch (f->boot_stage) {
-        case FACE_BOOT_LINK: {
-            const uint32_t e = since(f->now, f->boot_reached);
-            return lerp_q8(140, ONE, smoothstep(e, BOOT_OPEN));
-        }
+// Where each stage sits. Between stages the value holds: the device has no
+// idea how far along an association is, and eyes creeping open would be
+// inventing progress it cannot know about.
+static int32_t boot_level(uint8_t stage) {
+    switch (stage) {
+        case FACE_BOOT_LINK: return ONE;
         case FACE_BOOT_WIFI: return 140;
         default:             return 38;
     }
+}
+
+// How ready the device is, 0..256.
+//
+// The value holds between stages but eases across them, on one curve for every
+// stage. The first version eased only the last one and let the others step, and
+// the WiFi milestone moved the face 932 lit pixels in a single 40 ms frame
+// while every other frame moved by fewer than ten. It read as a cut, because it
+// was one.
+static int32_t boot_readiness(const face_t *f) {
+    const uint32_t e = since(f->now, f->boot_reached);
+    return lerp_q8(f->boot_from, boot_level(f->boot_stage), smoothstep(e, BOOT_OPEN));
 }
 
 static void boot_pose(face_t *f, face_pose_t *p) {
@@ -695,6 +704,7 @@ void face_init(face_t *f, uint32_t now_ms) {
     f->boot_stage = FACE_BOOT_PANEL;
     f->boot_start = now_ms;
     f->boot_reached = now_ms;
+    f->boot_from = 38;  // the level FACE_BOOT_PANEL sits at
 
     face_pose_t first;
     boot_pose(f, &first);
@@ -737,6 +747,11 @@ void face_boot_stage(face_t *f, face_boot_t stage, uint32_t now_ms) {
     f->now = now_ms;
     if (!f->booting) return;                  // the sequence has already ended
     if ((uint8_t)stage <= f->boot_stage) return;  // forward only
+
+    // Ease from wherever the eyes actually are, not from where the stage we are
+    // leaving nominally sits. Two milestones landing in quick succession then
+    // blend instead of fighting each other.
+    f->boot_from = (int16_t)boot_readiness(f);
     f->boot_stage = (uint8_t)stage;
     f->boot_reached = now_ms;
 }
