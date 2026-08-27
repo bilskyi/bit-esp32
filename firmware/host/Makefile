@@ -11,14 +11,18 @@
 #
 # The sanitized build exists because plain cc over C11 does not catch
 # out-of-bounds reads or writes - it built and passed a heap-buffer-overflow
-# in pl_unlock_check for a long time. `make test` always runs both builds so
-# that stays caught; it is not an opt-in extra.
+# in pl_unlock_check for a long time. `make test` runs both builds by
+# default so that stays caught; it is not an opt-in extra. But the sanitizer
+# runtime isn't everywhere - an older GCC, a minimal CI image, a sandbox -
+# so ASAN=0 (make test ASAN=0) drops back to the plain build alone instead
+# of failing where a plain build would have worked.
 
 CC           ?= cc
 CFLAGS       ?= -std=c11 -O2 -Wall -Wextra -Werror -I../main
 ASAN_CFLAGS  := -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -g -I../main
 BUILD        := build
 ASAN_BUILD   := build-asan
+ASAN         ?= 1
 
 .PHONY: all test asan preview clean
 
@@ -45,9 +49,12 @@ $(ASAN_BUILD)/face_test: ../main/face.c ../main/face.h face_test.c | $(ASAN_BUIL
 $(ASAN_BUILD)/provision_logic_test: ../main/provision_logic.c ../main/provision_logic.h provision_logic_test.c | $(ASAN_BUILD)
 	$(CC) $(ASAN_CFLAGS) -o $@ ../main/provision_logic.c provision_logic_test.c
 
-test: $(BUILD)/face_test $(BUILD)/provision_logic_test asan
+test: $(BUILD)/face_test $(BUILD)/provision_logic_test
 	@./$(BUILD)/face_test
 	@./$(BUILD)/provision_logic_test
+ifneq ($(ASAN),0)
+test: asan
+endif
 
 asan: $(ASAN_BUILD)/face_test $(ASAN_BUILD)/provision_logic_test
 	@./$(ASAN_BUILD)/face_test
