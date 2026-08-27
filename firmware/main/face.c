@@ -454,20 +454,22 @@ static int32_t blink_lid(face_t *f, uint32_t now) {
 static void saccade(face_t *f, uint32_t now, int32_t *out_x, int32_t *out_y) {
     if (due(now, f->next_sacc)) {
         int32_t ax, ay;
-        uint32_t every;
+        uint32_t every, dur;
         switch (f->state) {
-            case FACE_ST_LISTENING: ax = 26;  ay = 20; every = 2500u + rnd(f) % 1800u; break;
-            case FACE_ST_THINKING:  ax = 120; ay = 70; every =  500u + rnd(f) %  420u; break;
-            case FACE_ST_SPEAKING:  ax = 44;  ay = 34; every = 1200u + rnd(f) % 1400u; break;
-            case FACE_ST_OFFLINE:   ax = 0;   ay = 0;  every = 4000u;                  break;
-            default:                ax = 92;  ay = 60; every = 1500u + rnd(f) % 2600u; break;
+            case FACE_ST_LISTENING: ax = 26; ay = 20; every = 2500u + rnd(f) % 1800u; dur = 90u + rnd(f) % 60u;  break;
+            // Fewer and slower than anything else: the gaze rolls to a new
+            // place and stays there, rather than darting.
+            case FACE_ST_THINKING:  ax = 62; ay = 40; every = 1100u + rnd(f) %  900u; dur = 230u + rnd(f) % 90u; break;
+            case FACE_ST_SPEAKING:  ax = 44; ay = 34; every = 1200u + rnd(f) % 1400u; dur = 90u + rnd(f) % 60u;  break;
+            case FACE_ST_OFFLINE:   ax = 0;  ay = 0;  every = 4000u;                  dur = 200u;                break;
+            default:                ax = 92; ay = 60; every = 1500u + rnd(f) % 2600u; dur = 90u + rnd(f) % 60u;  break;
         }
         f->sacc_from_x = f->sacc_to_x;
         f->sacc_from_y = f->sacc_to_y;
         f->sacc_to_x = ax ? (int16_t)((int32_t)(rnd(f) % (uint32_t)(2 * ax + 1)) - ax) : 0;
         f->sacc_to_y = ay ? (int16_t)((int32_t)(rnd(f) % (uint32_t)(2 * ay + 1)) - ay) : 0;
         f->sacc_start = now;
-        f->sacc_dur = 90u + rnd(f) % 60u;
+        f->sacc_dur = dur;
         f->next_sacc = now + every;
     }
 
@@ -487,16 +489,29 @@ static void overlay_state(face_t *f, face_pose_t *t) {
             break;
 
         case FACE_ST_THINKING:
-            // Up and away, re-aimed every so often, one eye a touch narrower.
+            // Up and away, and - the part that took a measurement to find -
+            // narrowed.
+            //
+            // The first version moved only the pupil: it held the gaze up 82%
+            // of the time and swung 10 px sideways, and still read as idle.
+            // Its eyes were 46.3 px tall against idle's 45.7, so the silhouette
+            // was identical and the pupil was carrying the whole message on its
+            // own. From across the room shape is read first and pupils second.
+            //
+            // So the eyes now genuinely squint, the inner lids come down into a
+            // furrow, and the gaze re-aims half as often, because a face that
+            // flicks about once a second reads as nervous rather than
+            // thoughtful.
             if (due(f->now, f->next_think_aim)) {
-                f->think_dir = (int16_t)((rnd(f) & 1u) ? 150 : -150);
-                f->next_think_aim = f->now + 600u + rnd(f) % 500u;
+                f->think_dir = (int16_t)((rnd(f) & 1u) ? 210 : -210);
+                f->next_think_aim = f->now + 1400u + rnd(f) % 1000u;
             }
             t->gx = f->think_dir;
-            t->gy = -165;
-            t->pup = (int16_t)((t->pup * 226) >> FP);
-            t->asym = (int16_t)(t->asym + 26);
-            t->vs = (int16_t)((t->vs * 244) >> FP);
+            t->gy = -185;
+            t->pup = (int16_t)((t->pup * 218) >> FP);
+            t->asym = (int16_t)(t->asym + 22);
+            t->slant = (int16_t)(t->slant + 45);  // a furrow, not a scowl
+            t->vs = (int16_t)((t->vs * 205) >> FP);
             break;
 
         case FACE_ST_SPEAKING:

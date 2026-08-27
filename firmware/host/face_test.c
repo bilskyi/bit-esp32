@@ -238,6 +238,130 @@ static void test_gaze_moves_pupil(void) {
           "gaze right should move the pupil right: %d then %d", cen[0], cen[1]);
 }
 
+// -------------------------------------------------------- where the pupil is
+
+// The centroid of the enclosed dark pixels in the left eye, relative to the
+// centre of that eye's lit bounding box. Enclosed means "has a lit pixel above
+// and below it in the same column", which finds the pupil without caring what
+// the lids are doing to the outline.
+static bool pupil_offset(const uint8_t *fb, double *dx, double *dy, int *height) {
+    int bx0 = FACE_W, bx1 = -1, by0 = FACE_H, by1 = -1;
+    for (int y = 0; y < FACE_H; y++) {
+        for (int x = 2; x < FACE_W / 2; x++) {
+            if (!lit_at(fb, x, y)) continue;
+            if (x < bx0) bx0 = x;
+            if (x > bx1) bx1 = x;
+            if (y < by0) by0 = y;
+            if (y > by1) by1 = y;
+        }
+    }
+    if (bx1 < 0) return false;
+    *height = by1 - by0 + 1;
+
+    double sx = 0, sy = 0;
+    int n = 0;
+    for (int x = bx0; x <= bx1; x++) {
+        int top = -1, bot = -1;
+        for (int y = by0; y <= by1; y++) {
+            if (!lit_at(fb, x, y)) continue;
+            if (top < 0) top = y;
+            bot = y;
+        }
+        if (top < 0) continue;
+        for (int y = top + 1; y < bot; y++) {
+            if (lit_at(fb, x, y)) continue;
+            sx += x;
+            sy += y;
+            n++;
+        }
+    }
+    if (n < 8) return false;
+    *dx = sx / n - (bx0 + bx1) / 2.0;
+    *dy = sy / n - (by0 + by1) / 2.0;
+    return true;
+}
+
+typedef struct {
+    double held_up;   // fraction of frames with the gaze clearly raised
+    double reach;     // furthest the pupil gets from centre, sideways
+    double height;    // mean height of the lit eye
+} gaze_stats_t;
+
+static gaze_stats_t survey(face_state_t st, uint32_t ms) {
+    face_t f;
+    face_init(&f, 5000);
+    face_set_state(&f, st, 5000);
+
+    uint32_t t = 5000;
+    gaze_stats_t s = {0, 0, 0};
+    int n = 0, held = 0;
+    double sum_h = 0;
+
+    for (uint32_t e = 0; e < ms; e += TICK_MS) {
+        t += TICK_MS;
+        face_tick(&f, t);
+        double ox, oy;
+        int eh;
+        if (!pupil_offset(f.fb, &ox, &oy, &eh)) continue;
+        n++;
+        sum_h += eh;
+        if (oy < -3.0) held++;
+        const double a = ox < 0 ? -ox : ox;
+        if (a > s.reach) s.reach = a;
+    }
+    if (n) {
+        s.held_up = (double)held / n;
+        s.height = sum_h / n;
+    }
+    return s;
+}
+
+static void test_thinking_is_unmistakable(void) {
+    // Measured before this was tuned: thinking already held the gaze up 82% of
+    // the time and swung the pupil 10 px sideways, and it still did not read
+    // as thinking. The reason was the silhouette - the eye was 46.3 px tall
+    // against idle's 45.7, so from across the room the two states were the
+    // same shape and only the pupil differed. Shape is read first.
+    const gaze_stats_t idle = survey(FACE_ST_IDLE, 12000);
+    const gaze_stats_t think = survey(FACE_ST_THINKING, 12000);
+
+    CHECK(think.height < idle.height - 5.0,
+          "thinking must narrow the eyes, or it is idle with a moving pupil: "
+          "%.1f px vs idle %.1f px", think.height, idle.height);
+    CHECK(think.held_up > 0.70,
+          "thinking should hold the gaze up, not bob: %.0f%% of frames",
+          think.held_up * 100);
+    CHECK(idle.held_up < 0.20,
+          "idle should not be staring upward: %.0f%% of frames",
+          idle.held_up * 100);
+    CHECK(think.reach > idle.reach + 3.0,
+          "thinking should look further aside than idle: %.1f px vs %.1f px",
+          think.reach, idle.reach);
+}
+
+static void test_thinking_looks_different_from_listening(void) {
+    // Both are "waiting" states and both follow a button press, so if they
+    // look alike the face is telling the user nothing.
+    face_t a, b;
+    face_init(&a, 5000);
+    face_init(&b, 5000);
+    face_set_state(&a, FACE_ST_LISTENING, 5000);
+    face_set_state(&b, FACE_ST_THINKING, 5000);
+
+    uint32_t t = 5000;
+    int worst = 1 << 30;
+    for (int i = 0; i < 200; i++) {
+        t += TICK_MS;
+        face_tick(&a, t);
+        face_tick(&b, t);
+        if (i < 40) continue;  // let both settle
+        const int d = hamming(a.fb, b.fb);
+        if (d < worst) worst = d;
+    }
+    CHECK(worst > 90, "listening and thinking look alike: %d pixels apart at closest",
+          worst);
+}
+
 // ------------------------------------------------------------------- blinking
 
 static int blank_run_ms = 0, worst_blank_run_ms = 0;
@@ -541,6 +665,8 @@ int main(void) {
         {"annoyed and sad slant opposite ways", test_slant_direction},
         {"a raised lower lid never cuts the pupil open", test_lower_lid_never_opens_the_pupil},
         {"gaze moves the pupil", test_gaze_moves_pupil},
+        {"thinking is unmistakable", test_thinking_is_unmistakable},
+        {"thinking and listening are not twins", test_thinking_looks_different_from_listening},
         {"blinks happen and the panel is never dark", test_blinks_and_never_dark},
         {"offline keeps a visible sliver", test_offline_keeps_a_sliver},
         {"a press while offline stirs the eyes", test_press_while_offline_stirs},

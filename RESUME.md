@@ -136,7 +136,7 @@ face — it drives the eyes.
 |---|---|
 | idle | blink every 2.5–6 s, sometimes twice; random saccades; breathing; after 45 s the last emotion is let go, at 90 s sleepy, at 180 s asleep |
 | listening | wide, pupils dilated, gaze locked forward; **your** loudness widens them |
-| thinking | rolls up and away, re-aims every ~700 ms, one eye a touch narrower |
+| thinking | **squints hard** (46 → 38 px), brow furrows, gaze holds up and away and rolls to a new place every 1.4–2.4 s |
 | speaking | the emotion, with the reply's own loudness squashing the eyes per syllable |
 | interrupted | 350 ms flinch: snap wide, pupil to 55%, then decay |
 | no connection | lids shut to a bar; **a press cracks them open and lets them fall** |
@@ -171,6 +171,21 @@ still in its box and is still the fastest way to change how the eyes look.
 - **The face did not make the radio worse**: 66.7% ping loss with it running,
   against the 67% recorded before it existed. I2C switching GPIO 0 and 1 next
   to the antenna was a fair thing to suspect, and it was not the cause.
+
+### Why "thinking" reads, and what nearly went wrong
+
+The first version moved only the pupil, and it did that well: measured, it held
+the gaze up 82% of the time and swung the pupil 10 px sideways. It still read
+as idle. The reason was one number nobody would have guessed — its eyes were
+**46.3 px tall against idle's 45.7**, so the two states had the same
+silhouette and the pupil was carrying the whole message alone.
+
+Shape is read before pupils. The intuitive fix — make the gaze travel further —
+would have changed nothing. What fixed it was squinting: 38 px against idle's
+46, plus a brow furrow and a gaze that re-aims half as often, because a face
+flicking about once a second reads as nervous rather than thoughtful.
+
+`face_test.c` now fails if thinking is not at least 5 px shorter than idle.
 
 ### Verified off the bench
 
@@ -282,6 +297,18 @@ afplay /System/Library/Sounds/Ping.aiff
 - **ESP-IDF and this project's `uv` venv collide.** On *Cannot import module
   esp_idf_monitor*:
   `unset VIRTUAL_ENV && python3 $IDF_PATH/tools/idf_tools.py install-python-env`
+- **The same error also has a second cause, and that remedy makes it worse.**
+  `export.sh` picks the first `python3` on PATH and then looks for an IDF
+  environment built for *that* version. The project venv is 3.12 and the built
+  environment is `idf5.3_py3.14_env`, so if `.venv/bin` is anywhere on PATH -
+  `VIRTUAL_ENV` unset or not - it hunts for `idf5.3_py3.12_env` and fails.
+  Running `install-python-env` then builds a third environment instead of
+  fixing anything. Check `python3 --version` before believing the message, and
+  drop the venv from PATH:
+
+  ```bash
+  export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "Documents/BIT/.venv" | paste -sd: -)
+  ```
 - **`idf.py ... | tail` hides failures** — the exit status is `tail`'s. This
   once reported a failed build as a clean pass.
 - **`railway up` uploads a directory, not a commit.** `.railwayignore` must
