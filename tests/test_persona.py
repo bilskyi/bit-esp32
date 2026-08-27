@@ -49,10 +49,34 @@ def test_asks_for_an_emotion_tag_naming_every_emotion():
 
 def test_puts_the_tag_rule_before_everything_else():
     """It has to be the very first token of the reply, so it is the first
-    thing the model is told."""
+    thing the model is told.
+
+    Asserts the position and the subject, not the wording: the wording is
+    deliberately tuned and a test pinned to it would have to be edited every
+    time it is, which teaches everyone to edit the test rather than read it.
+    """
     prompt = build_system_prompt([])
-    rules = prompt.split("Rules:", 1)[1]
-    assert rules.lstrip().startswith("- Start every reply with how you feel")
+    first_rule = prompt.split("Rules:", 1)[1].strip().split("\n")[0]
+    assert first_rule.startswith("-")
+    assert "square brackets" in first_rule
+    assert "before any words" in first_rule
+
+
+def test_the_tag_is_read_off_the_answer_rather_than_off_a_feeling():
+    """The rule used to open with "how you feel about it". An assistant
+    answering "what is the weather" honestly feels nothing about it, and
+    [neutral] is the correct answer to the question as asked - which is how
+    eight of the nine emotions stopped appearing. It now points at the reply.
+    """
+    prompt = build_system_prompt([]).lower()
+    assert "how you feel" not in prompt
+    assert "read off what you are about to say" in prompt
+
+
+def test_neutral_is_denied_its_second_job():
+    """[neutral] eats the other eight when it doubles as "unsure which one"."""
+    prompt = build_system_prompt([]).lower()
+    assert "not for being unsure" in prompt
 
 
 def test_says_the_tag_is_not_to_be_spoken():
