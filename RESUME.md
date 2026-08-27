@@ -9,9 +9,10 @@ and English mid-session, interruptible mid-reply, with an LED showing state.
 The server is deployed. What is not solved is the radio link, and that is where
 the last two days went.
 
-**It also has a face now** — a pair of animated eyes for the OLED, written and
-tested but never yet shown on glass, because the panel is not wired. Four
-wires and one flash will tell. See "The face" below.
+**It also has a face now** — a pair of animated eyes on the OLED, wired,
+flashed and confirmed on real glass. Five conversations through it with zero
+dropped blocks and zero send failures, including an interruption. See "The
+face" below.
 
 ---
 
@@ -40,8 +41,8 @@ token and `SERVER_URI`. Only that last line differs between LAN and cloud.
 | Amp shutdown | 10 | MAX98357A `SD` |
 | Button to GND | 3 | push-to-talk |
 | Status LED | 8 | onboard, **lights on LOW** |
-| I2C SDA | 0 | SSD1306 `SDA` — **not connected yet** |
-| I2C SCL | 1 | SSD1306 `SCL` — **not connected yet** |
+| I2C SDA | 0 | SSD1306 `SDA` |
+| I2C SCL | 1 | SSD1306 `SCL` |
 
 Mic on **3V3**, amp on **5V**. The OLED takes 3V3 too. Do not use GPIO 9
 (BOOT), 18/19 (USB), 2 (strapping).
@@ -58,11 +59,28 @@ is told to use one. `CONFIG_RTC_CLK_SRC_INT_RC=y`, so they are genuinely free.
 | Playback | real time, nine consecutive turns with zero underruns |
 | First audio | median 1.5 s local, 1854 ms through Railway |
 | Server memory | 31 MB idle, 74 MB through a conversation |
-| Free heap on device | 92-98 KB with TLS on, **before the face** |
+| Free heap on device | 172 KB at boot, **55 KB mid-conversation** — see below |
 | Codec | IMA ADPCM both directions, 4:1, verified against `audioop` |
 | Emotion tag | model tagged 8/8 replies, three languages, nothing leaked |
 | Tag latency cost | 60-110 ms to the first sentence, measured against a control |
 | `voice` image | 1013 KB, 51% of the app partition free |
+| OLED | answers at **0x3C**, found 232 ms into boot, before the radio |
+| Face heap cost | **4660 B**, printed by the device at boot |
+| Face frame time | 92 µs / 14-19 ms / 24.4 ms against a 40 ms budget at 400 kHz |
+
+**The old 92-98 KB free-heap figure did not reproduce.** It is 55 KB during a
+turn now, and the face is not the reason: the device prints its own cost at
+boot and it is 4.7 KB. Between boot and a live conversation the heap goes from
+172 KB to 55 KB, which is WiFi, mbedTLS and the full root bundle — the same
+appetite the traps section below already records. Why the earlier number was so
+much higher is unexplained; the old build is gone. 55 KB is evidently enough:
+TLS handshakes succeed and five turns ran with no failures.
+
+The frame time is worth reading twice. 24.4 ms is the worst case, a full
+1 KB frame, and it matches the 23 ms the arithmetic predicted. The 92 µs
+minimum is a frame where no page changed at all, so the flush returns without
+touching the bus. Raising `FACE_I2C_HZ` past the datasheet's 400 kHz is
+possible but has not been needed.
 
 ---
 
@@ -104,9 +122,8 @@ means radio, and no amount of code will fix it.
 
 ## The face
 
-Built, tested, and **never yet seen on a real panel**. Everything below is
-either verified on the laptop or verified by the compiler; nothing is verified
-by looking at glass, because there is no glass connected.
+Wired, flashed, and working. The panel answers at 0x3C and the eyes are alive
+on it, inside the full `voice` firmware alongside WiFi and TLS.
 
 ### What it does
 
@@ -140,9 +157,22 @@ surprised sad annoyed sleepy`. The model picks one per reply.
 
 `face.c` includes no ESP-IDF header and uses no float — the C3 has no FPU, so
 everything is Q8 fixed point with an integer square root. That is what lets the
-same code run on the laptop, which mattered a lot while the panel was in a box.
+same code run on the laptop, which mattered a great deal while the panel was
+still in its box and is still the fastest way to change how the eyes look.
 
-### Verified
+### Verified on the bench
+
+- The eyes are alive on the panel, in the `voice` firmware, with WiFi and TLS up.
+- Five conversations through it: **0 dropped blocks, 0 send failures**, slowest
+  send 5-6 ms, playback never starved, 0 bytes dropped. One of them interrupted
+  mid-reply, so the flinch fired too.
+- The face costs 4660 B of heap. The device prints it at boot.
+- Frame time 92 µs / 14-19 ms / 24.4 ms against a 40 ms budget.
+- **The face did not make the radio worse**: 66.7% ping loss with it running,
+  against the 67% recorded before it existed. I2C switching GPIO 0 and 1 next
+  to the antenna was a fair thing to suspect, and it was not the cause.
+
+### Verified off the bench
 
 - 469 host checks, 0 failures. `cd firmware/host && make test`.
 - All four sketches build with **zero warnings**.
@@ -154,22 +184,9 @@ same code run on the laptop, which mattered a lot while the panel was in a box.
 - gpt-oss tagged 8/8 replies across three languages with nothing leaking into
   the spoken text.
 
-### Not verified, and only the panel can settle it
-
-1. **Whether anything appears at all.** Wire it and run `idf.py -DSKETCH=face`.
-   The sketch says which of three things to check if the bus stays silent.
-2. **Frame time.** 23 ms for a full frame at 400 kHz is arithmetic. The sketch
-   prints min/avg/max every ten seconds against the 40 ms budget. Most modules
-   run happily at two or three times the datasheet clock, which would cut it to
-   under 10 ms — measure before believing it.
-3. **Free heap.** It was 92–98 KB with TLS on. The face adds roughly 8 KB
-   (a 1 KB shadow, a 1 KB scratch, `face_t`, a 3 KB stack, the I2C driver).
-   TLS handshakes want tens of KB transiently, so watch the number in the
-   `socket disconnected` line.
-
-**The device does not need any of this.** `voice_main` probes the bus before
+**The device still does not need any of it.** `voice_main` probes the bus before
 WiFi; if nothing answers at 0x3C or 0x3D it logs one line and never starts the
-task. Flashing today, with no display attached, behaves exactly as yesterday.
+task. Unplug the panel and the firmware behaves exactly as it did before.
 
 ### Looking at it without hardware
 

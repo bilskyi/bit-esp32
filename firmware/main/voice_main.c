@@ -1085,12 +1085,24 @@ void app_main(void) {
     // Nothing below may be allowed to stop the device. It worked for two days
     // without a display and has to keep working without one: if nothing
     // answers on the bus, say so once and never start the task.
+    // What the face costs, printed by the device rather than estimated. The
+    // estimate was 8 KB and it was wrong by a factor of three, which is the
+    // usual outcome of estimating on this project.
+    const uint32_t heap_before_face = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+
     if (ssd1306_init(&s_panel, PIN_SDA, PIN_SCL, FACE_I2C_HZ) == ESP_OK) {
         s_have_panel = true;
         xTaskCreate(face_task, "face", 3072, NULL, 2, NULL);
     } else {
         ESP_LOGW(TAG, "no OLED on SDA %d / SCL %d - running without a face",
                  (int)PIN_SDA, (int)PIN_SCL);
+    }
+
+    {
+        const uint32_t after = (uint32_t)heap_caps_get_free_size(MALLOC_CAP_DEFAULT);
+        ESP_LOGI(TAG, "heap %lu B before the face, %lu after: the face costs %ld",
+                 (unsigned long)heap_before_face, (unsigned long)after,
+                 (long)heap_before_face - (long)after);
     }
 
     wifi_start();
