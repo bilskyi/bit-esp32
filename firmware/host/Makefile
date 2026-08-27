@@ -25,8 +25,12 @@ $(BUILD)/face_test: ../main/face.c ../main/face.h face_test.c | $(BUILD)
 $(BUILD)/face_preview: ../main/face.c ../main/face.h face_preview.c | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ ../main/face.c face_preview.c
 
-test: $(BUILD)/face_test
+$(BUILD)/provision_logic_test: ../main/provision_logic.c ../main/provision_logic.h provision_logic_test.c | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ ../main/provision_logic.c provision_logic_test.c
+
+test: $(BUILD)/face_test $(BUILD)/provision_logic_test
 	@./$(BUILD)/face_test
+	@./$(BUILD)/provision_logic_test
 
 preview: $(BUILD)/face_preview preview-template.html
 	@./$(BUILD)/face_preview preview-template.html $(BUILD)/face-preview.html
