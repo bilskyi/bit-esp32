@@ -3,6 +3,7 @@ import pytest
 from server.emotion import (
     DEFAULT,
     EMOTIONS,
+    GUESSABLE,
     HEAD_LIMIT,
     LeadingTag,
     from_text,
@@ -139,6 +140,96 @@ def test_the_heuristic_ignores_tags_left_in_the_text():
 def test_the_heuristic_always_returns_something_the_firmware_knows():
     for text in ["", "?", "!", "...", "Привіт", "1234"]:
         assert from_text(text) in EMOTIONS
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Не зрозумів, про що ти.",
+        "Не понял вопрос, уточни.",
+        "I'm not sure what you mean.",
+    ],
+)
+def test_not_understanding_the_question_is_confused(text):
+    """Different from sadness: sadness apologises for the answer, confusion
+    asks for the question again."""
+    assert from_text(text) == "confused"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Ого, не знав такого.", "Ничего себе!", "Wow, that is new to me."],
+)
+def test_a_reaction_is_surprised(text):
+    assert from_text(text) == "surprised"
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["Привіт! Радий тебе чути.", "Спасибо, что спросил.", "Thanks, glad to help."],
+)
+def test_greetings_and_thanks_are_happy(text):
+    assert from_text(text) == "happy"
+
+
+def test_an_apology_beats_not_understanding():
+    """Both signals fire here and the apology is the more specific fact, for
+    the same reason it already beats the question mark."""
+    assert from_text("Вибач, не зрозумів питання.") == "sad"
+
+
+def test_not_understanding_beats_the_question_mark():
+    """It ends in a question and is not curiosity - it is a request for the
+    question again."""
+    assert from_text("Не зрозумів, що саме ти маєш на увазі?") == "confused"
+
+
+def test_surprise_beats_the_exclamation_mark():
+    assert from_text("Ого!") == "surprised"
+
+
+def test_a_greeting_beats_the_exclamation_mark():
+    """"Привіт!" is warmth before it is excitement."""
+    assert from_text("Привіт!") == "happy"
+
+
+def test_the_heuristic_names_what_it_cannot_produce():
+    """annoyed and sleepy are a decision, not an omission.
+
+    annoyed cannot be read off the assistant's own reply - the reply is polite
+    by construction, so a rule inferring irritation from it either never fires
+    or fires in the wrong place. sleepy must not be read off it at all: the
+    firmware falls asleep on its own timer after 90 s of idle and a server
+    guessing sleepiness from words would fight that timer. Both stay reachable
+    the way they were always meant to be, through the model's tag.
+
+    Asserted rather than left implicit, so a tenth name added to EMOTIONS
+    forces a decision instead of passing silently.
+    """
+    assert GUESSABLE < EMOTIONS
+    assert EMOTIONS - GUESSABLE == {"annoyed", "sleepy"}
+
+
+def test_every_guess_lands_inside_the_advertised_set():
+    corpus = [
+        "",
+        "?",
+        "!",
+        "...",
+        "1234",
+        "Привіт",
+        "У Києві зараз близько двадцяти градусів.",
+        "А в тебе як?",
+        "Авжеж, зробимо!",
+        "Вибач, я не розчув.",
+        "Не зрозумів, про що ти.",
+        "Ого, не знав такого.",
+        "Спасибо, что спросил.",
+        "Goodnight, sleep well.",
+        "I have asked you this three times already.",
+    ]
+    for text in corpus:
+        assert from_text(text) in GUESSABLE, text
 
 
 # ----------------------------------------------------------------- LeadingTag

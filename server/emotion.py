@@ -11,7 +11,9 @@ Three things have to be true, in this order of importance:
    hesitation, and the handoff already records it emitting silence for
    characters nobody expected.
 2. There must always be an emotion, tag or no tag. A missing tag falls back to
-   a heuristic rather than leaving the face on whatever it showed last.
+   a heuristic rather than leaving the face on whatever it showed last. That
+   heuristic reaches seven of the nine; see GUESSABLE for the two it will not
+   guess and why.
 3. Sniffing must not delay the first sentence, which is the whole latency
    budget. The head resolves within a couple of dozen characters and then gets
    out of the way.
@@ -64,6 +66,73 @@ _SORRY = (
     "did not catch",
 )
 
+# The reply did not understand the *question*, which is a different face from
+# not knowing the answer: confusion asks for the question again, sadness
+# apologises for the answer. Checked after _SORRY, because "Вибач, не
+# зрозумів" is both and the apology is the more specific fact.
+_CONFUSED = (
+    "не зрозумів",
+    "не зрозуміла",
+    "що саме",
+    "уточни",
+    "уточніть",
+    "не понял вопрос",
+    "что именно",
+    "what do you mean",
+    "not sure what you mean",
+    "could you clarify",
+)
+
+# Checked before the exclamation mark, because "Ого!" would otherwise be read
+# as excitement.
+_SURPRISED = (
+    "ого",
+    "нічого собі",
+    "оце так",
+    "ничего себе",
+    "надо же",
+    "wow",
+    "no way",
+)
+
+# Greeting, thanks, warmth. Checked before the exclamation mark for the same
+# reason surprise is: "Привіт!" is warmth before it is excitement.
+#
+# Deliberately narrow. Substring matching on short Cyrillic words is a trap -
+# "рад " matches inside "парад" - so every entry here is long enough not to
+# hide inside an ordinary word.
+_HAPPY = (
+    "привіт",
+    "дякую",
+    "радий",
+    "чудово",
+    "нема за що",
+    "привет",
+    "спасибо",
+    "отлично",
+    "не за что",
+    "hello",
+    "thanks",
+    "thank you",
+    "you're welcome",
+    "glad",
+)
+
+# What from_text can actually produce. Two of the nine are outside it on
+# purpose:
+#
+# `annoyed` cannot be read off the assistant's own reply. The reply is polite
+# by construction, so a rule inferring irritation from it either never fires
+# or fires in the wrong place.
+#
+# `sleepy` must not be read off it at all. The firmware falls asleep on its
+# own timer after 90 s of idle, and a server guessing sleepiness from words
+# would fight that timer rather than help it.
+#
+# Both stay reachable the way they were always meant to be: the model tags
+# them. A test asserts this set, so a tenth emotion forces a decision.
+GUESSABLE = EMOTIONS - {"annoyed", "sleepy"}
+
 
 def split_tag(text: str) -> tuple[str | None, str]:
     """Pull a leading ``[tag]`` off a reply.
@@ -88,7 +157,12 @@ def strip_tags(text: str) -> str:
 
 
 def from_text(text: str) -> str:
-    """Guess an emotion from a reply, for when the model gave no usable tag."""
+    """Guess an emotion from a reply, for when the model gave no usable tag.
+
+    The order of the rules is the whole design. Each one overlaps with at
+    least one below it, so each sits above the more general signal that would
+    otherwise swallow it. The return is always a member of GUESSABLE.
+    """
     clean = strip_tags(text).strip()
     if not clean:
         return DEFAULT
@@ -96,6 +170,12 @@ def from_text(text: str) -> str:
     low = clean.lower()
     if any(phrase in low for phrase in _SORRY):
         return "sad"
+    if any(phrase in low for phrase in _CONFUSED):
+        return "confused"
+    if any(phrase in low for phrase in _SURPRISED):
+        return "surprised"
+    if any(phrase in low for phrase in _HAPPY):
+        return "happy"
     if clean.endswith("?"):
         return "curious"
     if "!" in clean:
