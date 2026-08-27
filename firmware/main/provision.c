@@ -116,8 +116,15 @@ static void html_escape(const char *src, char *dst, size_t dst_size) {
 // Escapes into dst for embedding in a JSON string, stopping cleanly rather
 // than emitting a partial escape if dst is too small. An SSID is just an
 // octet string at the 802.11 layer - nothing stops one from carrying a
-// quote, a backslash, or a raw control byte - so scan results need the same
-// care html_escape() above gives the URI on the page.
+// quote, a backslash, a raw control byte, or a byte that is not valid UTF-8
+// at all - so scan results need the same care html_escape() above gives the
+// URI on the page. Bytes at or above 0x7F get the same \u00XX treatment as
+// the control bytes below 0x20, rather than passing through raw: a JSON
+// string is supposed to be UTF-8, and a lone high byte off the air is not
+// guaranteed to be part of a valid sequence. A browser's decoder is
+// non-fatal about that - it renders replacement characters, it does not
+// throw - so this is display correctness, not a bound; the bound is what
+// the two size checks below already give it.
 static void json_escape(const char *src, char *dst, size_t dst_size) {
     if (dst_size == 0) return;
     static const char hex[] = "0123456789abcdef";
@@ -128,7 +135,7 @@ static void json_escape(const char *src, char *dst, size_t dst_size) {
             if (w + 2 + 1 > dst_size) break;
             dst[w++] = '\\';
             dst[w++] = (char)c;
-        } else if (c < 0x20) {
+        } else if (c < 0x20 || c >= 0x7F) {
             if (w + 6 + 1 > dst_size) break;
             dst[w++] = '\\'; dst[w++] = 'u'; dst[w++] = '0'; dst[w++] = '0';
             dst[w++] = hex[(c >> 4) & 0xF];
@@ -279,6 +286,30 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
     // same answer as a real timeout would.
     const provision_trial_outcome_t outcome =
         (werr == ESP_OK) ? provision_wifi_trial_wait(&reason) : PROV_TRIAL_TIMED_OUT;
+
+    // A timed-out trial means provision_wifi_trial_wait() gave up, not that
+    // esp_wifi_connect() did - the attempt it started is still in flight. If
+    // it resolves after this point, the resulting WIFI_EVENT_STA_DISCONNECTED
+    // or IP_EVENT_STA_GOT_IP must still land on wifi_event()'s trial branch,
+    // not the normal one: outside a trial that branch reconnects
+    // unconditionally, forever, with the candidate the user was just told
+    // had failed, and on a late success it sets WIFI_CONNECTED_BIT with
+    // nobody left waiting on it. That is why this runs before
+    // provision_set_trial_mode(false) rather than after - s_trial_in_progress
+    // has to still be true when the cancellation's own event arrives, or the
+    // event lands exactly on the branch this is trying to avoid.
+    // Also correct, and harmless, on the other two outcomes: a disconnect
+    // already delivered its event and left nothing in flight, and a
+    // synchronous esp_wifi_set_config()/esp_wifi_connect() failure above
+    // never started an attempt at all. esp_wifi_disconnect() on a station
+    // that is not connected just reports an error this function has no use
+    // for.
+    if (outcome != PROV_TRIAL_CONNECTED) {
+        const esp_err_t derr = esp_wifi_disconnect();
+        if (derr != ESP_OK) {
+            ESP_LOGW(TAG, "esp_wifi_disconnect (trial cleanup): %s", esp_err_to_name(derr));
+        }
+    }
 
     provision_set_trial_mode(false);
 
@@ -609,7 +640,30 @@ esp_err_t provision_start(void) {
         ESP_LOGW(TAG, "esp_wifi_stop: %s", esp_err_to_name(err));
     }
 
-    // 2. Name the AP from the station MAC. esp_read_mac() can fail (the
+    // 2. RAM-backed storage for whatever esp_wifi_set_config() touches from
+    // here on, for the rest of this device's boot - there is no call
+    // anywhere in this codebase that ever sets it back. Without this,
+    // esp_wifi_set_config() defaults to WIFI_STORAGE_FLASH for both station
+    // and soft-AP (esp_wifi.h:963,1038), which means the candidate that
+    // save_post_handler() below hands to esp_wifi_set_config(WIFI_IF_STA,
+    // ...) lands in flash the instant it is set - before esp_wifi_connect()
+    // is even called, let alone before a trial decides whether the
+    // credential was any good. That candidate comes from a POST to an open
+    // access point with no login of any kind, so this is not a theoretical
+    // path: it is every /save, including one submitted by a stranger with a
+    // garbage password. config_store.c's own writes are already gated on a
+    // successful trial; this is the driver's second, independent copy, and
+    // it was never gated on anything. Safe to make RAM-only here because
+    // wifi_start() never reads it back - it reapplies STA config from
+    // config_store on every boot - so the driver's flash-backed copy is
+    // pure duplication and removing it costs nothing.
+    err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_set_storage: %s", esp_err_to_name(err));
+        goto fail;
+    }
+
+    // 3. Name the AP from the station MAC. esp_read_mac() can fail (the
     // eFuse block it reads is not guaranteed present on every variant);
     // unchecked, mac[] stays whatever was on the stack and that garbage
     // becomes the network name broadcast in every beacon. A fixed fallback
@@ -623,14 +677,14 @@ esp_err_t provision_start(void) {
         snprintf(ap_name, sizeof(ap_name), "Voice-Setup");
     }
 
-    // 3. A fresh code every session, from esp_random() rather than the MAC
+    // 4. A fresh code every session, from esp_random() rather than the MAC
     // just used above - that value is public, broadcast in every beacon
     // this AP is about to send.
     char code[PL_CODE_LEN + 1];
     snprintf(code, sizeof(code), "%04u", (unsigned)(esp_random() % 10000u));
     pl_unlock_init(&s_unlock, code);
 
-    // 4. Created once; provision_start() can be called again within the
+    // 5. Created once; provision_start() can be called again within the
     // same boot (idle timeout, then a hold gesture re-enters it) and the
     // netif does not need recreating each time.
     static bool s_ap_netif_ready = false;
@@ -639,7 +693,7 @@ esp_err_t provision_start(void) {
         s_ap_netif_ready = true;
     }
 
-    // 5. Open. WPA2 would mean reading a passphrase off a 0.96" panel and
+    // 6. Open. WPA2 would mean reading a passphrase off a 0.96" panel and
     // typing it on a phone, and would make a device with no panel
     // unprovisionable. The lock is the code above, on the one field that
     // warrants it.
@@ -650,7 +704,7 @@ esp_err_t provision_start(void) {
     ap.ap.max_connection = 2;
     ap.ap.authmode = WIFI_AUTH_OPEN;
 
-    // 6. APSTA throughout, and esp_wifi_connect() is deliberately not
+    // 7. APSTA throughout, and esp_wifi_connect() is deliberately not
     // called: the station interface exists here for Task 5's scan and
     // trial, not to join whatever was last configured at the exact moment
     // someone is trying to change it.
@@ -670,7 +724,7 @@ esp_err_t provision_start(void) {
         goto fail;
     }
 
-    // 7. One phone needs nothing like the default seven sockets.
+    // 8. One phone needs nothing like the default seven sockets.
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.max_open_sockets = 2;
     cfg.lru_purge_enable = true;
@@ -686,7 +740,7 @@ esp_err_t provision_start(void) {
         goto fail;
     }
 
-    // 8. Registered in this order on purpose: matching stops at the first
+    // 9. Registered in this order on purpose: matching stops at the first
     // hit, so the specific handlers must be added before the wildcard. All
     // five are attempted regardless of earlier failures, so the log shows
     // the full picture in one shot; index/save's results are what decide
@@ -715,7 +769,7 @@ esp_err_t provision_start(void) {
         goto fail;
     }
 
-    // 9. A phone's own captive-portal probe has somewhere to go before
+    // 10. A phone's own captive-portal probe has somewhere to go before
     // anyone taps a notification. Not fatal if it fails to start - the
     // panel and the console carry the address either way.
     if (xTaskCreate(dns_task, "prov_dns", 3072, NULL, 3, &s_dns_task) != pdPASS) {
@@ -723,7 +777,7 @@ esp_err_t provision_start(void) {
         s_dns_task = NULL;
     }
 
-    // 10. Tell the screen, and the log, because a device with no panel
+    // 11. Tell the screen, and the log, because a device with no panel
     // attached must still be provisionable by someone watching the console.
     xSemaphoreTake(s_screen_lock, portMAX_DELAY);
     strncpy(s_screen.ap_name, ap_name, sizeof(s_screen.ap_name) - 1);
@@ -738,7 +792,7 @@ esp_err_t provision_start(void) {
     ESP_LOGI(TAG, "provisioning: join \"%s\" (open), browse to http://192.168.4.1/, code %s",
              ap_name, code);
 
-    // 11.
+    // 12.
     s_last_request = xTaskGetTickCount();
     s_active = true;
     return ESP_OK;

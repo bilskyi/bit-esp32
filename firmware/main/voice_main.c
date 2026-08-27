@@ -449,6 +449,19 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 // session, cannot make provision_wifi_trial_wait() below return a stale
 // answer before this attempt has actually run.
 void provision_set_trial_mode(bool on) {
+    if (s_wifi_events == NULL) {
+        // wifi_start() is what creates s_wifi_events, and Task 7 - wiring
+        // provisioning into the boot sequence - is what is supposed to
+        // guarantee it runs before provision_start() ever can. This guard
+        // does not change that ordering; it exists for the day something
+        // violates it anyway. Every FreeRTOS event-group call below takes a
+        // handle with no NULL check of its own, so skipping straight to one
+        // is a fault with a symptom that points nowhere near this line. A
+        // log line that names the actual missing dependency is a strictly
+        // better failure than that.
+        ESP_LOGE(TAG, "provision_set_trial_mode: s_wifi_events not ready (wifi_start() has not run)");
+        return;
+    }
     if (on) {
         xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED_BIT | WIFI_TRIAL_DONE_BIT);
     }
@@ -459,6 +472,17 @@ void provision_set_trial_mode(bool on) {
 // just started to resolve one way or the other. Call only while trial mode
 // is on, after esp_wifi_connect() has been issued.
 provision_trial_outcome_t provision_wifi_trial_wait(uint8_t *out_reason) {
+    if (s_wifi_events == NULL) {
+        // Same missing-dependency guard as provision_set_trial_mode() above,
+        // for the same reason. PROV_TRIAL_TIMED_OUT is the honest answer for
+        // "nothing could even be asked" - it is the same outcome
+        // save_post_handler() already falls back to when
+        // esp_wifi_set_config()/esp_wifi_connect() fails synchronously and
+        // there is nothing to wait on, so this introduces no new case for
+        // callers to handle.
+        ESP_LOGE(TAG, "provision_wifi_trial_wait: s_wifi_events not ready (wifi_start() has not run)");
+        return PROV_TRIAL_TIMED_OUT;
+    }
     const EventBits_t bits =
         xEventGroupWaitBits(s_wifi_events, WIFI_CONNECTED_BIT | WIFI_TRIAL_DONE_BIT,
                              pdFALSE, pdFALSE, pdMS_TO_TICKS(PROV_TRIAL_MS));
