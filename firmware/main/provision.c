@@ -143,14 +143,41 @@ static esp_err_t index_get_handler(httpd_req_t *req) {
 // the one mistake config_store.h was written to rule out. So this reads the
 // body all the way out (a client waiting for a response must get one) and
 // answers honestly: not yet.
+// PL_SSID_MAX/PL_PASS_MAX/PL_URI_MAX/PL_CODE_LEN are *decoded* field
+// bounds, but the wire carries application/x-www-form-urlencoded, where one
+// decoded byte (anything outside [A-Za-z0-9-._~]) can arrive as three
+// (%XX). Sizing the buffer off the decoded bounds would reject a
+// legitimate maximum-length password made of special characters with a
+// 400 the user cannot diagnose. Field by field, worst case on the wire:
+//   "ssid="  ( 5) + 3*PL_SSID_MAX ( 96)   =  101
+// + "&pass=" ( 6) + 3*PL_PASS_MAX (192)   =  198
+// + "&uri="  ( 5) + 3*PL_URI_MAX  (384)   =  389
+// + "&code=" ( 6) + 3*PL_CODE_LEN ( 12)   =   18
+// + 1 for the '\0' this handler appends after the read loop
+// = 101 + 198 + 389 + 18 + 1 = 707. Do not shrink this back to the decoded
+// sum - that arithmetic is for pl_field()'s output buffers, not this one.
+#define PROV_BODY_MAX                                                       \
+    (5 + 3 * PL_SSID_MAX + 6 + 3 * PL_PASS_MAX + 5 + 3 * PL_URI_MAX + 6 +    \
+     3 * PL_CODE_LEN + 1)
+
+// Bounds how long one POST /save can hold the httpd task hostage.
+// esp_http_server runs every connection on that single task, so a client
+// that stops sending mid-body - a phone walking out of range does this by
+// accident, nothing malicious required - would otherwise spin the read
+// loop below forever, and "/", "/status" and "/scan" all stall behind it
+// until the device is power-cycled. Each httpd_req_recv() call already
+// gives up after cfg.recv_wait_timeout (5s, the HTTPD_DEFAULT_CONFIG()
+// default, not overridden in this file) and returns HTTPD_SOCK_ERR_TIMEOUT
+// rather than blocking indefinitely; the cap here is two of those - one
+// retry for a client that is merely slow on a noisy 2.4GHz link, then give
+// up - so a wedged client costs at most ~10s, not the "forever" of the
+// unbounded loop it replaces.
+#define PROV_BODY_RECV_TIMEOUT_MS 10000
+
 static esp_err_t save_post_handler(httpd_req_t *req) {
     s_last_request = xTaskGetTickCount();
 
-    // Sized for what the four fields could add up to, including their
-    // "name=" prefixes and the '&' separators between them - generous, not
-    // exact, because percent-encoding can make a short value take more
-    // bytes on the wire than it will after pl_field() decodes it.
-    char body[PL_SSID_MAX + PL_PASS_MAX + PL_URI_MAX + PL_CODE_LEN + 64];
+    char body[PROV_BODY_MAX];
 
     if (req->content_len == 0 || req->content_len >= sizeof(body)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "form too large");
@@ -159,7 +186,22 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
 
     size_t got = 0;
     const size_t want = req->content_len;
+    const TickType_t recv_start = xTaskGetTickCount();
     while (got < want) {
+        // Elapsed-since-start, not an absolute deadline compared with >=:
+        // the same wraparound-safe subtraction provision_idle_expired()
+        // already uses on s_last_request, for the same reason - tick
+        // counts roll over and a direct comparison would not survive it.
+        const uint32_t elapsed_ms =
+            (uint32_t)(xTaskGetTickCount() - recv_start) * portTICK_PERIOD_MS;
+        if (elapsed_ms > PROV_BODY_RECV_TIMEOUT_MS) {
+            httpd_resp_send_err(req, HTTPD_408_REQ_TIMEOUT, "body took too long");
+            // ESP_OK, not ESP_FAIL: this is a client that stopped sending,
+            // not a handler fault, and ESP_OK is what tells httpd to close
+            // the socket cleanly instead of tearing down the connection as
+            // an error.
+            return ESP_OK;
+        }
         const int r = httpd_req_recv(req, body + got, want - got);
         if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
         if (r <= 0) break;
@@ -336,11 +378,28 @@ static void dns_task(void *arg) {
 
 // ----------------------------------------------------------------- lifecycle
 
+// For handlers whose absence still leaves the device usable - right now
+// just the wildcard redirect, which only helps a phone's captive-portal
+// probe find the page a little sooner. GET / and POST /save are not this:
+// see register_or_fail() below.
 static void register_or_warn(httpd_handle_t s, const httpd_uri_t *u) {
+    const esp_err_t err = httpd_register_uri_handler(s, u);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "could not register %s: %s", u->uri, esp_err_to_name(err));
+    }
+}
+
+// For handlers the page cannot work without. If "/" or "/save" fail to
+// register, the AP is up and broadcasting but there is nothing a phone can
+// actually do with it - that is a failed start, not a log line the caller
+// never sees, so the return value here feeds provision_start()'s goto
+// fail ladder instead of being swallowed the way register_or_warn's is.
+static esp_err_t register_or_fail(httpd_handle_t s, const httpd_uri_t *u) {
     const esp_err_t err = httpd_register_uri_handler(s, u);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "could not register %s: %s", u->uri, esp_err_to_name(err));
     }
+    return err;
 }
 
 esp_err_t provision_start(void) {
@@ -363,11 +422,19 @@ esp_err_t provision_start(void) {
         ESP_LOGW(TAG, "esp_wifi_stop: %s", esp_err_to_name(err));
     }
 
-    // 2. Name the AP from the station MAC.
+    // 2. Name the AP from the station MAC. esp_read_mac() can fail (the
+    // eFuse block it reads is not guaranteed present on every variant);
+    // unchecked, mac[] stays whatever was on the stack and that garbage
+    // becomes the network name broadcast in every beacon. A fixed fallback
+    // is at least a name someone can recognise and connect to.
     uint8_t mac[6];
-    esp_read_mac(mac, ESP_MAC_WIFI_STA);
     char ap_name[16];
-    snprintf(ap_name, sizeof(ap_name), "Voice-%02x%02x", mac[4], mac[5]);
+    if (esp_read_mac(mac, ESP_MAC_WIFI_STA) == ESP_OK) {
+        snprintf(ap_name, sizeof(ap_name), "Voice-%02x%02x", mac[4], mac[5]);
+    } else {
+        ESP_LOGW(TAG, "esp_read_mac failed; using fixed AP name");
+        snprintf(ap_name, sizeof(ap_name), "Voice-Setup");
+    }
 
     // 3. A fresh code every session, from esp_random() rather than the MAC
     // just used above - that value is public, broadcast in every beacon
@@ -403,17 +470,17 @@ esp_err_t provision_start(void) {
     err = esp_wifi_set_mode(WIFI_MODE_APSTA);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_set_mode: %s", esp_err_to_name(err));
-        return err;
+        goto fail;
     }
     err = esp_wifi_set_config(WIFI_IF_AP, &ap);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_set_config: %s", esp_err_to_name(err));
-        return err;
+        goto fail;
     }
     err = esp_wifi_start();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_start: %s", esp_err_to_name(err));
-        return err;
+        goto fail;
     }
 
     // 7. One phone needs nothing like the default seven sockets.
@@ -429,11 +496,14 @@ esp_err_t provision_start(void) {
     err = httpd_start(&s_httpd, &cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "httpd_start: %s", esp_err_to_name(err));
-        return err;
+        goto fail;
     }
 
     // 8. Registered in this order on purpose: matching stops at the first
-    // hit, so the specific handlers must be added before the wildcard.
+    // hit, so the specific handlers must be added before the wildcard. All
+    // five are attempted regardless of earlier failures, so the log shows
+    // the full picture in one shot; index/save's results are what decide
+    // whether this start succeeds.
     static const httpd_uri_t index_uri = {
         .uri = "/", .method = HTTP_GET, .handler = index_get_handler};
     static const httpd_uri_t save_uri = {
@@ -444,11 +514,19 @@ esp_err_t provision_start(void) {
         .uri = "/scan", .method = HTTP_GET, .handler = scan_get_handler};
     static const httpd_uri_t redirect_uri = {
         .uri = "/*", .method = HTTP_GET, .handler = redirect_get_handler};
-    register_or_warn(s_httpd, &index_uri);
-    register_or_warn(s_httpd, &save_uri);
+    bool required_handlers_ok = true;
+    if (register_or_fail(s_httpd, &index_uri) != ESP_OK) required_handlers_ok = false;
+    if (register_or_fail(s_httpd, &save_uri) != ESP_OK) required_handlers_ok = false;
     register_or_warn(s_httpd, &status_uri);
     register_or_warn(s_httpd, &scan_uri);
     register_or_warn(s_httpd, &redirect_uri);
+    if (!required_handlers_ok) {
+        // The AP would be up and the page unreachable behind it - the
+        // exact failure this task exists to rule out - so this is a
+        // failed start, not a warning the caller never sees.
+        err = ESP_FAIL;
+        goto fail;
+    }
 
     // 9. A phone's own captive-portal probe has somewhere to go before
     // anyone taps a notification. Not fatal if it fails to start - the
@@ -477,6 +555,30 @@ esp_err_t provision_start(void) {
     s_last_request = xTaskGetTickCount();
     s_active = true;
     return ESP_OK;
+
+fail:
+    // Single unwind path for every failure from here on: whichever of the
+    // radio and httpd came up before the failure goes back down, so a
+    // failed start never leaves an open, unsecured AP broadcasting with
+    // nothing - or nothing reachable - behind it. s_active is untouched:
+    // it is only ever set true on the success path above, so it is still
+    // false here, which matches reality on every one of these paths.
+    if (s_httpd != NULL) {
+        httpd_stop(s_httpd);
+        s_httpd = NULL;
+    }
+    // esp_wifi_stop() is safe to call even when esp_wifi_start() never
+    // ran or esp_wifi_set_mode() failed outright: per the comment on the
+    // esp_wifi_stop() call at the top of this function, its only error is
+    // ESP_ERR_WIFI_NOT_INIT, and the wifi driver was already initialised
+    // long before provision_start() was ever called.
+    {
+        const esp_err_t stop_err = esp_wifi_stop();
+        if (stop_err != ESP_OK && stop_err != ESP_ERR_WIFI_NOT_INIT) {
+            ESP_LOGW(TAG, "esp_wifi_stop: %s", esp_err_to_name(stop_err));
+        }
+    }
+    return err;
 }
 
 void provision_stop(void) {
