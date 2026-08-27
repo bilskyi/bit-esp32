@@ -81,6 +81,9 @@ typedef struct {
     int16_t lid;    // flat upper lid, 0 open, 256 shut
     int16_t pup;    // pupil scale
     int16_t asym;   // how much the two eyes differ, for a lopsided look
+    int16_t lid_lo; // flat lower lid, 0 open, 256 shut - meets `lid` in the
+                    // middle instead of sweeping from one edge, so nothing
+                    // but the reset countdown ever needs it
 } face_pose_t;
 
 typedef struct {
@@ -90,6 +93,7 @@ typedef struct {
     face_state_t state;
     face_emotion_t emotion;
     bool button;
+    uint8_t reset_pct;   // 0-100, how far through the hold-to-reset gesture
 
     // -- the power-on sequence, until the socket comes up
     bool booting;
@@ -157,6 +161,11 @@ static inline bool face_is_booting(const face_t *f) { return f->booting; }
 // decaying peak, so the microphone near -46 dBFS and a reply near full scale
 // both swing the eyes across their whole range.
 void face_feed_energy(face_t *f, uint16_t rms);
+
+// How far through the hold-to-reset gesture the user is, 0-100. Zero means
+// not counting, and setting zero must leave no trace - releasing the button
+// cancels and nothing was lost.
+void face_set_reset_progress(face_t *f, uint8_t percent, uint32_t now_ms);
 
 // Advance the animation to now_ms and render into f->fb. Call at ~25 fps.
 void face_tick(face_t *f, uint32_t now_ms);

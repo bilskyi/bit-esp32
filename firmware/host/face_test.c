@@ -806,6 +806,66 @@ static void test_survives_a_hostile_clock(void) {
     CHECK(lit_count(g.fb) > 0, "a zero-length tick blanked the face");
 }
 
+// -------------------------------------------------------------- reset countdown
+
+static void test_the_reset_countdown_looks_nothing_like_listening(void) {
+    // The whole point is that a user holding the button sees it coming and
+    // can let go. If it renders like listening, it cannot be noticed.
+    face_t a, b;
+    uint32_t t = 1000;
+
+    face_init(&a, t);
+    face_set_state(&a, FACE_ST_LISTENING, t);
+    face_set_reset_progress(&a, 0, t);
+
+    face_init(&b, t);
+    face_set_state(&b, FACE_ST_LISTENING, t);
+    face_set_reset_progress(&b, 90, t);
+
+    for (int i = 0; i < 10; i++) { t += TICK_MS; face_tick(&a, t); face_tick(&b, t); }
+
+    const int la = lit_count(face_framebuffer(&a));
+    const int lb = lit_count(face_framebuffer(&b));
+    const int diff = la > lb ? la - lb : lb - la;
+    CHECK(diff > 200, "countdown differs from listening by only %d pixels", diff);
+}
+
+static void test_the_countdown_is_monotonic(void) {
+    // Progress must read as progress: more of the gesture done means more of
+    // whatever the eyes are doing. A wobble reads as a glitch.
+    int prev = -1;
+    for (int pct = 0; pct <= 100; pct += 10) {
+        face_t f;
+        uint32_t t = 1000;
+        face_init(&f, t);
+        face_set_state(&f, FACE_ST_LISTENING, t);
+        face_set_reset_progress(&f, (uint8_t)pct, t);
+        for (int i = 0; i < 5; i++) { t += TICK_MS; face_tick(&f, t); }
+        const int n = lit_count(face_framebuffer(&f));
+        if (prev >= 0) CHECK(n <= prev, "pct %d lit %d, previous %d", pct, n, prev);
+        prev = n;
+    }
+}
+
+static void test_zero_progress_restores_the_ordinary_face(void) {
+    // Releasing cancels with nothing lost, so zero must be indistinguishable
+    // from never having started.
+    face_t a, b;
+    uint32_t t = 1000;
+
+    face_init(&a, t);
+    face_set_state(&a, FACE_ST_LISTENING, t);
+
+    face_init(&b, t);
+    face_set_state(&b, FACE_ST_LISTENING, t);
+    face_set_reset_progress(&b, 60, t);
+    face_set_reset_progress(&b, 0, t);
+
+    for (int i = 0; i < 5; i++) { t += TICK_MS; face_tick(&a, t); face_tick(&b, t); }
+    CHECK(memcmp(face_framebuffer(&a), face_framebuffer(&b), FACE_FB_BYTES) == 0,
+          "cancel did not restore the face");
+}
+
 // -------------------------------------------------------------------- main
 
 int main(void) {
@@ -833,6 +893,9 @@ int main(void) {
         {"the emotion frame is parsed, and nothing else is", test_emotion_scan},
         {"the animation is deterministic", test_deterministic},
         {"a wrapping or stalled clock is survivable", test_survives_a_hostile_clock},
+        {"the reset countdown looks nothing like listening", test_the_reset_countdown_looks_nothing_like_listening},
+        {"the countdown is monotonic", test_the_countdown_is_monotonic},
+        {"zero progress restores the ordinary face", test_zero_progress_restores_the_ordinary_face},
     };
 
     for (size_t i = 0; i < sizeof(tests) / sizeof(tests[0]); i++) {

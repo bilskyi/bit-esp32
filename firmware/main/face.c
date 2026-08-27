@@ -240,6 +240,23 @@ static void fb_lid(uint8_t *fb, int32_t bx, int32_t bw, int32_t yL, int32_t yR) 
     }
 }
 
+// Clears everything at or below `ly`, within [bx, bx+bw). The reset
+// countdown's own lid, rising from the bottom edge to meet `lid` coming down
+// from the top - nothing else in the vocabulary needs a flat lid that moves
+// the other way, so this stays a plain rectangle rather than sharing fb_lid's
+// slope handling.
+static void fb_lid_from_below(uint8_t *fb, int32_t bx, int32_t bw, int32_t ly) {
+    if (bw <= 0) return;
+
+    int py0 = px_first(ly);
+    if (py0 < 0) py0 = 0;
+
+    const int xa = px_first(bx);
+    const int xb = px_last(bx + bw);
+
+    for (int py = py0; py < FACE_H; py++) fb_span(fb, py, xa, xb, 0);
+}
+
 // ----------------------------------------------------------------- the eyes
 
 #define EYE_W (46 * ONE)
@@ -317,6 +334,16 @@ static void draw_eye(uint8_t *fb, const face_pose_t *p, int i) {
         fb_lid(fb, bx - 2 * ONE, w + 4 * ONE, ly, ly);
     }
 
+    // The reset countdown's own lid, closing up from below to meet it. A
+    // one-sided close leaves the eye's rounded bottom corners as the last
+    // thing showing, which is the same silhouette `happy` draws on purpose -
+    // pleased, not alarmed. Meeting in the middle instead gives a level,
+    // narrowing slit with no curve left in it at all.
+    if (p->lid_lo > 2) {
+        const int32_t ly = by + h - ((h * p->lid_lo) >> FP);
+        fb_lid_from_below(fb, bx - 2 * ONE, w + 4 * ONE, ly);
+    }
+
     // Happiness. `rise` is how far the lower lid comes up, `bow` how much
     // higher it sits in the middle than at the corners. Both scale with
     // `happy`, so a partial value is a hint of a smile rather than a
@@ -354,22 +381,22 @@ void face_render_pose(uint8_t *fb, const face_pose_t *pose) {
 
 // -------------------------------------------------------------- the emotions
 
-//                                 hs   vs   gx   gy slant happy lid  pup asym
+//                                 hs   vs   gx   gy slant happy lid  pup asym lid_lo
 static const face_pose_t EMO_POSE[FACE_EMO_COUNT] = {
-    [FACE_EMO_NEUTRAL]   = {256, 256,   0,   0,    0,   0,   0, 256,  0},
-    [FACE_EMO_HAPPY]     = {258, 236,   0,  -8,    0, 256,   0, 262,  0},
-    [FACE_EMO_EXCITED]   = {272, 296,   0, -18,    0,  70,   0, 180,  0},
-    [FACE_EMO_CURIOUS]   = {256, 268, 150, -76,    0,   0,   0, 238, 26},
-    [FACE_EMO_CONFUSED]  = {256, 250,  86, -24,   26,   0,   0, 246, 60},
-    [FACE_EMO_SURPRISED] = {278, 312,   0, -12,    0,   0,   0, 150,  0},
-    [FACE_EMO_SAD]       = {252, 226,   0, 104, -110,   0,   0, 272,  0},
-    [FACE_EMO_ANNOYED]   = {256, 236,   0,  14,  130,   0,   0, 224, 12},
-    [FACE_EMO_SLEEPY]    = {252, 190,   0,  70,    0,   0, 110, 256,  0},
+    [FACE_EMO_NEUTRAL]   = {256, 256,   0,   0,    0,   0,   0, 256,  0, 0},
+    [FACE_EMO_HAPPY]     = {258, 236,   0,  -8,    0, 256,   0, 262,  0, 0},
+    [FACE_EMO_EXCITED]   = {272, 296,   0, -18,    0,  70,   0, 180,  0, 0},
+    [FACE_EMO_CURIOUS]   = {256, 268, 150, -76,    0,   0,   0, 238, 26, 0},
+    [FACE_EMO_CONFUSED]  = {256, 250,  86, -24,   26,   0,   0, 246, 60, 0},
+    [FACE_EMO_SURPRISED] = {278, 312,   0, -12,    0,   0,   0, 150,  0, 0},
+    [FACE_EMO_SAD]       = {252, 226,   0, 104, -110,   0,   0, 272,  0, 0},
+    [FACE_EMO_ANNOYED]   = {256, 236,   0,  14,  130,   0,   0, 224, 12, 0},
+    [FACE_EMO_SLEEPY]    = {252, 190,   0,  70,    0,   0, 110, 256,  0, 0},
 };
 
 // Poses the model cannot ask for: they belong to the device's own situation.
-static const face_pose_t POSE_ASLEEP = {250, 210, 0, 90, 0, 0, 238, 256, 0};
-static const face_pose_t POSE_STARTLED = {286, 326, 0, -10, 0, 0, 0, 140, 0};
+static const face_pose_t POSE_ASLEEP = {250, 210, 0, 90, 0, 0, 238, 256, 0, 0};
+static const face_pose_t POSE_STARTLED = {286, 326, 0, -10, 0, 0, 0, 140, 0, 0};
 
 static const char *const EMO_NAME[FACE_EMO_COUNT] = {
     "neutral", "happy", "excited", "curious", "confused",
@@ -587,6 +614,7 @@ static int32_t boot_readiness(const face_t *f) {
 static void boot_pose(face_t *f, face_pose_t *p) {
     p->hs = ONE; p->vs = ONE; p->gx = 0; p->gy = 0;
     p->slant = 0; p->happy = 0; p->lid = 0; p->pup = ONE; p->asym = 0;
+    p->lid_lo = 0;
 
     const uint32_t e = since(f->now, f->boot_start);
     const int32_t r = boot_readiness(f);
@@ -795,6 +823,53 @@ void face_feed_energy(face_t *f, uint16_t rms) {
     f->last_energy = f->now;
 }
 
+void face_set_reset_progress(face_t *f, uint8_t percent, uint32_t now_ms) {
+    f->now = now_ms;
+    f->reset_pct = (percent > 100) ? 100 : percent;
+}
+
+// The hold-to-reset countdown: a modulation laid on top of whatever pose is
+// already there, the same way startle and loudness are - not a state of its
+// own. Zero is a strict no-op, which is what lets releasing the button
+// restore the ordinary face exactly.
+//
+// It has to register even while the boot sequence still owns the panel: the
+// device most likely to need a WiFi reset is exactly the one that never got
+// WiFi, and that one can sit at FACE_BOOT_PANEL indefinitely.
+//
+// `lid` and `lid_lo` close together and meet exactly at 100%, so the eyes
+// narrow to a level slit instead of blinking shut - a one-sided close leaves
+// only the eye's rounded bottom corners showing, which is the same
+// silhouette `happy` draws on purpose and reads as pleased, not alarmed.
+// `hs` shrinks too, so the eyes are visibly narrowing, not just going flat.
+// Every parameter here moves only toward its endpoint as the percentage
+// rises, which is what keeps the pixel count monotone; `lid` tops out at 128
+// rather than fully shut, well short of where the pupil stops being drawn,
+// so that gate is never the thing doing the work.
+static void apply_reset_progress(const face_t *f, face_pose_t *p) {
+    if (f->reset_pct == 0) return;
+    const int32_t k = ((int32_t)f->reset_pct * ONE) / 100;  // 0..256
+
+    const int32_t half_close = (128 * k) >> FP;  // 0..128; lid+lid_lo meet at 256
+    if (half_close > p->lid) p->lid = (int16_t)half_close;
+    p->lid_lo = (int16_t)half_close;
+
+    const int32_t hs_floor = 90;
+    p->hs = (int16_t)lerp_q8(p->hs, hs_floor, k);
+
+    // The pupil has to shrink with the band it sits in, or a dark circle
+    // that stays full size swallows the thinning white around it and the
+    // last frames before closed show scattered highlight dots instead of a
+    // narrowing eye.
+    const int32_t pup_floor = 40;
+    p->pup = (int16_t)lerp_q8(p->pup, pup_floor, k);
+
+    // A steady stare, not a search: this is not the moment for a saccade or
+    // the boot sequence's own searching sweep.
+    p->gx = 0;
+    p->gy = 0;
+}
+
 void face_tick(face_t *f, uint32_t now_ms) {
     uint32_t dt = since(now_ms, f->last_tick);
     if (dt > 500u) dt = 500u;  // a stalled task must not make the face lurch
@@ -814,6 +889,7 @@ void face_tick(face_t *f, uint32_t now_ms) {
     if (f->booting) {
         face_pose_t boot;
         boot_pose(f, &boot);
+        apply_reset_progress(f, &boot);
         boot.lid = clamp16(boot.lid, 0, 250);
         boot.vs = clamp16(boot.vs, 12, 900);
         boot.hs = clamp16(boot.hs, 12, 900);
@@ -903,6 +979,8 @@ void face_tick(face_t *f, uint32_t now_ms) {
             out.pup = (int16_t)(out.pup - (((int32_t)f->e_fast * 30) >> FP));
         }
     }
+
+    apply_reset_progress(f, &out);
 
     // The lid never quite reaches shut, so there is always a lash line to see.
     out.lid = clamp16(out.lid, 0, 250);
