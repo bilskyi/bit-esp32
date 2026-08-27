@@ -356,7 +356,7 @@ int main(void) {
 
 - [ ] **Step 3: Add the target to the host Makefile**
 
-In `firmware/host/Makefile`, add a build rule and hook it into `test`. Replace the `test:` target and add the new rule:
+In `firmware/host/Makefile`, add a build rule and hook it into `test`:
 
 ```make
 $(BUILD)/provision_logic_test: ../main/provision_logic.c ../main/provision_logic.h provision_logic_test.c | $(BUILD)
@@ -366,6 +366,13 @@ test: $(BUILD)/face_test $(BUILD)/provision_logic_test
 	@./$(BUILD)/face_test
 	@./$(BUILD)/provision_logic_test
 ```
+
+**This task also added a sanitized build**, which is not shown above because it
+came out of a review rather than the original plan: every test binary is
+additionally compiled with `-fsanitize=address,undefined` and run, gated by an
+`ASAN=0` escape hatch for toolchains without the runtime. The reason is in the
+note under Step 5 — the plain build could not see the out-of-bounds read this
+task shipped. Later tasks adding test binaries must extend **both** paths.
 
 - [ ] **Step 4: Run the tests to verify they fail**
 
@@ -834,15 +841,24 @@ int main(void) {
 
 - [ ] **Step 3: Add the target to the host Makefile**
 
+**Read the Makefile before editing it, and do not paste a `test:` target over
+what is there.** Task 1 added a sanitized build — every test binary is also
+compiled with `-fsanitize=address,undefined` and run — after the plan's own
+reference code shipped an out-of-bounds read that the plain build could not
+see. A `test:` target pasted from an earlier draft would silently remove that,
+and nothing would fail to tell you.
+
+Add the new binary the way `provision_logic_test` is already added: a build
+rule of its own, and its name appended to whatever lists the test binaries in
+both the plain and the sanitized paths.
+
 ```make
 $(BUILD)/setup_screen_test: ../main/setup_screen.c ../main/setup_screen.h setup_screen_test.c | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ ../main/setup_screen.c setup_screen_test.c
-
-test: $(BUILD)/face_test $(BUILD)/provision_logic_test $(BUILD)/setup_screen_test
-	@./$(BUILD)/face_test
-	@./$(BUILD)/provision_logic_test
-	@./$(BUILD)/setup_screen_test
 ```
+
+The sanitized rule follows whatever pattern Task 1 established — mirror it
+rather than inventing a second convention.
 
 - [ ] **Step 4: Run to verify failure**
 
