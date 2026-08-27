@@ -250,11 +250,10 @@ flicking about once a second reads as nervous rather than thoughtful.
   already falls asleep on its own 90 s timer.
 - End to end against the real pipeline: `emotion happy` arrives at the same
   instant as `state speaking`, 370 ms before the first audio.
-- gpt-oss tags 29/30 replies across three languages, with nothing leaking
-  into the spoken text. The 8/8 this line used to claim has been superseded
-  by that thirty-question corpus. The survey recorded the one miss as an
-  empty reply — the model returned nothing, so there was nothing to tag —
-  not a reply the tagger failed to catch.
+- gpt-oss tags 29/30 replies across three languages, with nothing leaking into
+  the spoken text. The one miss was `Повтори ще раз, я не розчув.`, which came
+  back as zero characters — the model returned nothing, so there was nothing to
+  tag. No reply that had a tag lost it.
 
 **The device still does not need any of it.** `voice_main` probes the bus before
 WiFi; if nothing answers at 0x3C or 0x3D it logs one line and never starts the
