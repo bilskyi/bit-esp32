@@ -763,76 +763,145 @@ EOF
 ```
 
 ---
+### Task 4: Record what was actually measured
 
-### Task 4: Record it in the handoff
+**This task was rewritten after Tasks 1-3 ran.** The plan's original version
+assumed the prompt rewrite would stay and asked for its numbers to be recorded
+as an improvement. It was reverted instead — it lost on every draw — so what
+the handoff has to carry is a refuted hypothesis, which is more valuable to the
+next session than a win would have been.
 
 **Files:**
-- Modify: `RESUME.md` — the "Measured, so nobody re-derives it" table and the face section's "Verified off the bench" list
+- Modify: `RESUME.md` — the "Measured, so nobody re-derives it" table, the face
+  section's "Verified off the bench" list, the "Agreed next, in order" section,
+  and "Traps already paid for"
 
 **Interfaces:**
-- Consumes: the two summary blocks from Tasks 1 and 2, and the final test count.
+- Consumes: the measurements below. They are final; do not re-run anything.
 - Produces: nothing importable.
 
-- [ ] **Step 1: Update the measured table**
+**The measurements, final.** Three runs of each prompt wording over the same
+thirty questions, interleaved so a slow API window could not land entirely on
+one of them:
 
-`RESUME.md` currently carries one emotion row:
+| | old wording (kept) | rewritten wording (reverted) |
+|---|---|---|
+| distinct emotions, of 9 | 7, 7, 6 | 5, 5, 6 |
+| `neutral` share | 33%, 37%, 40% | 53%, 57%, 57% |
+| median reply length | 52, 66, 72 chars | 40, 48, 51 chars |
+| replies carrying a tag | 29/30 on the recorded run | 29/30 |
+| brackets reaching spoken text | 0 | 0 |
+
+Two facts matter more than the table:
+
+- The `neutral` shares **do not overlap**. The worst old run beats the best new
+  one by thirteen points. That is what makes this a result rather than a draw,
+  and it is why the noise floor was measured before anything was decided.
+- The median lengths **do not overlap either, the other way**. The rewrite made
+  replies about a third shorter. Brevity does outrank variety in this project,
+  so this is a real gain — but it was not what the change was for, and it was
+  not worth a worse face. If shorter replies are wanted, the brevity rule is
+  the honest place to ask for them.
+
+- [ ] **Step 1: Replace the emotion row in the measured table**
+
+`RESUME.md` currently carries one row:
 
 ```
 | Emotion tag | model tagged 8/8 replies, three languages, nothing leaked |
 ```
 
-Replace it with the real distribution, using the numbers from the two survey
-runs. Write what was actually measured — if variety did not move, the row says
-so. Example shape, with the real figures substituted:
+Replace it with rows carrying the figures above — the tag rate, the spread over
+thirty questions, and the reply length. Write them as measurements, not as
+claims of success.
 
-```
-| Emotion tag | tagged N/30 replies, three languages, nothing leaked |
-| Emotion spread | X of 9 before the prompt rewrite, Y after, over 30 questions |
-| Reply length | median A chars before, B after - the rewrite's likely casualty |
-```
+- [ ] **Step 2: Record the refuted hypothesis where it will be found**
 
-- [ ] **Step 2: Update the test count and the fallback's reach**
+The handoff has a section titled "Wrong theories, for the record". This belongs
+there, stated so that nobody re-runs the experiment by accident: the theory was
+that `Start every reply with how you feel about it` was collapsing the model
+onto `[neutral]`, because an assistant answering a weather question feels
+nothing about it. The reframe made the spread worse on every paired draw. The
+old wording is what ships.
+
+Add one line to the same section noting what the survey also refuted: the
+premise that the model had collapsed to two or three emotions. It reaches six
+or seven of nine. `excited` and `surprised` never appeared in any run.
+
+- [ ] **Step 3: Record the `ого` trap**
+
+"Traps already paid for" is the right home for this, and it generalises beyond
+this module:
+
+Substring matching on short Cyrillic words is a trap. `"ого"` as a surprise
+marker hides inside `нічого`, `нікого` and `когось`, three of the commonest
+words in an ordinary Ukrainian reply — so `"Дякую, нічого не потрібно."`
+returned `surprised` despite containing `дякую`, because the surprise list is
+checked before the greeting list. `_SURPRISED` is now matched on word
+boundaries; the other four lists are plain substrings because every entry in
+them is long enough to be safe. Python's `\b` is Unicode-aware, which is what
+makes the fix a one-line change rather than a rewrite.
+
+- [ ] **Step 4: Update the test count and the fallback's reach**
 
 The face section's "Verified off the bench" list says `189 server tests`. Run
-`uv run pytest -q` and put the new total in. In the same list, add one line
-recording that the fallback reaches seven of nine by decision, so the next
-session does not read it as an unfinished job.
+`uv run pytest -q` and put the real total in. Add one line recording that the
+text fallback reaches seven of the nine by decision — `annoyed` cannot be read
+off a reply that is polite by construction, and `sleepy` must not be read off
+text at all because the firmware already falls asleep on its own 90 s timer —
+so the next session does not read seven-of-nine as an unfinished job.
 
-- [ ] **Step 3: Note what is still open**
+- [ ] **Step 5: Note what is still open**
 
-Under "Agreed next, in order", add the three items the spec deliberately left
-open, so they are not rediscovered from scratch:
+Under "Agreed next, in order", add the three items this work deliberately left
+open:
 
-- a glossary of the nine emotions, decided on the survey numbers, needing the
-  400-token cap raised on purpose
-- emotion during `listening` and `thinking` — the firmware accepts a frame at
-  any moment (`s_face_emotion_seq` re-triggers even on a repeat) and the
-  server uses that exactly once per reply
-- mood across turns — the emotion is written neither to `history` nor to the
-  store, so nothing carries between replies
+- **Reaching `excited` and `surprised` at all.** They appeared in none of the
+  six runs. A glossary of the nine was the spec's recorded next move and is
+  untried; it needs the 400-token cap in `test_persona.py` raised on purpose.
+  Anything tried here must be measured with `scripts/emotion_survey.py` against
+  the figures above, and three runs, not one — a single draw moves by ±1
+  emotion on its own.
+- **Emotion during `listening` and `thinking`.** The firmware accepts an
+  emotion frame at any moment — `s_face_emotion_seq` re-triggers even on a
+  repeat — and the server uses that exactly once per reply, just before it
+  starts speaking.
+- **Mood across turns.** The emotion is written neither to `history` nor to the
+  store, so nothing carries between replies and no distribution accumulates
+  from real traffic.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 6: Verify and commit**
+
+Run: `uv run pytest -q`
+Expected: all tests pass. This task changes only Markdown, so the run is a
+guard against a stray edit.
 
 ```bash
 git add RESUME.md
 git commit -m "$(cat <<'EOF'
-Record what the emotion survey measured, and what it left open
+Record the emotion measurements, including the theory they killed
 
 The handoff carried one line about emotions - 8/8 tagged - which said
-nothing about how many of the nine ever appeared. It now carries the
-distribution over thirty questions, before and after the prompt rewrite,
-and the reply-length figures that say whether variety cost brevity.
+nothing about how many of the nine ever appear. It now carries the spread
+over thirty questions, three runs per wording, and the reply lengths that
+say whether variety would have cost brevity.
 
-Three things the spec left open are written down rather than left to be
-rediscovered: the glossary, emotion during listening and thinking, and
-mood across turns.
+The most useful thing measured is a refutation. The rewrite of the tag
+rule was a good theory and it lost on every paired draw, so it is written
+into "Wrong theories, for the record" rather than quietly dropped. The
+premise underneath it was wrong too: the model was never collapsed onto
+two or three emotions, it reaches six or seven of nine. What it does not
+reach is excited and surprised, in any run, which is the actual open
+question.
+
+Also recorded: substring matching on short Cyrillic words is a trap that
+cost a real bug here, and the text fallback reaches seven of nine by
+decision rather than by omission.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
 EOF
 )"
 ```
-
----
 
 ## Self-review
 
