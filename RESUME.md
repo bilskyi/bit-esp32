@@ -61,7 +61,9 @@ is told to use one. `CONFIG_RTC_CLK_SRC_INT_RC=y`, so they are genuinely free.
 | Server memory | 31 MB idle, 74 MB through a conversation |
 | Free heap on device | 172 KB at boot, **55 KB mid-conversation** — see below |
 | Codec | IMA ADPCM both directions, 4:1, verified against `audioop` |
-| Emotion tag | model tagged 8/8 replies, three languages, nothing leaked |
+| Emotion tag rate | 29/30 tagged on the recorded run; brackets never reached spoken text |
+| Emotion spread | 6-7 of 9 emotions across three 30-question runs; `neutral` share 33-40% |
+| Tagged reply length | median 52-72 chars across three runs |
 | Tag latency cost | 60-110 ms to the first sentence, measured against a control |
 | `voice` image | 1013 KB, 51% of the app partition free |
 | OLED | answers at **0x3C**, found 232 ms into boot, before the radio |
@@ -239,9 +241,13 @@ flicking about once a second reads as nervous rather than thoughtful.
 
 - 487 host checks, 0 failures. `cd firmware/host && make test`.
 - All four sketches build with **zero warnings**.
-- 189 server tests. One reads the emotion names straight out of `face.c`, because
+- 209 server tests. One reads the emotion names straight out of `face.c`, because
   the device matches them by substring and a rename would not raise anywhere —
   the face would just quietly stop changing.
+- The text fallback reaches seven of the nine emotions by decision, not
+  omission: `annoyed` cannot be read off a reply that is polite by
+  construction, and `sleepy` must not be read off text at all — the firmware
+  already falls asleep on its own 90 s timer.
 - End to end against the real pipeline: `emotion happy` arrives at the same
   instant as `state speaking`, 370 ms before the first audio.
 - gpt-oss tagged 8/8 replies across three languages with nothing leaking into
@@ -287,6 +293,22 @@ Wanted: `idf.py -DSERVER=lan` and `-DSERVER=cloud`, choosing between two URIs in
   should agree before someone reads the wrong one and believes it.
 - Facts on Railway start empty — the volume is new, so the assistant has to
   learn the user's name (Катерина) again. Nothing to fix, just surprising.
+
+### 3. What the emotion work left open
+
+- **Reaching `excited` and `surprised` at all.** They appeared in none of the
+  six runs. A glossary of the nine was the spec's recorded next move and is
+  untried; it needs the 400-token cap in `test_persona.py` raised on purpose.
+  Anything tried here must be measured with `scripts/emotion_survey.py`
+  against the spread and length figures recorded above, and three runs, not
+  one — a single draw moves by ±1 emotion on its own.
+- **Emotion during `listening` and `thinking`.** The firmware accepts an
+  emotion frame at any moment — `s_face_emotion_seq` re-triggers even on a
+  repeat — and the server uses that exactly once per reply, just before it
+  starts speaking.
+- **Mood across turns.** The emotion is written neither to `history` nor to
+  the store, so nothing carries between replies and no distribution
+  accumulates from real traffic.
 
 ---
 
@@ -371,6 +393,15 @@ afplay /System/Library/Sounds/Ping.aiff
   black joins the black around the eye and the shape reads as a helmet. The
   first `happy` did exactly that and looked like a scowl; the lower lid now
   stops two pixels short of the pupil.
+- **Substring matching on short Cyrillic words is a trap.** `"ого"` as a
+  surprise marker hides inside `нічого`, `нікого` and `когось`, three of the
+  commonest words in an ordinary Ukrainian reply — so `"Дякую, нічого не
+  потрібно."` returned `surprised` despite containing `дякую`, because the
+  surprise list is checked before the greeting list. `_SURPRISED` is now
+  matched on word boundaries; the other four lists stay plain substrings
+  because every entry in them is long enough to be safe. Python's `\b` is
+  Unicode-aware, which is what makes the fix a one-line change rather than a
+  rewrite.
 
 ## What actually caused the trouble, in order of how long it hid
 
@@ -407,3 +438,15 @@ little or not at all.
 What found the real cause every single time was printing a number: the client's
 own error text, the duration of each send, the size of the reply, the
 distribution of first-chunk latency, `ping`. Measure before theorising.
+
+The tag rule earned a place here too: the theory was that `Start every reply
+with how you feel about it` was collapsing the model onto `[neutral]`, because
+an assistant answering a weather question feels nothing about it. Measured
+over thirty questions, three runs each, the reframe made the `neutral` share
+worse on every paired draw — the worst old run beat the best rewrite by
+thirteen points. The old wording is what ships.
+
+The premise behind the rewrite was also wrong: it assumed the model had
+collapsed onto two or three emotions. The survey found six or seven of nine
+every run. `excited` and `surprised` never appeared in any of the six runs —
+that is the real gap, not `neutral`-collapse.
