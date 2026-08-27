@@ -183,6 +183,62 @@ def test_ogo_does_not_steal_a_reply_that_is_actually_happy():
     assert from_text("Дякую, нічого не потрібно.") == "happy"
 
 
+def test_hyphenated_ordinal_ogo_is_not_mistaken_for_surprise():
+    """A related residual of the same trap, lower frequency: \\b alone treats
+    the hyphen in a spelled-out ordinal as a word boundary too, exactly like
+    a space would. "21-ого" ("the 21st") is a date, not a reaction."""
+    assert from_text("Зустріч 21-ого числа.") != "surprised"
+
+
+def test_utochny_does_not_hide_inside_a_longer_word():
+    """The same substring trap _SURPRISED had, found in _CONFUSED: "уточни"
+    is six characters and sits inside "уточнити" and "уточнив", two ordinary
+    conjugations of the same verb. Neither sentence below asks a confused
+    question - they state, in the past and infinitive, that clarifying
+    happened or is wanted - so matching by substring stole two plain
+    statements into confusion they never expressed."""
+    assert from_text("Хочу уточнити деталі замовлення.") != "confused"
+    assert from_text("Я уточнив розклад: потяг о шостій.") != "confused"
+
+
+def test_utochny_still_matches_as_a_standalone_imperative():
+    """The word boundary closes the trap without closing the word itself:
+    "уточни" on its own, as the imperative "clarify", is exactly the signal
+    _CONFUSED is meant to catch."""
+    assert from_text("Уточни, будь ласка, деталі.") == "confused"
+
+
+def test_no_way_does_not_fire_mid_sentence():
+    """"no way" keeps intact word boundaries, so \\b cannot fix it - the
+    ambiguity is meaning, not spelling. Anchoring it to a sentence start
+    rules out this ordinary use of the phrase, which sits mid-clause rather
+    than opening the sentence."""
+    assert from_text("There is no way to tell from here.") != "surprised"
+
+
+def test_nado_zhe_still_reads_as_surprise_when_it_opens_a_sentence():
+    """A documented residual, not a bug nobody noticed: "надо же" can mean
+    the interjection ("well I never") or, just as literally, "[we] also
+    need to". Anchoring to a sentence start rules out the mid-sentence
+    literal reading but not this one, because the literal reading can also
+    open a sentence - "Надо же ещё раз перевірити документи" means "[we]
+    also need to check the documents again", not surprise, and nothing
+    short of reading the rest of the reply can tell the two apart. Pinned
+    here so a future attempt to "fix" this with a smarter anchor does not
+    do it by accident without measuring what it costs elsewhere."""
+    assert from_text("Надо же ещё раз проверить документы.") == "surprised"
+
+
+def test_shcho_same_stays_a_semantic_residual_not_a_matching_bug():
+    """"що саме" ("what exactly") is left as a plain substring on purpose:
+    "Ось що саме сталося вчора" is an ordinary declarative that happens to
+    contain the phrase, and no \\b or anchoring can tell it apart from an
+    actually confused question - the words are the marker and the words are
+    also ordinary. Fixing this needs the sentence's meaning, which from_text
+    does not have."""
+    assert from_text("Ось що саме сталося вчора.") == "confused"
+
+
 @pytest.mark.parametrize(
     "text",
     ["Привіт! Радий тебе чути.", "Спасибо, что спросил.", "Thanks, glad to help."],
@@ -195,6 +251,21 @@ def test_an_apology_beats_not_understanding():
     """Both signals fire here and the apology is the more specific fact, for
     the same reason it already beats the question mark."""
     assert from_text("Вибач, не зрозумів питання.") == "sad"
+
+
+def test_an_apology_beats_surprise():
+    """_SORRY is checked before _CONFUSED and _SURPRISED both, and this is
+    the surprise half of that precedence - nothing pins it elsewhere.
+    "Вибач" is the more specific fact: the reply is apologising, not
+    reacting."""
+    assert from_text("Вибач, ого, я забув документи.") == "sad"
+
+
+def test_confusion_beats_surprise():
+    """_CONFUSED sits above _SURPRISED for the same reason it sits above the
+    question mark: asking for the question again is a more specific fact
+    than a bare reaction, even when both signals are literally present."""
+    assert from_text("Ого, не зрозумів, повтори.") == "confused"
 
 
 def test_not_understanding_beats_the_question_mark():
@@ -210,6 +281,17 @@ def test_surprise_beats_the_exclamation_mark():
 def test_a_greeting_beats_the_exclamation_mark():
     """"Привіт!" is warmth before it is excitement."""
     assert from_text("Привіт!") == "happy"
+
+
+def test_a_thanks_beats_the_question_mark():
+    """_HAPPY moved above the "?" rule when this branch extended the
+    heuristic, and nothing pinned the consequence: "Дякую, а в тебе як?"
+    used to read as curious and now reads as happy. For a companion that
+    thanks and then asks back, happy is the more likely intended reading -
+    the thanks is the point of the sentence, the question back is
+    politeness - so this is pinned as the emotion the change was meant to
+    produce, not an accidental regression."""
+    assert from_text("Дякую, а в тебе як?") == "happy"
 
 
 def test_the_heuristic_names_what_it_cannot_produce():
