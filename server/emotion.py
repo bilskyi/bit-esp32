@@ -70,31 +70,57 @@ _SORRY = (
 # not knowing the answer: confusion asks for the question again, sadness
 # apologises for the answer. Checked after _SORRY, because "Вибач, не
 # зрозумів" is both and the apology is the more specific fact.
-_CONFUSED = (
-    "не зрозумів",
-    "не зрозуміла",
-    "що саме",
-    "уточни",
-    "уточніть",
-    "не понял вопрос",
-    "что именно",
-    "what do you mean",
-    "not sure what you mean",
-    "could you clarify",
+#
+# Matched on word boundaries, for the same reason as _SURPRISED below:
+# "уточни" is a bare six characters and hides inside "уточнити" and
+# "уточнив", two ordinary conjugations of the same verb - "Хочу уточнити
+# деталі замовлення" (I'd like to clarify the order's details) contains no
+# confusion, and used to report some anyway because the substring matched
+# regardless of what came after it. The rest of the entries here are full
+# phrases or long enough on their own that this was never a risk for them.
+#
+# "що саме" is left as-is: not a matching bug but a semantic one. "Ось що
+# саме сталося вчора" (here is what exactly happened yesterday) contains the
+# phrase in a plain declarative with nothing confused about it, and no \b or
+# anchoring closes that gap - the words are the marker and the words are
+# also ordinary. Fixing it needs the sentence's meaning, which this module
+# does not have.
+_CONFUSED = re.compile(
+    r"\b(не зрозумів|не зрозуміла|що саме|уточни|уточніть|не понял вопрос|"
+    r"что именно|what do you mean|not sure what you mean|could you clarify)\b",
+    re.IGNORECASE,
 )
 
 # Checked before the exclamation mark, because "Ого!" would otherwise be read
 # as excitement.
 #
-# Matched on word boundaries, unlike the other lists here, because the
-# shortness that makes an interjection recognisable is exactly what makes it
-# dangerous as a substring: "ого" alone is a bare three characters, and it
-# hides inside "нічого", "нікого" and "когось" - three of the commonest
-# words in an ordinary Ukrainian reply. \b is enough to fix it; the longer
-# entries do not need it, but keeping the whole tuple in one pattern keeps
-# the rule in one place instead of splitting it by length.
+# Two unrelated fixes live in this one pattern, because they close two
+# different kinds of bug and neither generalises to the other.
+#
+# "ого", "нічого собі", "оце так" and "ничего себе" are matched on \b word
+# boundaries: the interjection is short enough - "ого" alone is a bare three
+# characters - to hide inside "нічого", "нікого" and "когось", three of the
+# commonest words in an ordinary Ukrainian reply. \b alone is not quite
+# enough, though: a hyphenated ordinal like "21-ого" ("the 21st") puts a
+# hyphen - a non-word character - directly in front of "ого", and a hyphen
+# reads as a word boundary exactly as well as a space does. The lookbehind
+# excludes that one shape.
+#
+# "надо же" and "no way" cannot be fixed the same way: their word boundaries
+# are already intact - "There is no way to tell from here" bounds "no way"
+# cleanly on both sides - so \b has nothing to close. The ambiguity there is
+# meaning, not spelling: "надо же" is the interjection ("well I never") in
+# one reading and, just as literal a reading, "[we] also need to" ("Надо же
+# ещё раз перевірити документи"). Anchoring the two of them to a sentence
+# start (`(?:^|[.!?]\s)`) rules out the mid-sentence literal reading and
+# leaves every existing test passing, but it is not a full fix: an
+# occurrence that opens the sentence outright, like the "документи" example
+# above, still reads as surprise. That is accepted as a residual rather than
+# hidden - shape alone cannot tell a sentence-initial idiom from a
+# sentence-initial literal use, only meaning can, and this module has none.
 _SURPRISED = re.compile(
-    r"\b(ого|нічого собі|оце так|ничего себе|надо же|wow|no way)\b",
+    r"\b((?<![0-9]-)ого|нічого собі|оце так|ничего себе|wow)\b"
+    r"|(?:^|[.!?]\s)(?:надо же|no way)\b",
     re.IGNORECASE,
 )
 
@@ -173,7 +199,7 @@ def from_text(text: str) -> str:
     low = clean.lower()
     if any(phrase in low for phrase in _SORRY):
         return "sad"
-    if any(phrase in low for phrase in _CONFUSED):
+    if _CONFUSED.search(clean):
         return "confused"
     if _SURPRISED.search(clean):
         return "surprised"

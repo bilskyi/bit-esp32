@@ -399,11 +399,26 @@ afplay /System/Library/Sounds/Ping.aiff
   surprise marker hides inside `нічого`, `нікого` and `когось`, three of the
   commonest words in an ordinary Ukrainian reply — so `"Дякую, нічого не
   потрібно."` returned `surprised` despite containing `дякую`, because the
-  surprise list is checked before the greeting list. `_SURPRISED` is now
-  matched on word boundaries; the other four lists stay plain substrings
-  because every entry in them is long enough to be safe. Python's `\b` is
-  Unicode-aware, which is what makes the fix a one-line change rather than a
-  rewrite.
+  surprise list is checked before the greeting list. The same trap was also
+  live in `_CONFUSED`: `"уточни"` is six characters and sits inside
+  `уточнити` and `уточнив`, so `"Хочу уточнити деталі замовлення."` returned
+  `confused` for a sentence with no confusion in it. Both lists are now
+  matched on word boundaries; `_SORRY` and `_HAPPY` stay plain substrings
+  because their entries are genuinely long enough to be safe — that claim now
+  covers two lists, not four, because it was never true of `_CONFUSED`.
+  Python's `\b` is Unicode-aware, which is most of why the fix is small.
+  `\b` alone was not quite enough for `ого`, though: a hyphenated ordinal
+  like `"21-ого"` puts a hyphen directly in front of it, and a hyphen reads
+  as a word boundary too, so a lookbehind excludes that one shape. Two
+  entries in `_SURPRISED` — `надо же`, `no way` — have no substring problem
+  at all; their false positive is meaning, not spelling (`"Надо же ещё раз
+  перевірити документи"` reads as "also need to", not as the interjection),
+  and `\b` cannot fix meaning. Anchoring both to a sentence start closes the
+  mid-sentence case but not a sentence-initial one, which stays a known,
+  documented residual — see the comment above `_SURPRISED` in
+  `server/emotion.py`. `"що саме"` in `_CONFUSED` is left alone for the same
+  reason: it is a semantic ambiguity, not a matching bug, and no amount of
+  `\b` closes it.
 
 ## What actually caused the trouble, in order of how long it hid
 
