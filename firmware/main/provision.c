@@ -194,7 +194,7 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
         // counts roll over and a direct comparison would not survive it.
         const uint32_t elapsed_ms =
             (uint32_t)(xTaskGetTickCount() - recv_start) * portTICK_PERIOD_MS;
-        if (elapsed_ms > PROV_BODY_RECV_TIMEOUT_MS) {
+        if (elapsed_ms >= PROV_BODY_RECV_TIMEOUT_MS) {
             httpd_resp_send_err(req, HTTPD_408_REQ_TIMEOUT, "body took too long");
             // ESP_OK, not ESP_FAIL: this is a client that stopped sending,
             // not a handler fault, and ESP_OK is what tells httpd to close
