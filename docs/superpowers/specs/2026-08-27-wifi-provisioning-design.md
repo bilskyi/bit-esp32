@@ -94,6 +94,27 @@ for a reason the first draft missed; see the mode section below.
 from a hardware fact rather than a preference, and it is the reason the whole
 flow is shaped the way it is. See "Reporting the result".
 
+**Running an access point puts the radio in the state that has already broken
+this board, and that has to be said out loud.** Modem-sleep is a station
+feature — *"When station connects to AP, Modem-sleep will start"*
+(`wifi.rst:1773`) — and sleep in the disconnected state is *"supported ... if
+running at station mode"* (`wifi.rst:1795`). An access point has to beacon and
+stay receptive, so while provisioning is up the radio does not sleep at all.
+
+`RESUME.md` records what happened the two times this radio was kept awake with
+`WIFI_PS_NONE`: *"one 1 KB send took 32 seconds, 986 audio blocks were dropped,
+and the device then failed to associate at all... most likely supply, since the
+amplifier shares USB power."*
+
+Two things make this survivable rather than a repeat. During provisioning the
+amplifier is silent, so the load that is suspected of causing the sag is
+absent; and nothing is streaming, so there is no throughput to starve — the
+traffic is a few HTTP requests. **But this is a named risk with a bench check,
+not an unknown:** the first thing to establish on the board is whether the
+access point comes up and stays up on the intended power supply. If it does not,
+that is a supply problem and no amount of code will fix it — the same
+conclusion the radio investigation already reached.
+
 **There is no font, and it has to be written.** `face.c` draws eyes;
 `ssd1306.h` has no text; a search for `font|draw_text|glyph` across the firmware
 returns nothing. It goes in its own file rather than into `face.c`, whose stated
@@ -124,6 +145,21 @@ draws: in provisioning it calls `setup_screen_render()` instead of the eyes,
 and outside it renders the face as it does today. `setup_screen.c` never
 touches the panel and holds no state about it. That is why no lock is needed,
 and it is the answer to a question the first draft left open.
+
+It learns which to draw the way it learns everything else — a `volatile` set by
+the task that knows, exactly as `s_boot_stage`, `s_face_emotion` and
+`s_face_startle` already work. One more of those, holding the provisioning
+state and the strings to show. No new mechanism.
+
+**`ws_start()` reads the URI from `config_store`, not from the macro.** It uses
+`SERVER_URI` today, so without this one change the whole server-URI half of
+this feature configures a value nothing reads.
+
+**`httpd` is configured, not left at defaults.** The defaults are a 4096-byte
+task stack and `max_open_sockets` 7, of which 3 are reserved internally
+(`esp_http_server.h:55,60`). One phone needs far less: 2 sockets. That part of
+the cost is a decision rather than a measurement, and the measurement is only
+for what remains.
 
 ## What is stored
 
@@ -191,6 +227,41 @@ Leaving does the reverse. A reboot on transition would be simpler and is
 rejected because it loses the panel's continuity, and the panel is how the user
 knows what happened.
 
+### The existing event handler would sabotage the trial
+
+`voice_main.c:412` reconnects unconditionally:
+
+```c
+} else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+    xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED_BIT);
+    ESP_LOGW(TAG, "wifi dropped, reconnecting");
+    esp_wifi_connect();
+}
+```
+
+That is exactly right for normal operation — a dropped link should come back by
+itself — and exactly wrong for a credential trial. A wrong password produces a
+disconnect, the handler immediately retries it, and the trial never concludes:
+it spins until `TRIAL_MS`, hammering the router with a password already known
+to be bad, and then reports a timeout instead of "wrong password".
+
+So the handler gains one piece of state: while a trial is in progress, a
+disconnect **ends the trial** rather than retrying. The disconnect reason code
+distinguishes the two answers the page needs —
+`WIFI_REASON_NO_AP_FOUND` means the network is not there, an authentication
+failure means the password is wrong — and reporting the difference is most of
+the value of trialling at all.
+
+Outside a trial the handler behaves exactly as it does today. This is the only
+change to it, and the reconnect-forever behaviour that keeps the device alive
+through a router reboot is preserved.
+
+### Scanning during a trial
+
+`esp_wifi_scan_start()` returns `ESP_ERR_WIFI_STATE` while the station is
+connecting (`esp_wifi.h:514`). The page's rescan button is therefore refused
+while a trial is running, and says so rather than failing silently.
+
 ### `wifi_start()` stops waiting forever, without waiting less
 
 Today it blocks on `xEventGroupWaitBits(s_wifi_events, WIFI_CONNECTED_BIT, ...,
@@ -231,7 +302,10 @@ design whose only success signal is a page on that access point tells the user
 Therefore:
 
 - **The panel is authoritative.** It shows trying / connected / wrong password /
-  network not found, and it is still there whatever the phone did.
+  network not found / timed out, and it is still there whatever the phone did.
+  Those last three are separate on purpose: they send the user to three
+  different next actions — retype the password, check the network is on, or try
+  again nearer the router.
 - **The page is best-effort.** It polls a status endpoint after submitting, and
   shows the result if it can still reach the device. It never has to.
 - **The access point stays up for `GRACE_MS` after success**, so the poll has a
@@ -282,6 +356,32 @@ unlike listening, and releasing before the end cancels with nothing lost. The
 exact animation is chosen in `host/face_preview.c`, the way every other
 expression in this project was.
 
+### Which holds arm it, because the button already means three things
+
+A held button today means something different in each state, and the first
+draft wrote "button held and the microphone quiet" as though it meant one
+thing:
+
+| State | What a hold does today |
+|---|---|
+| `ST_IDLE`, socket connected | starts `ST_LISTENING` and streams the utterance |
+| `ST_SPEAKING` / `ST_THINKING` | interrupts the reply |
+| socket down | logged and otherwise ignored (`voice_main.c:994`) |
+
+The countdown is armed in **`ST_LISTENING` and in the socket-down case**, and
+nowhere else. Arming it during a reply would make an interruption compete with
+a reset, and interrupting is the more common intent by a wide margin.
+
+`ST_LISTENING` is the case that needs care, because a silent five-second hold
+there is *also* an utterance being streamed to the server. On entering
+provisioning that utterance is abandoned deliberately: send `{"type":"cancel"}`
+if the socket is still up, reset the microphone buffer, and go to `ST_IDLE`
+before the radio is reconfigured. The server already handles `cancel` — it is
+what the interrupt path uses — so this needs no server change.
+
+The socket-down case needs no cleanup: nothing was streaming, and it is the
+likeliest situation for a reset in the first place.
+
 Once provisioning is entered the eyes are gone and the panel shows the setup
 screen: the access point's name, the address `192.168.4.1`, the unlock code,
 and the current status line. There is no face during provisioning, which is
@@ -321,7 +421,9 @@ created before `wifi_start()` and stays where it is.
 |---|---|
 | Wrong password | Panel and page both say so; NVS untouched; stays in provisioning |
 | Network not found | Same; the list can be rescanned from the page |
-| Trial takes too long | Fails at `TRIAL_MS`, treated as wrong password |
+| Trial takes too long | Fails at `TRIAL_MS` and is reported as a timeout, not as a wrong password — the disconnect reason is what separates those, and a timeout produced none |
+| Rescan asked for during a trial | Refused with a reason; `esp_wifi_scan_start()` returns `ESP_ERR_WIFI_STATE` while connecting |
+| Countdown completes mid-utterance | The utterance is abandoned: `cancel` to the server, microphone buffer reset, `ST_IDLE`, then the radio is reconfigured |
 | Phone dropped by the channel switch | Panel carries the result; page is already documented as best-effort |
 | Nobody uses the page | Times out `AP_IDLE_MS` after the last HTTP request, returns to the saved network |
 | Wrong unlock code | The URI field stays locked; WiFi can still be set |
@@ -350,10 +452,18 @@ On the host, alongside `face_test.c`:
 - **Mode selection** — the pure function over (ssid configured, hold satisfied,
   idle expired).
 
-Only the bench can settle: the silence threshold, `httpd`'s real heap cost
-(estimates on this project have been wrong by a factor of three), whether the
-phone in the room survives the channel switch, and whether raising an access
-point disturbs the radio the way everything else on this device does.
+Only the bench can settle, in this order — the first one can invalidate the
+rest:
+
+1. **Does the access point come up and stay up on the intended supply?** The
+   radio cannot sleep while it is beaconing, and this board has already failed
+   twice in that condition. Everything else is moot if this fails.
+2. The silence threshold, by the procedure above.
+3. `httpd`'s heap cost beyond what is configured. Estimates on this project
+   have been wrong by a factor of three, so this is measured, not predicted.
+4. Whether the phone in the room survives the channel switch. It changes
+   nothing about the design — the panel is authoritative either way — but it is
+   worth knowing which phones get the nice path.
 
 **The transitions themselves are not host-testable** and this spec does not
 pretend otherwise. `esp_wifi_stop()`/`start()` sequencing, the DNS stub and the
