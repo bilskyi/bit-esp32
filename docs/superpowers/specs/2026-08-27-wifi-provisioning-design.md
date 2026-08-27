@@ -12,6 +12,11 @@ Scope is **WiFi credentials and the server URI**. `DEVICE_TOKEN` stays compiled
 in — it is the secret that keeps a stranger off the Groq quota, and it does not
 belong in HTML served over the air.
 
+> **This is the second draft.** The first was reviewed against the ESP-IDF
+> source and three of its decisions did not survive. They are recorded under
+> "What the first draft got wrong" at the end, because two of them are the kind
+> of mistake that is easy to make twice.
+
 ## The decisions, and why
 
 **Provisioning is entered deliberately, never as a reaction to failure.** A
@@ -22,7 +27,7 @@ into a device that has stopped being a voice companion and become a hotspot,
 and this project's radio is unreliable enough already.
 
 **The trigger is a long press with the microphone quiet, not a power-on hold.**
-Power-on hold is the standard pattern and it was the first choice, until the
+Power-on hold is the standard pattern and was the first choice, until the
 obvious objection: on battery power there is nothing to cycle. A long press
 works identically on USB and on battery.
 
@@ -35,9 +40,9 @@ question can never trigger a reset, because a long question is not silence.
 A stuck button is a different matter and honesty is the only available answer:
 a stuck button and a deliberate silent hold are the same signal — button down,
 microphone quiet — and no scheme can tell them apart. It is handled by cost
-rather than detection, which is what the three properties below are for.
+rather than detection, which is what the next two properties are for.
 
-**The access point is not a one-way door.** Nobody connects within the timeout,
+**The access point is not a one-way door.** Nobody uses it within the timeout,
 it goes back to the saved network. This is what makes a stuck button cost
 minutes instead of a trip for a cable.
 
@@ -45,21 +50,53 @@ minutes instead of a trip for a cable.
 ones arrive *and* connecting with them succeeds. Nothing about entering
 provisioning can lose a working network.
 
-**The access point is down before the socket comes up.** Not concurrent, not
-APSTA. The radio is the project's blocking problem — 67% packet loss at
--49 dBm — and an access point sharing it during a conversation is a way to make
-that worse for no benefit.
+**The access point is open, and the dangerous field is what carries the lock.**
+WiFi credentials on a page that anyone nearby can reach is a small risk: the
+window is minutes, it is entered on purpose, and a stranger setting your WiFi
+would need your WiFi password anyway. The server URI is a different matter — it
+points the microphone somewhere, and a passerby who changed it would be
+listening to the room.
 
-**WPA2, not an open network, and that follows from the scope.** With only WiFi
-credentials on the page an open access point would be defensible: the window is
-minutes and it is entered on purpose. With the server URI on the page it is
-not — a passerby inside that window could point the microphone at their own
-server. The password is derived per device from the MAC and shown on the panel.
+So the access point takes no password, and the **server URI field is locked
+until a four-digit code from the panel is entered**. The common case, joining a
+home network, has no friction at all. The rare and dangerous case needs
+physical sight of the device.
 
-**There is no font, and this is where the previous decision costs something.**
-`face.c` draws eyes; `ssd1306.h` has no text; a search for `font|draw_text|glyph`
-across the firmware returns nothing. Showing a password means writing a 5×7
-ASCII font. It goes in its own file rather than into `face.c`, whose stated
+The code is **random per provisioning session**, not derived from the MAC: the
+MAC is broadcast in every frame, so anything derived from it is public. It is
+regenerated every time provisioning is entered.
+
+Four digits is ten thousand possibilities, which an HTTP client scripts through
+in well under a minute — so the digits are not what protects the field. **Five
+wrong codes lock it for the rest of the session**, and the only way to get more
+attempts is physical: hold the button again, which requires standing next to
+the device. That is the actual control; the code just makes it inconvenient to
+guess in one try.
+
+The access point is named `Voice-XXXX`, where `XXXX` is the last two bytes of
+the station MAC as four hex digits, so two devices in one room are
+distinguishable in the phone's network list. It is read, never typed, so hex
+costs nothing here — which is exactly the argument that failed for a password.
+
+This also removes a dead end the first draft had. With a WPA2 access point, a
+device with no panel and no laptop could not be provisioned at all — the
+password was undiscoverable. An open access point means the common case works
+with no screen. Only changing the server URI needs one, and that is the correct
+thing to lose.
+
+**The access point coexists with the station only during provisioning.** Never
+during a conversation. The radio is the project's blocking problem — 67% packet
+loss at -49 dBm — and an access point sharing it while audio is streaming is a
+way to make that worse for no benefit. But provisioning *requires* both at once,
+for a reason the first draft missed; see the mode section below.
+
+**The panel is the source of truth about success, not the page.** This follows
+from a hardware fact rather than a preference, and it is the reason the whole
+flow is shaped the way it is. See "Reporting the result".
+
+**There is no font, and it has to be written.** `face.c` draws eyes;
+`ssd1306.h` has no text; a search for `font|draw_text|glyph` across the firmware
+returns nothing. It goes in its own file rather than into `face.c`, whose stated
 discipline is eyes and nothing else — and, more usefully, because a separate
 file inherits the property that made the eyes work at all: it compiles on the
 laptop, so the setup screen can be looked at before it reaches glass.
@@ -68,19 +105,25 @@ laptop, so the setup screen can be looked at before it reaches glass.
 
 | File | Depends on | Responsibility |
 |---|---|---|
-| `main/provision.c`, `.h` | ESP-IDF | SoftAP, `esp_http_server`, the DNS stub, network scan, NVS read/write |
-| `main/setup_screen.c`, `.h` | **nothing** | the 5×7 font and the setup screen, into the same framebuffer |
+| `main/provision.c`, `.h` | ESP-IDF | mode transitions, SoftAP, `esp_http_server`, the DNS stub, scanning, credential trial |
+| `main/provision_form.c`, `.h` | **nothing** | form decoding and validation, as pure functions |
+| `main/setup_screen.c`, `.h` | **nothing** | the 5×7 font and the setup screen, rendered into a framebuffer it is handed |
 | `main/config_store.c`, `.h` | `nvs_flash` | typed get/set for `ssid`, `pass`, `server_uri`, with the `secrets.h` fallback |
-| `main/face.c` | **nothing** | one addition: the reset countdown as an eye state |
-| `main/voice_main.c` | all of them | boot order, mode selection, the long-press detector |
+| `main/face.c` | **nothing** | one addition: the reset countdown |
+| `main/voice_main.c` | all of them | boot order, the long-press detector, who draws on the panel |
 | `host/setup_screen_test.c` | `setup_screen.c` | layout invariants, no board |
-| `host/form_test.c` | `provision.c`'s parser | form decoding, no board and no network |
+| `host/provision_form_test.c` | `provision_form.c` | decoding and validation, no board, no network |
 
-`setup_screen.c` follows `face.c`'s rules — no ESP-IDF header, no float, no
-allocation — for the same reason: `host/` has to be able to build it.
+`setup_screen.c` and `provision_form.c` follow `face.c`'s rules — no ESP-IDF
+header, no float, no allocation — for the same reason: `host/` has to build
+them. That is what makes the two most bug-prone parts of this feature, the
+screen layout and the form parser, testable on a laptop.
 
-The form parser is split out of the HTTP handler so it is a pure function over
-a string. That is the whole reason it can be tested without a network.
+**One writer owns the framebuffer.** `face_task` stays the only thing that
+draws: in provisioning it calls `setup_screen_render()` instead of the eyes,
+and outside it renders the face as it does today. `setup_screen.c` never
+touches the panel and holds no state about it. That is why no lock is needed,
+and it is the answer to a question the first draft left open.
 
 ## What is stored
 
@@ -97,14 +140,14 @@ already the first line of `app_main`. Nothing about the partition table changes.
 
 **`secrets.h` becomes the built-in fallback rather than the source.** An empty
 NVS falls back to `WIFI_SSID`, `WIFI_PASSWORD` and `SERVER_URI` as compiled.
-That is deliberate: the bench keeps working exactly as it does today, and a
-device flashed with a known-good `secrets.h` never has to be provisioned at all.
+The bench keeps working exactly as it does today, and a device flashed with a
+known-good `secrets.h` never has to be provisioned at all.
 
 **"Configured" means a non-empty `ssid`, from either source.** This matters
 more than it looks: `secrets.h.example` ships the placeholder
-`"your-2.4GHz-network"`, which is non-empty and would count as configured, so
-a device built from the template unchanged would try to join a network that
-does not exist and wait for it forever. The template therefore changes to empty
+`"your-2.4GHz-network"`, which is non-empty and would count as configured, so a
+device built from the template unchanged would try to join a network that does
+not exist and wait for it forever. The template therefore changes to empty
 strings, and the header gains a line saying that leaving `WIFI_SSID` empty is
 how you get a device that provisions itself on first boot. Filling it in is the
 bench shortcut, not the normal path.
@@ -113,25 +156,43 @@ bench shortcut, not the normal path.
 
 ```
 power on
-  └─ credentials in NVS or secrets.h? ──no──→ PROVISIONING
+  └─ ssid configured, from NVS or secrets.h? ──no──→ PROVISIONING
         │yes
         ↓
      connect, wait indefinitely (today's behaviour, unchanged)
         │
         └─ button held + microphone quiet for HOLD_MS ──→ PROVISIONING
                                                             │
-                                  nobody joins for AP_IDLE_MS│
+                            no HTTP request for AP_IDLE_MS  │
                                                             ↓
                                                   back to the saved network
 ```
 
-Entering PROVISIONING from a running device restarts the WiFi stack rather than
-adding an interface: `esp_wifi_stop()`, reconfigure to `WIFI_MODE_AP`,
-`esp_wifi_start()`. Leaving it does the reverse. A reboot on transition would
-also work and is simpler; it is rejected because it loses the face's continuity,
-and the face is how the user knows what is happening.
+Which mode to enter is a pure function of three booleans — ssid configured,
+hold satisfied, idle timer expired — and is written as one so the host can test
+it.
 
-**`wifi_start()` stops waiting forever, without changing how long it waits.**
+### The mode is `WIFI_MODE_APSTA`, and this is not a choice
+
+The first draft said `WIFI_MODE_AP`. That cannot work, because the page shows a
+list of networks and:
+
+> `esp_wifi_scan_start()` API is supported only in station or station/AP mode.
+> — `esp-idf/docs/en/api-guides/wifi.rst:504`
+
+Scanning needs the station interface up. Trialling the credentials before
+saving them needs it too. So provisioning runs `WIFI_MODE_APSTA` throughout,
+and the station side is torn down and rebuilt as a plain `WIFI_MODE_STA` before
+the websocket opens. The prohibition on coexistence is about the conversation,
+not about provisioning.
+
+Entering from a running device: `esp_wifi_stop()`, reconfigure, `esp_wifi_start()`.
+Leaving does the reverse. A reboot on transition would be simpler and is
+rejected because it loses the panel's continuity, and the panel is how the user
+knows what happened.
+
+### `wifi_start()` stops waiting forever, without waiting less
+
 Today it blocks on `xEventGroupWaitBits(s_wifi_events, WIFI_CONNECTED_BIT, ...,
 portMAX_DELAY)`. If that stays, a device stuck connecting can never act on the
 long press, because the task holding the boot sequence never returns. It waits
@@ -139,46 +200,104 @@ on two bits instead — connected, or provisioning-requested — still with no
 timeout. The device waits for its network exactly as long as it does today; it
 just becomes interruptible.
 
-Two constants, and unlike the silence threshold these are choices rather than
-measurements:
+### Constants
 
 | | | |
 |---|---|---|
 | `HOLD_MS` | 5000 | Long enough that no ordinary question reaches it even in silence, short enough to hold comfortably. A starting value; the bench may move it once the countdown animation exists, since the two have to read as one gesture. |
-| `AP_IDLE_MS` | 300000 | Five minutes: enough to find the phone, join, and fumble with the page; short enough that a stuck button costs an annoyance rather than a trip for a cable. Joining the AP does **not** extend it — a client that connects and wanders off must still time out. |
+| `AP_IDLE_MS` | 300000 | Five minutes **since the last HTTP request**, not since the access point came up. A phone that joins and sits there does not hold it open; a person part-way through typing a password does. The first draft reset on neither and would have dropped an active user at 4:50. |
+| `TRIAL_MS` | 20000 | How long to wait for the trial connection before calling it failed. Two DHCP attempts fit inside this on the networks measured so far. |
+| `GRACE_MS` | 3000 | How long the access point stays up after a successful trial, so a page that survived can collect the result. |
 
-Which mode to enter is a pure function of three booleans — credentials present,
-hold satisfied, AP timed out — and is written as one so it can be tested on the
-host.
+## Reporting the result, and why the panel wins
 
-## The boot order changes
+This is the part the first draft got wrong, and it is worth stating the
+mechanism rather than the conclusion.
 
-Today `app_main` creates `button_task` **after** `wifi_start()`, and
-`wifi_start()` blocks on `xEventGroupWaitBits(..., portMAX_DELAY)`. So while
-the device is stuck connecting, nothing samples the button — the press is
-undetectable in precisely the situation that needs it.
+When the station connects to the home network, the SoftAP is **forced onto the
+home network's channel**:
 
-`button_task` moves ahead of `wifi_start()`. It touches only GPIO and its own
-debounce state, so it has no dependency on the radio. `face_task` is already
-created before `wifi_start()` and stays where it is.
+> the home channel of AP and station must be the same, and if they are
+> different, the station's home channel is always in priority... the AP needs to
+> switch its channel from 6 to 9... Station that supports channel switching will
+> transit without disconnecting
+> — `esp-idf/docs/en/api-guides/wifi.rst:1660`
 
-## The countdown
+So at the exact moment the credentials prove correct, the phone may be dropped.
+Phones that honour the Channel Switch Announcement survive; others do not. A
+design whose only success signal is a page on that access point tells the user
+"it worked" and "it broke" with the same silence.
+
+Therefore:
+
+- **The panel is authoritative.** It shows trying / connected / wrong password /
+  network not found, and it is still there whatever the phone did.
+- **The page is best-effort.** It polls a status endpoint after submitting, and
+  shows the result if it can still reach the device. It never has to.
+- **The access point stays up for `GRACE_MS` after success**, so the poll has a
+  chance to land before the interface goes away. Tearing it down the instant
+  the trial succeeds would guarantee the page never gets its answer, even for a
+  phone that would have survived.
+- **The page says so.** One line: if this screen stops responding, look at the
+  device.
+
+With no panel attached, the USB log carries the same states. That is a
+degradation, not a dead end — the common case still completes, because the user
+can simply retry if nothing happens.
+
+## The page
+
+One screen:
+
+- the scanned networks as a list, strongest first, with a line saying that only
+  2.4 GHz networks appear because the device has no 5 GHz radio — otherwise a
+  user whose phone shows a 5 GHz network hunts for it and finds nothing
+- a password field
+- the server URI, shown but **locked**, with the current value visible and a
+  four-digit code field to unlock it
+- a save button
+
+A list rather than a text field for the SSID, because typing an SSID on a phone
+is the single largest source of provisioning failures.
+
+**Hidden networks are not supported.** The first draft contradicted itself here
+— arguing against a text field in one section and referring to a "fallback text
+field" in another. The decision is: no. A hidden network is served by the
+`secrets.h` fallback, which is a build anyway.
+
+On save the device trials the network, reports as described above, and writes
+to NVS **only after the trial succeeds**.
+
+The server URI is validated for shape before being accepted: scheme `ws://` or
+`wss://`, a non-empty host, total length under 128. Whether the server is
+actually reachable cannot be established from provisioning — the device is not
+on the internet yet — so a syntactically valid but wrong URI **will** be saved.
+The recovery is another long press, and the page says so next to the field.
+
+## The countdown, and the setup screen
 
 While the button is down and `s_audio_level` is below a threshold, a counter
 advances; any speech resets it to zero. The eyes do something unmistakably
-unlike listening, and releasing before the end cancels with nothing lost.
+unlike listening, and releasing before the end cancels with nothing lost. The
+exact animation is chosen in `host/face_preview.c`, the way every other
+expression in this project was.
+
+Once provisioning is entered the eyes are gone and the panel shows the setup
+screen: the access point's name, the address `192.168.4.1`, the unlock code,
+and the current status line. There is no face during provisioning, which is
+itself the signal that the device is not in its normal life.
 
 **The threshold and `HOLD_MS` are bench numbers and this spec does not invent
 them.** `face.c` normalises loudness against a decaying peak, which is the
 wrong tool here: silence has no recent peak to normalise against, so this needs
 an absolute threshold on the raw `block_level()` output. The procedure:
 
-1. Log `s_audio_level` once a second with the button held in a quiet room,
-   for thirty seconds. Record the range.
+1. Log `s_audio_level` once a second with the button held in a quiet room, for
+   thirty seconds. Record the range.
 2. Repeat while speaking normally at conversational distance.
 3. The threshold goes between them, nearer the quiet figure.
 
-If the two ranges overlap, the silence gate does not work in that room and the
+If the two ranges overlap, the silence gate does not work in that room and this
 spec's premise is wrong — say so rather than picking a number that splits the
 difference.
 
@@ -186,46 +305,30 @@ difference.
 The countdown never completes. That is the correct failure — it fails to do
 something, rather than doing it by accident.
 
-## What the phone sees
+## The boot order changes
 
-The access point is `Voice-XXXX`, where `XXXX` is the last two bytes of the
-station MAC as four hex digits, so two devices in one room are distinguishable.
-The password is the last **four** bytes as eight hex digits — eight because
-that is WPA2-PSK's minimum passphrase length, so anything shorter would fail to
-start the AP rather than merely being weak. Both are on the panel.
+Today `app_main` creates `button_task` **after** `wifi_start()`, which blocks
+forever. So while the device is stuck connecting, nothing samples the button —
+the press is undetectable in precisely the situation that needs it.
 
-This is obfuscation, not cryptography: anyone who can see the panel can read
-the password, and the MAC is broadcast in every frame. It is sized to the
-actual threat — a passerby during the few minutes the AP is up — and not to a
-determined attacker, who is not in this device's model.
-
-A DNS stub answers every query with `192.168.4.1`, so anything typed into the
-address bar lands on the page. Whether the phone's own captive-portal detection
-pops the page up by itself is **not** something this design relies on: Apple,
-Android and Windows each probe different URLs and change behaviour between
-releases, and chasing that is a rabbit hole with no end. The panel showing the
-address is the guarantee; an automatic popup is a bonus.
-
-The page is one screen: the scanned networks as a list, a password field, the
-server URI pre-filled with what is currently in use, and a save button. A list
-rather than a text field for the SSID, because typing an SSID on a phone is the
-single largest source of provisioning failures.
-
-On save the device attempts the network immediately and reports back on the
-same page — success, or wrong password, or not found. **Credentials are written
-to NVS only after a successful connection.** A wrong password leaves the device
-in provisioning with the old configuration intact.
+`button_task` moves ahead of `wifi_start()`. It touches only GPIO and its own
+debounce state, so it has no dependency on the radio. `face_task` is already
+created before `wifi_start()` and stays where it is.
 
 ## Error handling
 
 | Case | Behaviour |
 |---|---|
-| Wrong password | Reported on the page; NVS untouched; stays in provisioning |
-| SSID not found in scan | The list refreshes; a hidden network needs the fallback text field |
-| Nobody joins the AP | Times out after `AP_IDLE_MS`, returns to the saved network |
-| Joined but never submits | Same timeout; a joined client does not extend it indefinitely |
-| NVS write fails | Reported on the page rather than silently swallowed; stays in provisioning |
-| No panel attached | Provisioning still works; the AP name and password are logged over USB. The device has run without a display for its whole life and must keep doing so |
+| Wrong password | Panel and page both say so; NVS untouched; stays in provisioning |
+| Network not found | Same; the list can be rescanned from the page |
+| Trial takes too long | Fails at `TRIAL_MS`, treated as wrong password |
+| Phone dropped by the channel switch | Panel carries the result; page is already documented as best-effort |
+| Nobody uses the page | Times out `AP_IDLE_MS` after the last HTTP request, returns to the saved network |
+| Wrong unlock code | The URI field stays locked; WiFi can still be set |
+| Five wrong unlock codes | The field is locked for the rest of the session; only a fresh long press grants more attempts |
+| Malformed server URI | Rejected on shape before the trial; the field says why |
+| NVS write fails | Reported rather than swallowed; stays in provisioning |
+| No panel attached | Everything works except reading the unlock code, so WiFi is settable and the server URI is not. States go to the USB log |
 
 That last row is a constraint the project already holds itself to — `voice_main`
 probes the bus and carries on if nothing answers — and provisioning must not
@@ -235,23 +338,33 @@ quietly become the first feature that requires the panel.
 
 On the host, alongside `face_test.c`:
 
-- **Setup screen layout** — text fits inside 128 px, nothing clipped at the
-  edges, the SSID and password are legible at 5×7, and a maximum-length SSID
-  does not overrun.
+- **Setup screen layout** — text fits inside 128 px, nothing clipped, a
+  maximum-length SSID does not overrun, all four lines coexist at 5×7.
 - **Form parsing** — URL decoding, `+` as space, empty SSID rejected, a
   password containing `&` and `=`, an SSID at exactly 32 bytes, over-length
   input truncated rather than overflowing `wifi_config_t`.
-- **Mode selection** — the pure function over (credentials present, hold
-  satisfied, AP timed out).
+- **URI validation** — schemes accepted and rejected, empty host, over-length.
+- **Unlock code** — a wrong code leaves the URI unchanged even when the rest of
+  the form is valid, and the fifth wrong code locks the field until the session
+  ends. This is the security property, so it gets tests rather than a comment.
+- **Mode selection** — the pure function over (ssid configured, hold satisfied,
+  idle expired).
 
 Only the bench can settle: the silence threshold, `httpd`'s real heap cost
 (estimates on this project have been wrong by a factor of three), whether the
-captive-portal popup appears on the phone in the room, and whether raising an
-AP disturbs the radio the way everything else on this device does.
+phone in the room survives the channel switch, and whether raising an access
+point disturbs the radio the way everything else on this device does.
+
+**The transitions themselves are not host-testable** and this spec does not
+pretend otherwise. `esp_wifi_stop()`/`start()` sequencing, the DNS stub and the
+grace period can only be judged on the board. What can be done is keeping the
+decisions out of the transition code — which is what the pure mode selector is
+for — so that what remains on the board is sequencing rather than logic.
 
 ## Deliberately out of scope
 
 - **`DEVICE_TOKEN`.** Stays compiled in.
+- **Hidden networks.** Use `secrets.h`.
 - **Any change to the radio's behaviour in station mode.** `listen_interval`,
   `WIFI_PS_MIN_MODEM` and the reconnect logic are measured settings with a
   history of being made worse by well-meant changes. Provisioning must leave
@@ -259,3 +372,31 @@ AP disturbs the radio the way everything else on this device does.
 - **Over-the-air firmware update.** A single `factory` partition cannot do OTA
   and adding one is a separate decision about the partition table.
 - **Multiple remembered networks.** One is what the device needs.
+
+## What the first draft got wrong
+
+Recorded because two of these are easy to make twice.
+
+1. **`WIFI_MODE_AP` cannot scan.** The draft specified AP-only mode and a page
+   listing networks. `wifi.rst:504` rules that out. Both scanning and trialling
+   credentials need the station interface, so provisioning is `APSTA`. The
+   draft's own blanket "not APSTA" rule, written about conversations, would have
+   forbidden the only workable answer.
+
+2. **Success could not be reported reliably, and the draft did not say why.**
+   `wifi.rst:1660`: connecting the station forces the access point onto the
+   home network's channel, which can drop the phone at the exact moment of
+   success. The draft promised a result "on the same page". The panel is now
+   authoritative and the page is best-effort.
+
+3. **WPA2 on the access point cost more than it bought.** Eight hex digits read
+   off a 128×64 panel and typed on a phone, every time, to protect against a
+   passerby in a five-minute window — and it made a device with no panel
+   impossible to provision at all. Locking the one dangerous field behind a
+   four-digit code puts the cost on the rare operation instead of the common
+   one.
+
+Also fixed: nobody owned the framebuffer; `AP_IDLE_MS` would have dropped an
+active user; the hidden-network text field was referred to but never specified;
+the server URI had no validation and no stated recovery path; the 5 GHz absence
+was invisible; there was no face defined for provisioning itself.
