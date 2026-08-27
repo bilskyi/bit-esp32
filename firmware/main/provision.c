@@ -113,6 +113,34 @@ static void html_escape(const char *src, char *dst, size_t dst_size) {
     dst[w] = '\0';
 }
 
+// Escapes into dst for embedding in a JSON string, stopping cleanly rather
+// than emitting a partial escape if dst is too small. An SSID is just an
+// octet string at the 802.11 layer - nothing stops one from carrying a
+// quote, a backslash, or a raw control byte - so scan results need the same
+// care html_escape() above gives the URI on the page.
+static void json_escape(const char *src, char *dst, size_t dst_size) {
+    if (dst_size == 0) return;
+    static const char hex[] = "0123456789abcdef";
+    size_t w = 0;
+    for (size_t i = 0; src[i] != '\0'; i++) {
+        const unsigned char c = (unsigned char)src[i];
+        if (c == '"' || c == '\\') {
+            if (w + 2 + 1 > dst_size) break;
+            dst[w++] = '\\';
+            dst[w++] = (char)c;
+        } else if (c < 0x20) {
+            if (w + 6 + 1 > dst_size) break;
+            dst[w++] = '\\'; dst[w++] = 'u'; dst[w++] = '0'; dst[w++] = '0';
+            dst[w++] = hex[(c >> 4) & 0xF];
+            dst[w++] = hex[c & 0xF];
+        } else {
+            if (w + 1 + 1 > dst_size) break;
+            dst[w++] = (char)c;
+        }
+    }
+    dst[w] = '\0';
+}
+
 // ------------------------------------------------------------- HTTP handlers
 //
 // Every handler's first statement is the same, and it is not decorative:
@@ -137,12 +165,11 @@ static esp_err_t index_get_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// Parses the submitted form and says so. Trialling these credentials needs
-// the station interface this task raised but must not use - that is Task
-// 5's job - and persisting anything ahead of a successful trial would be
-// the one mistake config_store.h was written to rule out. So this reads the
-// body all the way out (a client waiting for a response must get one) and
-// answers honestly: not yet.
+// Reads the form, then trials the candidate before anything reaches NVS -
+// the one mistake config_store.h was written to rule out. The URI is gated
+// on the unlock code; the WiFi fields are not, so a wrong code still lets
+// ssid/pass take effect. A client waiting on this response must get one
+// either way, which is why the body is always read out in full first.
 // PL_SSID_MAX/PL_PASS_MAX/PL_URI_MAX/PL_CODE_LEN are *decoded* field
 // bounds, but the wire carries application/x-www-form-urlencoded, where one
 // decoded byte (anything outside [A-Za-z0-9-._~]) can arrive as three
@@ -215,19 +242,91 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
     char code[PL_CODE_LEN + 1];
     pl_field(body, got, "ssid", ssid, sizeof(ssid));
     pl_field(body, got, "pass", pass, sizeof(pass));
-    pl_field(body, got, "uri", uri, sizeof(uri));
+    const bool have_uri = pl_field(body, got, "uri", uri, sizeof(uri));
     pl_field(body, got, "code", code, sizeof(code));
 
-    ESP_LOGI(TAG, "save: ssid \"%s\" received, not implemented yet", ssid);
+    // pl_unlock_check() only runs when uri was actually submitted, so a
+    // WiFi-only save cannot burn one of pl_unlock_t's PL_UNLOCK_MAX_TRIES
+    // attempts just by not mentioning the URI at all. When it is submitted,
+    // both checks must pass - a wrong code must leave the URI untouched
+    // without stopping ssid/pass from being trialled below.
+    const bool uri_ok = have_uri && pl_unlock_check(&s_unlock, code) && pl_uri_valid(uri);
 
-    httpd_resp_set_type(req, "text/plain");
-    httpd_resp_sendstr(req, "not implemented yet");
+    ESP_LOGI(TAG, "save: trialling \"%s\"%s", ssid, uri_ok ? " (uri unlocked)" : "");
+
+    xSemaphoreTake(s_screen_lock, portMAX_DELAY);
+    s_screen.status = SS_STATUS_TRYING;
+    xSemaphoreGive(s_screen_lock);
+
+    // From here until provision_set_trial_mode(false) below, wifi_event()
+    // in voice_main.c ends a disconnect at the reason code instead of
+    // retrying it - see s_trial_in_progress there for why that split has to
+    // exist at all.
+    provision_set_trial_mode(true);
+
+    wifi_config_t wc = {0};
+    strncpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid) - 1);
+    strncpy((char *)wc.sta.password, pass, sizeof(wc.sta.password) - 1);
+    esp_err_t werr = esp_wifi_set_config(WIFI_IF_STA, &wc);
+    if (werr == ESP_OK) werr = esp_wifi_connect();
+    if (werr != ESP_OK) {
+        ESP_LOGW(TAG, "could not start connecting: %s", esp_err_to_name(werr));
+    }
+
+    uint8_t reason = 0;
+    // A failure above never posts WIFI_EVENT_STA_DISCONNECTED, so waiting on
+    // it here would just burn the full PROV_TRIAL_MS before landing on the
+    // same answer as a real timeout would.
+    const provision_trial_outcome_t outcome =
+        (werr == ESP_OK) ? provision_wifi_trial_wait(&reason) : PROV_TRIAL_TIMED_OUT;
+
+    provision_set_trial_mode(false);
+
+    ss_status_t status;
+    if (outcome == PROV_TRIAL_CONNECTED) {
+        // Nothing reaches NVS on any other path out of this function.
+        if (config_save_wifi(ssid, pass) != ESP_OK) {
+            ESP_LOGW(TAG, "config_save_wifi failed; connected this session only");
+        }
+        if (uri_ok && config_save_uri(uri) != ESP_OK) {
+            ESP_LOGW(TAG, "config_save_uri failed");
+        }
+        status = SS_STATUS_CONNECTED;
+    } else if (outcome == PROV_TRIAL_DISCONNECTED) {
+        // NO_AP_FOUND and everything else are different next actions for
+        // whoever is holding the phone - "check the network name" versus
+        // "check the password" - which is most of the point of trialling.
+        status = (reason == WIFI_REASON_NO_AP_FOUND) ? SS_STATUS_NOT_FOUND : SS_STATUS_BAD_PASSWORD;
+    } else {
+        status = SS_STATUS_TIMED_OUT;
+    }
+
+    xSemaphoreTake(s_screen_lock, portMAX_DELAY);
+    s_screen.status = status;
+    xSemaphoreGive(s_screen_lock);
+
+    // Not torn down here even on success. esp_wifi_connect() just forced the
+    // AP onto the home network's channel - AP and STA share one radio
+    // (wifi.rst:1660) - which can drop whatever phone is mid-request right
+    // now, so this response may never arrive. PROV_GRACE_MS is the window
+    // for a phone that reassociates afterwards to poll GET /status and get
+    // the answer instead; tearing the AP down the instant this function
+    // returns would close that window before it opens. Nothing in this file
+    // calls provision_stop() on a timer, so that holds by construction -
+    // whatever eventually does drive it after a successful save must still
+    // wait out PROV_GRACE_MS first.
+    char out[64];
+    snprintf(out, sizeof(out), "{\"status\":\"%s\"}", ss_status_text(status));
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, out);
     return ESP_OK;
 }
 
-// Polled by the page while a future step (Task 6) waits on a trial that
-// this task cannot start. For now it can only ever report what
-// provision_start() put in s_screen: SS_STATUS_WAITING.
+// Polled by the page for a live status: whatever save_post_handler last put
+// in s_screen, from SS_STATUS_WAITING before any submission through
+// SS_STATUS_TRYING and on to the outcome. May never be reached mid-trial -
+// see the note on the AP hold in save_post_handler - which is why this
+// exists as a second way in rather than the only one.
 static esp_err_t status_get_handler(httpd_req_t *req) {
     s_last_request = xTaskGetTickCount();
 
@@ -245,15 +344,103 @@ static esp_err_t status_get_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
-// A placeholder, on purpose: esp_wifi_scan_start() needs the station
-// interface this task raised, and running an actual scan from it is Task
-// 5's job. An empty list is the honest answer to "what have you seen" when
-// nothing has looked yet.
+// Capped well under what a crowded building could return, so the reply and
+// the static record buffer below both stay small and fixed-size.
+#define PROV_SCAN_MAX 20
+
+// GET /scan: a blocking, all-channel active scan, returned strongest signal
+// first. esp_wifi_scan_start() needs the station interface provision_start()
+// raised - "supported only in station or station/AP mode"
+// (esp-idf/docs/en/api-guides/wifi.rst:504) - and, blocking, ties up the one
+// httpd task for the scan's duration. That is fine: there is nothing else
+// this device should be doing with that task while someone is provisioning.
 static esp_err_t scan_get_handler(httpd_req_t *req) {
     s_last_request = xTaskGetTickCount();
 
+    wifi_scan_config_t sc = {0};  // NULL SSID, all channels, active
+    esp_err_t err = esp_wifi_scan_start(&sc, true);
+    if (err == ESP_ERR_WIFI_STATE) {
+        // "wifi still connecting when invoke esp_wifi_scan_start"
+        // (esp_wifi.h:514). A trial is running; say so rather than failing
+        // silently.
+        //
+        // Not httpd_resp_send_err(req, HTTPD_409_CONFLICT, ...): this
+        // esp-idf (v5.3.2) has no 409 in httpd_err_code_t, only 400-405,
+        // 408, 411, 414, 431 and 500/501/505 - none of which mean "come
+        // back later". httpd_resp_send_custom_err() is the same header's
+        // way to put an arbitrary status on the wire, the same way
+        // redirect_get_handler() below hand-writes its own 302.
+        return httpd_resp_send_custom_err(req, "409 Conflict", "trial in progress");
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_scan_start: %s", esp_err_to_name(err));
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "scan failed");
+    }
+
+    uint16_t found = 0;
+    err = esp_wifi_scan_get_ap_num(&found);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_scan_get_ap_num: %s", esp_err_to_name(err));
+        // The scan completed and its results are still queued in the
+        // driver; nothing has claimed them yet, so this path - unlike the
+        // ESP_ERR_WIFI_STATE one above, where the scan never started - must
+        // free them itself.
+        esp_wifi_clear_ap_list();
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "scan failed");
+    }
+
+    uint16_t n = (found > PROV_SCAN_MAX) ? PROV_SCAN_MAX : found;
+    // static: ~20 wifi_ap_record_t would be a few KB on the httpd task's
+    // stack, and index_get_handler's chunked-send pattern below already
+    // establishes that these handlers run one at a time on that one task.
+    static wifi_ap_record_t recs[PROV_SCAN_MAX];
+    err = esp_wifi_scan_get_ap_records(&n, recs);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_scan_get_ap_records: %s", esp_err_to_name(err));
+        // This call frees the whole list itself on success; on failure it
+        // may not have, so the same cleanup as above applies.
+        esp_wifi_clear_ap_list();
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "scan failed");
+    }
+
+    // Strongest first. n is capped at PROV_SCAN_MAX, so a plain insertion
+    // sort costs nothing worth measuring.
+    for (uint16_t i = 1; i < n; i++) {
+        const wifi_ap_record_t key = recs[i];
+        uint16_t j = i;
+        while (j > 0 && recs[j - 1].rssi < key.rssi) {
+            recs[j] = recs[j - 1];
+            j--;
+        }
+        recs[j] = key;
+    }
+
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"networks\":[]}");
+    httpd_resp_send_chunk(req, "{\"networks\":[", 13);
+    // Worst case, one entry: leading "," (1) + {"ssid":" (9) + an escaped
+    // SSID where every one of PL_SSID_MAX bytes became a \u00XX control
+    // escape (PL_SSID_MAX * 6) + ","rssi": (9) + "-128" (4) + ,"open": (8) +
+    // "false" (5) + } (1) + '\0' (1). An SSID is attacker-controlled - it
+    // arrives over the air from whatever is broadcasting nearby, no
+    // association required - so this has to hold the worst case exactly,
+    // not the common one: snprintf() below reports how long the full string
+    // would have been even when it truncates, and httpd_resp_send_chunk()
+    // would then read that many bytes out of entry regardless of how much
+    // of it snprintf() actually wrote.
+    char entry[1 + 9 + PL_SSID_MAX * 6 + 9 + 4 + 8 + 5 + 1 + 1];
+    char esc_ssid[PL_SSID_MAX * 6 + 1];
+    for (uint16_t i = 0; i < n; i++) {
+        // ssid[33] is null-terminated by the driver even at the full 32
+        // bytes - the 33rd byte exists for exactly that.
+        json_escape((const char *)recs[i].ssid, esc_ssid, sizeof(esc_ssid));
+        const int len = snprintf(entry, sizeof(entry),
+                                  "%s{\"ssid\":\"%s\",\"rssi\":%d,\"open\":%s}",
+                                  i == 0 ? "" : ",", esc_ssid, (int)recs[i].rssi,
+                                  recs[i].authmode == WIFI_AUTH_OPEN ? "true" : "false");
+        httpd_resp_send_chunk(req, entry, len);
+    }
+    httpd_resp_send_chunk(req, "]}", 2);
+    httpd_resp_send_chunk(req, NULL, 0);  // ends the chunked response
     return ESP_OK;
 }
 

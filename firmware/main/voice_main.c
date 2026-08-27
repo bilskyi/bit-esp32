@@ -39,6 +39,7 @@
 #include "nvs_flash.h"
 
 #include "face.h"
+#include "provision.h"
 #include "secrets.h"
 #include "ssd1306.h"
 
@@ -145,6 +146,13 @@ static EventGroupHandle_t s_wifi_events;
 static esp_websocket_client_handle_t s_ws;
 
 #define WIFI_CONNECTED_BIT BIT0
+
+// Set while a provisioning trial is running. Outside a trial the handler
+// behaves exactly as it always has, including reconnecting forever through a
+// router reboot, which is what keeps the device alive.
+static volatile bool s_trial_in_progress = false;
+static volatile uint8_t s_trial_reason = 0;
+#define WIFI_TRIAL_DONE_BIT BIT1
 
 typedef enum { ST_IDLE, ST_LISTENING, ST_THINKING, ST_SPEAKING } state_t;
 static volatile state_t s_state = ST_IDLE;
@@ -411,11 +419,55 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED_BIT);
-        ESP_LOGW(TAG, "wifi dropped, reconnecting");
+        const wifi_event_sta_disconnected_t *d = (const wifi_event_sta_disconnected_t *)data;
+        if (s_trial_in_progress) {
+            // A trial asks a question, so a disconnect is the answer, not a fault
+            // to recover from. The reason code is what separates "wrong password"
+            // from "that network is not here", and telling them apart is most of
+            // the value of trialling before saving.
+            s_trial_reason = d->reason;
+            xEventGroupSetBits(s_wifi_events, WIFI_TRIAL_DONE_BIT);
+            return;
+        }
+        ESP_LOGW(TAG, "wifi dropped, reconnecting (reason %d)", (int)d->reason);
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
     }
+}
+
+// The rest of this section is provision.c's window into wifi_event() above -
+// it owns s_wifi_events, s_trial_in_progress and s_trial_reason, none of
+// which are safe to touch from another translation unit directly, so
+// provision.h declares these two and this file defines them.
+
+// Turns trial mode on or off around a credential trial run from POST /save.
+// While on, wifi_event() ends a disconnect at the reason code instead of
+// retrying it, per s_trial_in_progress above. Switching on also clears
+// WIFI_CONNECTED_BIT and WIFI_TRIAL_DONE_BIT, so a bit left over from normal
+// operation before provisioning started, or from an earlier trial this same
+// session, cannot make provision_wifi_trial_wait() below return a stale
+// answer before this attempt has actually run.
+void provision_set_trial_mode(bool on) {
+    if (on) {
+        xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED_BIT | WIFI_TRIAL_DONE_BIT);
+    }
+    s_trial_in_progress = on;
+}
+
+// Blocks for up to PROV_TRIAL_MS waiting for the esp_wifi_connect() a trial
+// just started to resolve one way or the other. Call only while trial mode
+// is on, after esp_wifi_connect() has been issued.
+provision_trial_outcome_t provision_wifi_trial_wait(uint8_t *out_reason) {
+    const EventBits_t bits =
+        xEventGroupWaitBits(s_wifi_events, WIFI_CONNECTED_BIT | WIFI_TRIAL_DONE_BIT,
+                             pdFALSE, pdFALSE, pdMS_TO_TICKS(PROV_TRIAL_MS));
+    if (bits & WIFI_CONNECTED_BIT) return PROV_TRIAL_CONNECTED;
+    if (bits & WIFI_TRIAL_DONE_BIT) {
+        *out_reason = s_trial_reason;
+        return PROV_TRIAL_DISCONNECTED;
+    }
+    return PROV_TRIAL_TIMED_OUT;
 }
 
 static void wifi_start(void) {

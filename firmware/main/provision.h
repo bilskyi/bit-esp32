@@ -10,6 +10,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 
@@ -31,3 +32,25 @@ bool provision_idle_expired(void);
 
 // What face_task should draw. Safe to call from another task: it copies.
 void provision_screen(setup_screen_t *out);
+
+// ---------------------------------------------------------- the WiFi trial
+//
+// A credential trial needs the station connection state that wifi_event()
+// in voice_main.c already tracks, and that state is not safe to reach into
+// from another translation unit directly - hence these two, declared here
+// and defined in voice_main.c, next to what they touch.
+
+// Turns trial mode on or off. While on, a disconnect ends the trial instead
+// of being retried - see s_trial_in_progress next to wifi_event() in
+// voice_main.c for why that split exists.
+void provision_set_trial_mode(bool on);
+
+typedef enum {
+    PROV_TRIAL_CONNECTED,     // IP_EVENT_STA_GOT_IP arrived
+    PROV_TRIAL_DISCONNECTED,  // WIFI_EVENT_STA_DISCONNECTED arrived; *out_reason is set
+    PROV_TRIAL_TIMED_OUT,     // neither arrived within PROV_TRIAL_MS
+} provision_trial_outcome_t;
+
+// Waits up to PROV_TRIAL_MS for the connection attempt started by
+// esp_wifi_connect() to resolve. Call only while trial mode is on.
+provision_trial_outcome_t provision_wifi_trial_wait(uint8_t *out_reason);
