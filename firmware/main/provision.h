@@ -54,3 +54,19 @@ typedef enum {
 // Waits up to PROV_TRIAL_MS for the connection attempt started by
 // esp_wifi_connect() to resolve. Call only while trial mode is on.
 provision_trial_outcome_t provision_wifi_trial_wait(uint8_t *out_reason);
+
+// Cancels the connection attempt a trial started and waits, bounded, for
+// wifi_event() to confirm the resulting disconnect landed on the trial
+// branch rather than the normal one - see provision_set_trial_mode() above
+// for why that split exists. Textual order relative to
+// provision_set_trial_mode(false) is not synchronisation:
+// esp_wifi_disconnect() only requests the disconnect, and the event it
+// produces crosses WiFi-driver teardown and the default event-loop task
+// before wifi_event() sees it, while clearing trial mode is a same-thread
+// write that finishes essentially instantly. This waits for the trial
+// branch's own confirmation instead of assuming that ordering. Call only
+// while trial mode is still on, after a trial outcome other than
+// PROV_TRIAL_CONNECTED. Safe to call when there is nothing to cancel -
+// esp_wifi_disconnect() then fails synchronously and this returns without
+// waiting.
+void provision_wifi_trial_cancel(void);

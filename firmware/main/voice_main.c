@@ -494,6 +494,72 @@ provision_trial_outcome_t provision_wifi_trial_wait(uint8_t *out_reason) {
     return PROV_TRIAL_TIMED_OUT;
 }
 
+// Bounded wait for provision_wifi_trial_cancel() below. esp_http_server
+// runs every connection on one task (see PROV_BODY_RECV_TIMEOUT_MS in
+// provision.c), so this can never become a new way to hang it - the whole
+// point is to close a race, not open a hang in its place. What it is
+// actually waiting on is WiFi-driver teardown plus one hop through the
+// default event-loop queue, which is single-digit milliseconds in
+// practice; 300 ms is generously above that while still costing nothing
+// worth noticing next to the up-to-PROV_TRIAL_MS (20 s) trial this follows.
+#define PROV_TRIAL_CANCEL_WAIT_MS 300
+
+// Cancels the connection attempt a trial started and waits for
+// confirmation that wifi_event() saw the resulting disconnect on the trial
+// branch, rather than assuming it did. Textual order relative to
+// provision_set_trial_mode(false) is not synchronisation:
+// esp_wifi_disconnect() only *requests* the disconnect, and the
+// WIFI_EVENT_STA_DISCONNECTED it produces has to cross WiFi-driver
+// teardown and then dispatch on this event-loop task before wifi_event()
+// ever runs, while clearing s_trial_in_progress is a same-thread write
+// that finishes essentially instantly - so the flag is very likely to
+// clear first, routing the cancellation's own event to the branch that
+// reconnects unconditionally, forever, with the candidate the caller just
+// decided had failed.
+//
+// WIFI_TRIAL_DONE_BIT is cleared before esp_wifi_disconnect() is even
+// called, not just before the wait: the trial outcome the caller just read
+// may have left that bit set (provision_wifi_trial_wait() does not clear
+// on exit), and clearing it only after issuing the disconnect could just
+// as easily wipe out the real confirmation as the stale one. Call only
+// while trial mode is still on, after a trial outcome other than
+// PROV_TRIAL_CONNECTED.
+void provision_wifi_trial_cancel(void) {
+    if (s_wifi_events == NULL) {
+        // Same missing-dependency guard as provision_set_trial_mode() and
+        // provision_wifi_trial_wait() above, for the same reason.
+        ESP_LOGE(TAG, "provision_wifi_trial_cancel: s_wifi_events not ready (wifi_start() has not run)");
+        return;
+    }
+
+    xEventGroupClearBits(s_wifi_events, WIFI_TRIAL_DONE_BIT);
+
+    const esp_err_t derr = esp_wifi_disconnect();
+    if (derr != ESP_OK) {
+        // Nothing was actually requested - most likely the station was
+        // already idle, which is exactly what a prior PROV_TRIAL_DISCONNECTED
+        // or a synchronous esp_wifi_connect() failure leaves behind - so no
+        // event will ever set the bit. Waiting would only spend
+        // PROV_TRIAL_CANCEL_WAIT_MS to learn what is already known.
+        ESP_LOGW(TAG, "esp_wifi_disconnect (trial cleanup): %s", esp_err_to_name(derr));
+        return;
+    }
+
+    const EventBits_t bits =
+        xEventGroupWaitBits(s_wifi_events, WIFI_TRIAL_DONE_BIT, pdFALSE, pdFALSE,
+                             pdMS_TO_TICKS(PROV_TRIAL_CANCEL_WAIT_MS));
+    if (!(bits & WIFI_TRIAL_DONE_BIT)) {
+        // The wait gave up, not the disconnect - that request is still in
+        // flight and may yet resolve after this function returns. The
+        // caller proceeds regardless: this has narrowed the window for the
+        // stray event to land on the wrong branch, not closed it, which is
+        // the honest limit of what a bounded wait on a single-tasked HTTP
+        // server can do.
+        ESP_LOGW(TAG, "trial cancel: no confirmation within %d ms; proceeding anyway",
+                 PROV_TRIAL_CANCEL_WAIT_MS);
+    }
+}
+
 static void wifi_start(void) {
     s_wifi_events = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_netif_init());

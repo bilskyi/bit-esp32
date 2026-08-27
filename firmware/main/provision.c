@@ -294,21 +294,31 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
     // not the normal one: outside a trial that branch reconnects
     // unconditionally, forever, with the candidate the user was just told
     // had failed, and on a late success it sets WIFI_CONNECTED_BIT with
-    // nobody left waiting on it. That is why this runs before
-    // provision_set_trial_mode(false) rather than after - s_trial_in_progress
-    // has to still be true when the cancellation's own event arrives, or the
-    // event lands exactly on the branch this is trying to avoid.
+    // nobody left waiting on it.
+    //
+    // Calling esp_wifi_disconnect() here, textually before
+    // provision_set_trial_mode(false) below, is not enough on its own to
+    // guarantee the resulting event lands on the trial branch:
+    // esp_wifi_disconnect() only *requests* the disconnect, and the event it
+    // produces has to cross WiFi-driver teardown and then dispatch on the
+    // default event-loop task - a different task from this one - before
+    // wifi_event() ever sees it, while clearing s_trial_in_progress is a
+    // same-thread write that finishes essentially instantly. The likely
+    // ordering is the wrong one. provision_wifi_trial_cancel() closes that
+    // gap by waiting, bounded, for wifi_event()'s trial branch to actually
+    // confirm the disconnect before trial mode comes off - see its comment
+    // in voice_main.c for the sequence and the timeout. A timeout there
+    // does not make this race impossible, only smaller: the remaining
+    // window is whatever a few hundred milliseconds does not cover, not the
+    // "guaranteed on the common path" this used to be.
     // Also correct, and harmless, on the other two outcomes: a disconnect
     // already delivered its event and left nothing in flight, and a
     // synchronous esp_wifi_set_config()/esp_wifi_connect() failure above
-    // never started an attempt at all. esp_wifi_disconnect() on a station
-    // that is not connected just reports an error this function has no use
-    // for.
+    // never started an attempt at all - provision_wifi_trial_cancel() finds
+    // esp_wifi_disconnect() failing on an already-idle station in both
+    // cases and returns without waiting.
     if (outcome != PROV_TRIAL_CONNECTED) {
-        const esp_err_t derr = esp_wifi_disconnect();
-        if (derr != ESP_OK) {
-            ESP_LOGW(TAG, "esp_wifi_disconnect (trial cleanup): %s", esp_err_to_name(derr));
-        }
+        provision_wifi_trial_cancel();
     }
 
     provision_set_trial_mode(false);
@@ -654,9 +664,13 @@ esp_err_t provision_start(void) {
     // garbage password. config_store.c's own writes are already gated on a
     // successful trial; this is the driver's second, independent copy, and
     // it was never gated on anything. Safe to make RAM-only here because
-    // wifi_start() never reads it back - it reapplies STA config from
-    // config_store on every boot - so the driver's flash-backed copy is
-    // pure duplication and removing it costs nothing.
+    // wifi_start() in voice_main.c unconditionally calls
+    // esp_wifi_set_config() with its own values - currently
+    // WIFI_SSID/WIFI_PASSWORD from secrets.h; config_load() exists but
+    // nothing in the boot path calls it yet - before esp_wifi_start() on
+    // every boot. The driver's persisted copy is therefore never relied on
+    // regardless of where those values came from, so the driver's
+    // flash-backed copy is pure duplication and removing it costs nothing.
     err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_set_storage: %s", esp_err_to_name(err));
