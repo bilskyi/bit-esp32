@@ -63,7 +63,7 @@ is told to use one. `CONFIG_RTC_CLK_SRC_INT_RC=y`, so they are genuinely free.
 | Codec | IMA ADPCM both directions, 4:1, verified against `audioop` |
 | Emotion tag rate | 29/30 tagged on the recorded run; brackets never reached spoken text |
 | Emotion spread | 6-7 of 9 emotions across three 30-question runs; `neutral` share 33-40% |
-| Tagged reply length | median 52-72 chars across three runs |
+| Reply length | median 52-72 chars across three runs |
 | Tag latency cost | 60-110 ms to the first sentence, measured against a control |
 | `voice` image | 1013 KB, 51% of the app partition free |
 | OLED | answers at **0x3C**, found 232 ms into boot, before the radio |
@@ -464,11 +464,12 @@ worse on every paired draw — the worst old run beat the best rewrite by
 thirteen points. The old wording is what ships.
 
 The rewrite also made replies shorter, the other way round: median 52, 66, 72
-characters for the old wording against 40, 48, 51 for the rewrite, about a
-third shorter. Brevity does outrank variety in this project, so that is a
-real gain — but it was not what the change was for, and it was not worth a
-worse face. If shorter replies are wanted, the brevity rule is the honest
-place to ask for them.
+characters for the old wording against 40, 48, 51 for the rewrite, paired
+reductions of 23%, 27% and 29% — call it about a quarter shorter, not a
+third. Brevity does outrank variety in this project, so that is a real gain
+— but it was not what the change was for, and it was not worth a worse face.
+If shorter replies are wanted, the brevity rule is the honest place to ask
+for them.
 
 The premise behind the rewrite was also wrong: it assumed the model had
 collapsed onto two or three emotions. The kept wording reached six or seven

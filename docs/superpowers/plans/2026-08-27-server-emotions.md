@@ -308,6 +308,15 @@ EOF
 
 ### Task 2: The tag rule stops asking how the model feels
 
+**This task's result was reverted after Task 2's own Step 6 measured it.** The
+rewrite below made the `neutral` share worse on every paired draw against the
+wording it replaced; `server/persona.py` carries the original wording again.
+The steps and the two new tests they describe were carried out exactly as
+written and are kept here as the record of what was tried and why it looked
+promising — read them as history, not as the current state of
+`server/persona.py`. See Task 4 for the measurements that reversed this task
+and `RESUME.md` for the full figures.
+
 **Files:**
 - Modify: `server/persona.py:16-19` (the first bullet of `BASE`)
 - Test: `tests/test_persona.py:50-55` (rewrite) plus two new tests
@@ -903,13 +912,15 @@ EOF
 )"
 ```
 
+---
+
 ## Self-review
 
 **Spec coverage**
 
 | Spec section | Task |
 |---|---|
-| The prompt rewrite, exact wording | Task 2, Step 3 |
+| The prompt rewrite, exact wording | Task 2, Step 3 — built and measured there, reverted by Task 4 |
 | Token budget stays under 400 | Global Constraints; Task 2, Step 4 |
 | Glossary deferred, cap not raised | Global Constraints; Task 2, Step 6 |
 | The survey: corpus, LeadingTag reuse, four reported figures, JSON, sequential | Task 1, Step 3 |

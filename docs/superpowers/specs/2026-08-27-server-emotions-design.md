@@ -10,6 +10,13 @@ Nothing about *when* emotions are sent — the face stays silent through
 `listening` and `thinking`, as it does today. Nothing about remembering a mood
 across turns. Both are real gaps and both stay open.
 
+> **Outcome, recorded after this was tested:** the rewrite below was built and
+> measured — three runs each wording, thirty questions, interleaved — and it
+> lost on every paired draw: worse `neutral` share, fewer distinct emotions
+> reached. It was reverted; `server/persona.py` still carries the wording this
+> document argues against. See `RESUME.md` for the figures. What follows is
+> the reasoning that was tested, not what shipped.
+
 ## The decisions, and why
 
 **The prompt's rule is rewritten, not extended.** The current rule says `Start
