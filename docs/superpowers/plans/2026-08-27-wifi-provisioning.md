@@ -1059,10 +1059,11 @@ Replace `firmware/main/secrets.h.example` with:
 #define DEVICE_TOKEN ""
 ```
 
-- [ ] **Step 4: Add the new sources to the build**
+- [ ] **Step 4: Add the sources that exist to the build**
 
-In `firmware/main/CMakeLists.txt`, extend the `voice` branch so the new files
-are compiled. Replace the `if(...)` block with:
+In `firmware/main/CMakeLists.txt`, extend the `voice` branch. **Do not list
+`provision.c` yet** — it does not exist until Task 4, and a commit that does not
+build is not worth the convenience of editing this file once:
 
 ```cmake
 if(SKETCH STREQUAL "face" OR SKETCH STREQUAL "voice")
@@ -1072,14 +1073,28 @@ endif()
 # Provisioning is part of the real device only. The bring-up sketches exist to
 # isolate one piece of hardware each, and a WiFi stack in them would defeat it.
 if(SKETCH STREQUAL "voice")
-    list(APPEND SKETCH_SRCS "provision_logic.c" "setup_screen.c" "config_store.c" "provision.c")
+    list(APPEND SKETCH_SRCS "provision_logic.c" "setup_screen.c" "config_store.c")
 endif()
 ```
 
-`provision.c` does not exist until Task 4. Add it to the list now and create a
-stub in Task 4's first step; the build is not expected to pass until then.
+Task 4 adds `provision.c` to that list in the same commit that creates the file.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Build, so the commit is known good**
+
+Run:
+```bash
+deactivate 2>/dev/null; unset VIRTUAL_ENV
+export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "Documents/BIT/.venv" | paste -sd: -)
+. ~/esp/esp-idf/export.sh
+cd firmware && idf.py -DSKETCH=voice build
+```
+
+Expected: builds with zero warnings. `config_store.c` is compiled but nothing
+calls it yet, which is fine — Task 7 wires it up. Do not pipe this through
+`tail`: the exit status would be `tail`'s, and that has already once reported a
+failed build as a clean pass.
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add firmware/main/config_store.c firmware/main/config_store.h \
@@ -1117,6 +1132,7 @@ serves the form over HTTP, and can be reached from a phone. Trialling is Task 5.
 **Files:**
 - Create: `firmware/main/provision.h`
 - Create: `firmware/main/provision.c`
+- Modify: `firmware/main/CMakeLists.txt` — add `provision.c` to the `voice` list, in this commit, because that is the commit where the file starts existing
 
 **Interfaces:**
 - Consumes: everything from Tasks 1–3.
