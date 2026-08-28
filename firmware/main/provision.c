@@ -30,6 +30,9 @@ static SemaphoreHandle_t s_screen_lock = NULL;
 // deleted. A task deleted without this leaks the fd at the lwip layer - the
 // RTOS reclaims the task's stack, not lwip's ten-socket table.
 static int s_dns_sock = -1;
+// Raised by provision_stop() so the DNS task ends itself. Deleting it from
+// outside was the first version and it hung the device; see provision_stop().
+static volatile bool s_dns_stop = false;
 
 // ---------------------------------------------------------------- the page
 //
@@ -677,9 +680,17 @@ static void dns_task(void *arg) {
         const int len = recvfrom(s_dns_sock, req, sizeof(req), 0,
                                   (struct sockaddr *)&src, &src_len);
         if (len <= 0) {
-            // Also how provision_stop() gets this task's attention: closing
-            // s_dns_sock from another task unblocks this recvfrom with an
-            // error. Either way there is nothing to parse.
+            // How provision_stop() gets this task's attention: it raises the
+            // flag and closes the socket, which unblocks this recvfrom with an
+            // error.
+            if (s_dns_stop) break;
+            // Any other error, and there is nothing to parse. The delay is not
+            // politeness - without it this became a busy loop the moment the
+            // socket went bad, and on a single core it starved IDLE until the
+            // task watchdog fired. That is exactly how leaving setup hung:
+            // provision_stop() closed the socket and never got the CPU back to
+            // finish the teardown.
+            vTaskDelay(pdMS_TO_TICKS(10));
             continue;
         }
 
@@ -730,6 +741,14 @@ static void dns_task(void *arg) {
 
         sendto(s_dns_sock, resp, w, 0, (struct sockaddr *)&src, src_len);
     }
+
+    // Ends itself rather than being deleted from outside. vTaskDelete() on
+    // another task cannot know what that task was in the middle of, and the
+    // socket it was blocked on belongs to it. provision_stop() waits for this
+    // handle to clear.
+    ESP_LOGI(TAG, "dns stub down");
+    s_dns_task = NULL;
+    vTaskDelete(NULL);
 }
 
 // ----------------------------------------------------------------- lifecycle
@@ -914,6 +933,9 @@ esp_err_t provision_start(void) {
     // 10. A phone's own captive-portal probe has somewhere to go before
     // anyone taps a notification. Not fatal if it fails to start - the
     // panel and the console carry the address either way.
+    // Lowered before the task exists, or a second session would find the flag
+    // from the first still raised and end itself immediately.
+    s_dns_stop = false;
     if (xTaskCreate(dns_task, "prov_dns", 3072, NULL, 3, &s_dns_task) != pdPASS) {
         ESP_LOGW(TAG, "dns task failed to start; captive-portal probes will 404");
         s_dns_task = NULL;
@@ -971,15 +993,31 @@ void provision_stop(void) {
     s_active = false;
 
     if (s_dns_task != NULL) {
-        // Close before delete: deleting the task reclaims its stack, not
-        // the socket it held open at the lwip layer, and this is the only
-        // task that ever touches s_dns_sock.
+        // Ask, then wait. The first version closed the socket and deleted the
+        // task from here, and it hung the device: the close unblocked
+        // recvfrom with an error, the loop went straight round again, and on
+        // one core that busy loop starved everything - including this task,
+        // which therefore never reached vTaskDelete. The watchdog caught
+        // prov_dns at 100%.
+        //
+        // The flag goes up before the close so the loop cannot miss it.
+        s_dns_stop = true;
         if (s_dns_sock >= 0) {
             close(s_dns_sock);
             s_dns_sock = -1;
         }
-        vTaskDelete(s_dns_task);
-        s_dns_task = NULL;
+        for (int i = 0; i < 50 && s_dns_task != NULL; i++) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        if (s_dns_task != NULL) {
+            // Half a second and still there. Deleting it is worse than
+            // leaking it, but leaking it means the next provisioning session
+            // finds a task already bound to :53 - so say so loudly and take
+            // the lesser risk.
+            ESP_LOGE(TAG, "dns stub did not stop; deleting it");
+            vTaskDelete(s_dns_task);
+            s_dns_task = NULL;
+        }
     }
 
     if (s_httpd != NULL) {
