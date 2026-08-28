@@ -59,6 +59,38 @@ esp_err_t config_save_uri(const char *uri) {
     return save_pair("server_uri", uri, NULL, NULL);
 }
 
+void config_request_provisioning(void) {
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) {
+        // Nothing useful to do about it: the caller is about to restart, and
+        // failing to record the request only means the device comes back up
+        // the ordinary way. Say so rather than failing silently.
+        ESP_LOGE(TAG, "could not record the provisioning request");
+        return;
+    }
+    if (nvs_set_u8(h, "force_prov", 1) == ESP_OK) {
+        nvs_commit(h);
+    }
+    nvs_close(h);
+}
+
+bool config_take_provisioning_request(void) {
+    nvs_handle_t h;
+    if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return false;
+
+    uint8_t v = 0;
+    const bool asked = nvs_get_u8(h, "force_prov", &v) == ESP_OK && v != 0;
+    if (asked) {
+        // Cleared on the way out, not on the way in: a device that reboots
+        // again for any other reason afterwards must come up normally rather
+        // than provisioning forever.
+        nvs_erase_key(h, "force_prov");
+        nvs_commit(h);
+    }
+    nvs_close(h);
+    return asked;
+}
+
 bool config_is_provisioned(const device_config_t *c) {
     return c->ssid[0] != '\0';
 }

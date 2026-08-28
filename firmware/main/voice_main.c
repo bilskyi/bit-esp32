@@ -38,8 +38,11 @@
 #include "freertos/task.h"
 #include "nvs_flash.h"
 
+#include "config_store.h"
 #include "face.h"
 #include "provision.h"
+#include "provision_logic.h"
+#include "setup_screen.h"
 #include "secrets.h"
 #include "ssd1306.h"
 
@@ -153,6 +156,9 @@ static esp_websocket_client_handle_t s_ws;
 static volatile bool s_trial_in_progress = false;
 static volatile uint8_t s_trial_reason = 0;
 #define WIFI_TRIAL_DONE_BIT BIT1
+// Set by the hold-to-reset gesture. Only wifi_start()'s wait consumes it, and
+// only to stop waiting - it is a request to go and provision, not a state.
+#define WIFI_PROVISION_BIT BIT2
 
 typedef enum { ST_IDLE, ST_LISTENING, ST_THINKING, ST_SPEAKING } state_t;
 static volatile state_t s_state = ST_IDLE;
@@ -188,6 +194,11 @@ static volatile uint8_t s_face_emotion = FACE_EMO_NEUTRAL;
 // counts as the conversation being alive.
 static volatile uint32_t s_face_emotion_seq = 0;
 static volatile bool s_face_startle = false;
+// How far through the hold-to-reset gesture the button is, 0-100. Owned by
+// net_task, read by face_task, the same shape as the two above. Zero means
+// not counting, and face.c treats zero as leaving no trace at all - releasing
+// the button has to cost nothing.
+static volatile uint8_t s_face_reset_pct = 0;
 // Mean absolute sample of the last audio block, either direction.
 static volatile uint16_t s_audio_level = 0;
 // How far boot has got. Set by the three places that already log these very
@@ -560,7 +571,11 @@ void provision_wifi_trial_cancel(void) {
     }
 }
 
-static void wifi_start(void) {
+// Takes the credentials rather than reading the macros, so config_store's
+// values - which is to say whatever a phone last saved - are what the radio
+// actually joins. Reading WIFI_SSID here instead would leave provisioning
+// writing a value nothing ever reads.
+static void wifi_start(const char *ssid, const char *pass) {
     s_wifi_events = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -572,8 +587,8 @@ static void wifi_start(void) {
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, NULL));
 
     wifi_config_t wc = {0};
-    strncpy((char *)wc.sta.ssid, WIFI_SSID, sizeof(wc.sta.ssid) - 1);
-    strncpy((char *)wc.sta.password, WIFI_PASSWORD, sizeof(wc.sta.password) - 1);
+    strncpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid) - 1);
+    strncpy((char *)wc.sta.password, pass, sizeof(wc.sta.password) - 1);
 
     // Wake for every beacon rather than every third.
     //
@@ -603,10 +618,25 @@ static void wifi_start(void) {
     // The stalls are real but must be absorbed, not eliminated.
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MIN_MODEM));
 
-    ESP_LOGI(TAG, "connecting to \"%s\" (2.4 GHz only)", WIFI_SSID);
-    xEventGroupWaitBits(s_wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdTRUE, portMAX_DELAY);
-    ESP_LOGI(TAG, "wifi up");
-    s_boot_stage = FACE_BOOT_WIFI;  // eyes to half open: an IP, but no server yet
+    ESP_LOGI(TAG, "connecting to \"%s\" (2.4 GHz only)", ssid);
+
+    // Still no timeout: the device waits for its network exactly as long as it
+    // always has, because a router that is rebooting is worth waiting out and
+    // falling back to an access point would turn a two-minute outage into a
+    // device that has stopped being a voice companion.
+    //
+    // What changed is that it stops being unreachable while it waits. The
+    // hold-to-reset gesture sets WIFI_PROVISION_BIT, and without it in this
+    // wait the task holding the boot sequence never returns - so the button
+    // would be undetectable in exactly the situation that needs it.
+    const EventBits_t up = xEventGroupWaitBits(
+        s_wifi_events, WIFI_CONNECTED_BIT | WIFI_PROVISION_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
+    if (up & WIFI_CONNECTED_BIT) {
+        ESP_LOGI(TAG, "wifi up");
+        s_boot_stage = FACE_BOOT_WIFI;  // eyes half open: an IP, but no server yet
+    } else {
+        ESP_LOGW(TAG, "giving up on \"%s\": provisioning was asked for", ssid);
+    }
 }
 
 // --------------------------------------------------------------- websocket
@@ -689,9 +719,12 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
     }
 }
 
-static void ws_start(void) {
+// Takes the URI for the same reason wifi_start() takes the credentials: it is
+// settable from the phone, and reading the macro here would make that setting
+// a value nothing reads.
+static void ws_start(const char *uri) {
     esp_websocket_client_config_t cfg = {
-        .uri = SERVER_URI,
+        .uri = uri,
         .reconnect_timeout_ms = 2000,
         .network_timeout_ms = 5000,
         // Must exceed the chunk size below, or a send can wedge behind an
@@ -841,13 +874,32 @@ static void face_task(void *arg) {
             face_feed_energy(&s_face, s_audio_level);
         }
 
-        face_tick(&s_face, t);
+        // One task draws, and it chooses which of the two things to draw.
+        //
+        // setup_screen.c renders into a buffer it is handed and never touches
+        // the panel, so this is the only writer either way and no lock is
+        // needed. The setup screen gets a buffer of its own rather than
+        // borrowing face_t's private one: reaching into another module's
+        // state is exactly what its no-dependency rule exists to prevent.
+        // 1 KB of BSS, not heap.
+        static uint8_t s_setup_fb[FACE_FB_BYTES];
+        const uint8_t *fb;
+        if (provision_is_active()) {
+            setup_screen_t s;
+            provision_screen(&s);
+            setup_screen_render(s_setup_fb, &s);
+            fb = s_setup_fb;
+        } else {
+            face_set_reset_progress(&s_face, s_face_reset_pct, t);
+            face_tick(&s_face, t);
+            fb = face_framebuffer(&s_face);
+        }
 
         // A panel that stops acknowledging - a wire off, a brownout - must be
         // visible in the log without filling it. Say so on the way down and on
         // the way back, and nothing in between.
         static bool panel_ok = true;
-        const esp_err_t ferr = ssd1306_flush(&s_panel, face_framebuffer(&s_face));
+        const esp_err_t ferr = ssd1306_flush(&s_panel, fb);
         if ((ferr == ESP_OK) != panel_ok) {
             panel_ok = (ferr == ESP_OK);
             if (panel_ok) {
@@ -1078,15 +1130,75 @@ static void button_task(void *arg) {
     }
 }
 
+// Hold the button, stay quiet, and the device goes off to be reconfigured.
+//
+// The silence is what makes this safe. A held button is also how you ask a
+// long question, and s_audio_level already knows whether anyone is talking -
+// block_level() computes it per block and the eyes are already driven by it -
+// so gating on quiet means an ordinary question can never trigger a reset,
+// because a question is not silence.
+//
+// A stuck button cannot be told apart from a deliberate silent hold. The
+// signals are identical and no scheme distinguishes them, so it is handled by
+// cost instead: the access point times out back to the saved network, and
+// nothing is erased on the way in.
+#define RESET_HOLD_MS 5000
+// Unmeasured. face.c normalises loudness against a decaying peak, which is
+// the wrong tool here - silence has no recent peak - so this is an absolute
+// threshold on raw block_level() output and it has to come off the bench.
+// The procedure is in the spec: log s_audio_level for thirty seconds in a
+// quiet room, then again while speaking, and put this between the two ranges
+// nearer the quiet one. If they overlap, the silence gate does not work in
+// that room and this whole gesture needs rethinking rather than a number
+// splitting the difference.
+#define RESET_SILENCE_LEVEL 400
+
 static void net_task(void *arg) {
     static uint8_t chunk[1024];
     bool held = false;
+    bool silent_run = false;
+    TickType_t silent_start = 0;
 
     TickType_t busy_since = 0;
 
     while (true) {
         const bool down = s_button_down;
         const TickType_t now = xTaskGetTickCount();
+
+        // Armed in ST_LISTENING and when the socket is down, and nowhere else.
+        // During a reply a hold means "stop, I want to ask again", which is the
+        // commoner intent by a long way, and the two must not compete for the
+        // same gesture.
+        const bool armed = (s_state == ST_LISTENING) || !esp_websocket_client_is_connected(s_ws);
+        if (down && armed && s_audio_level < RESET_SILENCE_LEVEL) {
+            if (!silent_run) { silent_run = true; silent_start = now; }
+        } else {
+            silent_run = false;  // speech, a release, or a state that does not arm it
+        }
+
+        const uint32_t silent_ms =
+            silent_run ? (uint32_t)(now - silent_start) * portTICK_PERIOD_MS : 0;
+        s_face_reset_pct = silent_ms >= RESET_HOLD_MS
+                               ? 100
+                               : (uint8_t)((silent_ms * 100u) / RESET_HOLD_MS);
+
+        if (silent_ms >= RESET_HOLD_MS) {
+            ESP_LOGW(TAG, "hold-to-reset completed; restarting into provisioning");
+            // A hold in ST_LISTENING is also an utterance in flight. Abandon it
+            // the way the interrupt path already does, so the server is not left
+            // waiting on audio that will never arrive.
+            if (esp_websocket_client_is_connected(s_ws)) {
+                esp_websocket_client_send_text(s_ws, "{\"type\":\"cancel\"}", 17, SEND_TIMEOUT);
+            }
+            xStreamBufferReset(s_mic_buf);
+            s_state = ST_IDLE;
+            s_face_reset_pct = 0;
+
+            config_request_provisioning();
+            xEventGroupSetBits(s_wifi_events, WIFI_PROVISION_BIT);
+            vTaskDelay(pdMS_TO_TICKS(100));  // let the cancel leave and the log flush
+            esp_restart();
+        }
 
         // Last-resort unwedge, measured from the last thing the server sent
         // rather than from the button press.
@@ -1257,13 +1369,44 @@ void app_main(void) {
                  (long)heap_before_face - (long)after);
     }
 
-    wifi_start();
-    ws_start();
+    // Ahead of wifi_start(), which waits for a network with no timeout. Until
+    // now the button task was created after it, so while the device sat there
+    // unable to connect, nothing sampled the button - the press was
+    // undetectable in exactly the situation that needs it. It touches only
+    // GPIO and its own debounce state, so it has no dependency on the radio.
+    xTaskCreate(button_task, "button", 2048, NULL, 6, NULL);
+
+    device_config_t cfg;
+    config_load(&cfg);
+
+    // Two ways in: nothing is configured, or the hold-to-reset gesture asked
+    // for it before restarting. Note what is deliberately absent - failing to
+    // connect is not one of them. A device that knows a network waits for it,
+    // because a router rebooting is worth waiting out and an access point that
+    // appeared on its own would turn a two-minute outage into a device that
+    // had stopped being a voice companion.
+    const bool asked = config_take_provisioning_request();
+    if (pl_decide(config_is_provisioned(&cfg), asked, false) == PL_MODE_PROVISION) {
+        if (provision_start() == ESP_OK) {
+            while (provision_is_active() && !provision_idle_expired()) {
+                vTaskDelay(pdMS_TO_TICKS(200));
+            }
+            provision_stop();
+            config_load(&cfg);  // pick up whatever was just saved
+        } else {
+            // Nothing else to try. Fall through and attempt whatever is
+            // configured: with no credentials that waits forever, which is at
+            // least visible on the panel rather than a silent reboot loop.
+            ESP_LOGE(TAG, "provisioning would not start");
+        }
+    }
+
+    wifi_start(cfg.ssid, cfg.pass);
+    ws_start(cfg.uri);
 
     xTaskCreate(audio_in_task, "audio_in", 4096, NULL, 5, NULL);
     xTaskCreate(audio_out_task, "audio_out", 4096, NULL, 5, NULL);
     xTaskCreate(net_task, "net", 4096, NULL, 4, NULL);
-    xTaskCreate(button_task, "button", 2048, NULL, 6, NULL);
     xTaskCreate(led_task, "led", 2048, NULL, 2, NULL);
     xTaskCreate(link_task, "link", 3072, NULL, 3, NULL);
 
