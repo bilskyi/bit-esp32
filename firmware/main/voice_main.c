@@ -1128,13 +1128,22 @@ static void audio_out_task(void *arg) {
                 adpcm_rx_reset();
                 // Hold the amp shut until enough audio is queued to play
                 // through the next gap in delivery.
+                //
+                // The abort has to be visible from in here. Without that check
+                // an interrupt arriving while this waits was ignored until the
+                // wait ended, and then amp_enable(true) below switched the
+                // speaker back on - the abort had muted it a moment earlier.
+                // That is the "does not go silent immediately": not latency,
+                // but the playback task undoing the mute.
                 while (xStreamBufferBytesAvailable(s_play_buf) < PREBUFFER_CODED &&
-                       !s_reply_finished) {
+                       !s_reply_finished && !s_abort_playback) {
                     vTaskDelay(pdMS_TO_TICKS(10));
                 }
+                if (s_abort_playback) continue;  // handled at the top, amp stays shut
                 amp_enable(true);
                 playing = true;
                 s_play_dropped = 0;
+                ESP_LOGI(TAG, "playing");
             }
             const size_t n = adpcm_decode_block(coded, got, pcm);
 
