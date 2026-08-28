@@ -808,18 +808,29 @@ static void test_survives_a_hostile_clock(void) {
 
 // -------------------------------------------------------------- reset countdown
 
+// Land a face on the settled, post-boot pose in FACE_ST_LISTENING - what the
+// panel is actually showing when someone starts holding the button to reset
+// WiFi. face_init on its own only starts the power-on animation, and five
+// ticks after that is 200 ms into a sequence that takes the better part of
+// two seconds to settle, so measuring the countdown straight after face_init
+// catches it superimposed on a still-moving boot pose rather than the face
+// the device is really showing. Returns the clock value to keep ticking
+// from, since boot_through (inside init_ready) advances it by a lot.
+static uint32_t reset_countdown_ready(face_t *f, uint32_t now_ms) {
+    init_ready(f, now_ms);
+    uint32_t t = f->now;
+    face_set_state(f, FACE_ST_LISTENING, t);
+    return t;
+}
+
 static void test_the_reset_countdown_looks_nothing_like_listening(void) {
     // The whole point is that a user holding the button sees it coming and
     // can let go. If it renders like listening, it cannot be noticed.
     face_t a, b;
-    uint32_t t = 1000;
+    uint32_t t = reset_countdown_ready(&a, 1000);
+    reset_countdown_ready(&b, 1000);  // deterministic: settles at the same t as a
 
-    face_init(&a, t);
-    face_set_state(&a, FACE_ST_LISTENING, t);
     face_set_reset_progress(&a, 0, t);
-
-    face_init(&b, t);
-    face_set_state(&b, FACE_ST_LISTENING, t);
     face_set_reset_progress(&b, 90, t);
 
     for (int i = 0; i < 10; i++) { t += TICK_MS; face_tick(&a, t); face_tick(&b, t); }
@@ -831,14 +842,43 @@ static void test_the_reset_countdown_looks_nothing_like_listening(void) {
 }
 
 static void test_the_countdown_is_monotonic(void) {
+    // Guard the guard: if the preamble above ever regresses to measuring the
+    // boot animation again, this is exactly what would stop being true
+    // without anything below noticing. A face actually at rest changes by
+    // only a few pixels between two consecutive frames - breathing and the
+    // ocular microtremor - while the power-on sequence can move the boot pose
+    // by hundreds of pixels in a single 40 ms tick (measured: swings of over
+    // 500 during the flourish). Two back-to-back frames of the settled face
+    // agreeing to within 60 pixels is evidence the countdown below is being
+    // measured on the real, settled face rather than a moving target.
+    {
+        face_t f;
+        uint32_t t = reset_countdown_ready(&f, 1000);
+        // Let the slew from the post-boot pose into FACE_ST_LISTENING finish;
+        // otherwise that transition, not a bug, is what would show up here.
+        for (int i = 0; i < 30; i++) { t += TICK_MS; face_tick(&f, t); }
+        t += TICK_MS; face_tick(&f, t);
+        const int n1 = lit_count(face_framebuffer(&f));
+        t += TICK_MS; face_tick(&f, t);
+        const int n2 = lit_count(face_framebuffer(&f));
+        const int d = n1 > n2 ? n1 - n2 : n2 - n1;
+        CHECK(d < 60, "a settled face should barely move frame to frame, moved by %d", d);
+    }
+
     // Progress must read as progress: more of the gesture done means more of
     // whatever the eyes are doing. A wobble reads as a glitch.
+    //
+    // Measured on the settled face at these ten-point steps: perfectly
+    // monotonic, lit pixels falling by 126 to 502 per step and never rising.
+    // (At one-point steps a handful of points do wobble backwards, by as much
+    // as 32 pixels - rasterisation rounding, not a real reversal - against
+    // per-step drops that reach into the hundreds and a full-range drop of
+    // 3310 pixels. That is not a wobble this ten-point check can see, and it
+    // is not what this check is asserting.)
     int prev = -1;
     for (int pct = 0; pct <= 100; pct += 10) {
         face_t f;
-        uint32_t t = 1000;
-        face_init(&f, t);
-        face_set_state(&f, FACE_ST_LISTENING, t);
+        uint32_t t = reset_countdown_ready(&f, 1000);
         face_set_reset_progress(&f, (uint8_t)pct, t);
         for (int i = 0; i < 5; i++) { t += TICK_MS; face_tick(&f, t); }
         const int n = lit_count(face_framebuffer(&f));
@@ -851,13 +891,9 @@ static void test_zero_progress_restores_the_ordinary_face(void) {
     // Releasing cancels with nothing lost, so zero must be indistinguishable
     // from never having started.
     face_t a, b;
-    uint32_t t = 1000;
+    uint32_t t = reset_countdown_ready(&a, 1000);
+    reset_countdown_ready(&b, 1000);  // deterministic: settles at the same t as a
 
-    face_init(&a, t);
-    face_set_state(&a, FACE_ST_LISTENING, t);
-
-    face_init(&b, t);
-    face_set_state(&b, FACE_ST_LISTENING, t);
     face_set_reset_progress(&b, 60, t);
     face_set_reset_progress(&b, 0, t);
 
