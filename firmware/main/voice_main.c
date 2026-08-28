@@ -575,7 +575,17 @@ void provision_wifi_trial_cancel(void) {
 // values - which is to say whatever a phone last saved - are what the radio
 // actually joins. Reading WIFI_SSID here instead would leave provisioning
 // writing a value nothing ever reads.
-static void wifi_start(const char *ssid, const char *pass) {
+// Everything that may happen exactly once, split out from connecting.
+//
+// It is separate because provisioning needs the stack up before it runs -
+// esp_wifi_set_storage(), esp_wifi_set_mode() and the rest all return
+// ESP_ERR_WIFI_NOT_INIT otherwise - and provisioning happens before there is
+// any network to join. The first board test of this feature failed exactly
+// here: provision_start() ran ahead of esp_wifi_init() and could not start,
+// so the device fell through to waiting forever on an empty SSID.
+//
+// It also creates s_wifi_events, which provision.c's trial functions wait on.
+static void wifi_init_stack(void) {
     s_wifi_events = xEventGroupCreate();
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -585,7 +595,9 @@ static void wifi_start(const char *ssid, const char *pass) {
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event, NULL));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event, NULL));
+}
 
+static void wifi_connect(const char *ssid, const char *pass) {
     wifi_config_t wc = {0};
     strncpy((char *)wc.sta.ssid, ssid, sizeof(wc.sta.ssid) - 1);
     strncpy((char *)wc.sta.password, pass, sizeof(wc.sta.password) - 1);
@@ -1376,6 +1388,9 @@ void app_main(void) {
     // GPIO and its own debounce state, so it has no dependency on the radio.
     xTaskCreate(button_task, "button", 2048, NULL, 6, NULL);
 
+    // Before anything that touches the radio, including provisioning.
+    wifi_init_stack();
+
     device_config_t cfg;
     config_load(&cfg);
 
@@ -1401,7 +1416,7 @@ void app_main(void) {
         }
     }
 
-    wifi_start(cfg.ssid, cfg.pass);
+    wifi_connect(cfg.ssid, cfg.pass);
     ws_start(cfg.uri);
 
     xTaskCreate(audio_in_task, "audio_in", 4096, NULL, 5, NULL);
