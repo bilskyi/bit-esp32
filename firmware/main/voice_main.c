@@ -742,15 +742,36 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
                 } else if (memmem(e->data_ptr, e->data_len, "done", 4)) {
                     s_reply_finished = true;
                     if (s_discard_audio) {
-                        // The cancelled reply is over; whatever comes next
-                        // belongs to a turn the user actually asked for.
+                        // Belt and braces. "speaking" above is the boundary
+                        // that matters; this only catches the case where the
+                        // cancelled reply's done arrives and no new question
+                        // follows, so the flag is not left raised into the
+                        // next turn.
                         s_discard_audio = false;
-                        ESP_LOGI(TAG, "dropped %lu B of an interrupted reply",
+                        ESP_LOGI(TAG, "dropped %lu B, no new reply followed",
                                  (unsigned long)s_discarded_bytes);
                         s_discarded_bytes = 0;
                     }
                 } else if (memmem(e->data_ptr, e->data_len, "speaking", 8)) {
                     s_state = ST_SPEAKING;
+                    // The real end of the discard window, and the reason it
+                    // cannot be "done".
+                    //
+                    // Measured: the done closing a cancelled reply arrived
+                    // 0.3 s after the interrupt twice and 7 s twice, and in
+                    // the slow cases the user had already asked again - so
+                    // the answer to the new question was thrown away as
+                    // though it were the tail of the old one. The server
+                    // sends this immediately before the first audio of every
+                    // reply, and the cancelled reply's tail cannot arrive
+                    // after it, because the server cancelled that task before
+                    // starting this turn.
+                    if (s_discard_audio) {
+                        s_discard_audio = false;
+                        ESP_LOGI(TAG, "dropped %lu B of an interrupted reply",
+                                 (unsigned long)s_discarded_bytes);
+                        s_discarded_bytes = 0;
+                    }
                 } else if (memmem(e->data_ptr, e->data_len, "thinking", 8)) {
                     s_state = ST_THINKING;
                 }
@@ -1082,6 +1103,13 @@ static void audio_out_task(void *arg) {
             // Mute before discarding, so nothing half-written escapes.
             amp_enable(false);
             xStreamBufferReset(s_play_buf);
+            // The stream buffer is not the only place audio waits. Whatever
+            // has already been handed to i2s_channel_write sits in the DMA
+            // ring, and muting the amp only hides it - it plays as a burst of
+            // the abandoned reply the moment the amp comes back on for the
+            // next one. Cycling the channel is what actually empties it.
+            i2s_channel_disable(s_tx);
+            i2s_channel_enable(s_tx);
             s_audio_level = 0;
             playing = false;
             s_reply_finished = false;
