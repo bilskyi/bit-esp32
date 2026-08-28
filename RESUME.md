@@ -489,6 +489,53 @@ afplay /System/Library/Sounds/Ping.aiff
 
 ---
 
+## Interrupting: four bugs, all found by the log
+
+Pressing the button during a reply should silence it at once and start
+recording. It did neither reliably, and reading the code found none of it -
+every one came out of `idle.py`-style serial capture with timestamps.
+
+**Measured after the fixes:** press to silence is **14-31 ms**, plus 25-30 ms
+of button debounce ahead of it. No playback restarts after an abort.
+
+1. **The tail was still on the wire.** Resetting the play buffer discards what
+   arrived; the server runs `playback_lead_s` - four seconds - ahead of real
+   time, so the rest of the reply lands a moment later and the amp comes back
+   on. Incoming audio is now dropped between the cancel and the next reply's
+   `speaking`.
+2. **The discard window was closed by the wrong event.** It ended on the
+   cancelled reply's `done`, which arrived 0.3 s after the interrupt twice and
+   **7 s** twice - and in the slow cases the answer to the *next* question was
+   thrown away as though it were the old tail. `speaking` of the next reply is
+   the correct boundary; the server sends it immediately before the first audio
+   of every reply.
+3. **The prebuffer wait un-muted what the abort had muted.** `audio_out_task`
+   waits for enough audio before opening the amp, and that wait did not look at
+   the abort flag - so an interrupt arriving during it was honoured and then
+   reversed by the `amp_enable(true)` on the next line.
+4. **A blocked write refilled the buffer that had just been cleared.** The
+   receive handler refuses stale audio, but its write blocks when the buffer is
+   full and a send already waiting inside `xStreamBufferSend` has passed that
+   check. The abort frees the room, the send wakes, and four seconds of the
+   abandoned reply play. `playback aborted` and `playing` in the same
+   millisecond. **This is why it was intermittent** - it needed a full buffer.
+   The reader now checks the same flag as the writer.
+
+**And the state machine can be wrong.** The stuck-state timer forces `ST_IDLE`
+after 20 s of server silence; the log caught audio starting three milliseconds
+later. A press then took the "new utterance" path and the abandoned reply
+talked over the question being recorded. The interrupt now also fires on
+`s_playing`, which `audio_out_task` owns: whether sound is coming out is a
+fact, what the state machine believes is an opinion.
+
+**Still not perfect**, by the user's judgement. The remaining budget is the
+25 ms debounce plus 14-31 ms to mute plus the amplifier's own shutdown. The
+cheap next move is a shorter debounce on the press edge than on the release -
+worth ~20 ms, at the cost of making a spurious press cheaper to trigger, which
+now matters because five of them enter provisioning.
+
+---
+
 ## Traps already paid for
 
 - **`esp_wifi_set_config()` writes to flash unless you tell it not to.** The
