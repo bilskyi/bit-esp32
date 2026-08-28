@@ -21,6 +21,16 @@ class Settings(BaseSettings):
     # Also bounds how much audio one utterance may buffer.
     session_timeout_s: float = 60.0
 
+    # Below this, an utterance is not speech and is not worth an STT call.
+    #
+    # Whisper does not return an empty string for a fragment of room tone - it
+    # returns its training data. Measured from the logs: 0.2-0.3 s fragments
+    # came back as "Thank you." and "Спасибо.", which the model answered with
+    # "Пожалуйста!", so a brushed button made the device say that to
+    # everything. Nothing anyone actually asks fits in under a second: the
+    # press, the words and the release all have to happen inside it.
+    min_utterance_s: float = 1.0
+
     # Per-sentence ceiling on speech synthesis. edge-tts occasionally opens a
     # socket to Microsoft that never answers; without a bound that hangs the
     # whole reply, the device never receives "done", and it sits in SPEAKING

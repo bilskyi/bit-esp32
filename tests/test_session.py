@@ -20,7 +20,11 @@ def build(stt=None, llm=None, tts=None, **kw):
     return session, transport
 
 
-async def utter(session, audio=b"\x00\x01" * 1600):
+# Two seconds at 16 kHz. It used to be 0.1 s, which was fine while nothing
+# looked at the length - but the server now refuses to transcribe a fragment
+# too short to be speech, and a helper called `utter` should produce something
+# an utterance could plausibly be.
+async def utter(session, audio=b"\x00\x01" * 32000):
     await session.on_start()
     await session.on_audio(audio)
     await session.on_end()
@@ -67,8 +71,8 @@ async def test_done_is_sent_once_playback_finishes():
 async def test_transcribed_audio_reaches_stt():
     stt = FakeSTT()
     session, _ = build(stt=stt)
-    await utter(session, audio=b"\x00\x01" * 1600)
-    assert stt.received == [3200]
+    await utter(session, audio=b"\x00\x01" * 32000)
+    assert stt.received == [64000]
 
 
 async def test_each_sentence_is_synthesised_separately():
@@ -199,7 +203,7 @@ async def test_finish_on_an_empty_session_stores_nothing():
 
 async def test_usage_counts_audio_seconds_and_tts_chars():
     session, _ = build(llm=FakeLLM("Добре."))
-    await utter(session, audio=b"\x00\x01" * 16000)  # 1 second
+    await utter(session, audio=b"\x00\x01" * 16000)  # exactly 1 second, the floor itself
     assert session.usage.turns == 1
     assert session.usage.audio_seconds == pytest.approx(1.0)
     assert session.usage.tts_chars == len("Добре.")
@@ -210,7 +214,7 @@ async def test_cancel_stops_a_reply_part_way_through():
     tts = SlowTTS(chunks=50, delay=0.01)
     session, transport = build(tts=tts)
     await session.on_start()
-    await session.on_audio(b"\x00\x01" * 1600)
+    await session.on_audio(b"\x00\x01" * 32000)
     await session.on_end()
 
     await asyncio.sleep(0.05)  # let a little audio out
@@ -226,7 +230,7 @@ async def test_cancel_returns_the_session_to_idle():
     tts = SlowTTS(chunks=50, delay=0.01)
     session, _ = build(tts=tts)
     await session.on_start()
-    await session.on_audio(b"\x00\x01" * 1600)
+    await session.on_audio(b"\x00\x01" * 32000)
     await session.on_end()
     await asyncio.sleep(0.05)
 
@@ -238,7 +242,7 @@ async def test_a_press_during_a_reply_interrupts_and_listens_again():
     tts = SlowTTS(chunks=50, delay=0.01)
     session, _ = build(tts=tts)
     await session.on_start()
-    await session.on_audio(b"\x00\x01" * 1600)
+    await session.on_audio(b"\x00\x01" * 32000)
     await session.on_end()
     await asyncio.sleep(0.05)
 
@@ -259,7 +263,7 @@ async def test_the_socket_loop_is_not_blocked_while_a_reply_plays():
     tts = SlowTTS(chunks=100, delay=0.01)  # a full second of synthesis
     session, _ = build(tts=tts)
     await session.on_start()
-    await session.on_audio(b"\x00\x01" * 1600)
+    await session.on_audio(b"\x00\x01" * 32000)
 
     started = time.monotonic()
     await session.on_end()
@@ -347,3 +351,30 @@ async def test_a_reply_the_model_could_not_give_looks_sad():
     session, transport = build(llm=FakeLLM(""))
     await utter(session)
     assert emotions(transport) == ["sad"]
+
+
+async def test_a_fragment_too_short_to_be_speech_never_reaches_stt():
+    """Whisper answers room tone with its training data.
+
+    Measured on the real device: 0.2-0.3 s fragments came back as "Thank you."
+    and "Спасибо.", the model replied "Пожалуйста!", and a brushed button made
+    it say that to everything, eight times in a row in the logs. The device
+    cannot catch this - it knows how long the button was held, not how much
+    audio arrived.
+    """
+    stt = FakeSTT()
+    session, _ = build(stt=stt)
+
+    half_a_second = b"\x00\x00" * (session.settings.sample_rate // 2)
+    await session._respond(half_a_second)
+    assert stt.received == [], "spent an STT call on a fragment that cannot be speech"
+
+
+async def test_an_utterance_long_enough_to_be_speech_still_gets_through():
+    """The guard above must not become a reason ordinary questions vanish."""
+    stt = FakeSTT()
+    session, _ = build(stt=stt)
+
+    two_seconds = b"\x00\x00" * (session.settings.sample_rate * 2)
+    await session._respond(two_seconds)
+    assert stt.received == [len(two_seconds)]

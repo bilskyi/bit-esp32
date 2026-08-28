@@ -59,7 +59,7 @@ def test_a_whole_turn_travels_over_the_wire():
     with client() as c, c.websocket_connect("/ws") as ws:
         ws.send_text(json.dumps({"type": "start"}))
         assert json.loads(ws.receive_text())["value"] == "listening"
-        ws.send_bytes(b"\x00\x01" * 1600)
+        ws.send_bytes(b"\x00\x01" * 32000)  # 2 s: under a second is refused as too short to be speech
         ws.send_text(json.dumps({"type": "end"}))
 
         states, audio_frames, done = [], 0, False

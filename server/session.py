@@ -178,6 +178,20 @@ class Session:
         if not pcm:
             return  # nothing was captured; don't spend an STT call on silence
 
+        # Whisper does not return nothing for a fragment of room tone. It
+        # returns its training data: "Thank you.", "Спасибо.", "Продолжение
+        # следует...". The model then answers those perfectly reasonably, so a
+        # brushed button produced a device that said "Пожалуйста!" to
+        # everything - observed in the logs, eight times in a row.
+        #
+        # The device cannot catch this on its own. It knows how long the button
+        # was held; only this side knows how much audio actually arrived, and
+        # under a second of it cannot be a question.
+        seconds = len(pcm) / 2 / self.settings.sample_rate
+        if seconds < self.settings.min_utterance_s:
+            log.info("utterance of %.2f s is too short to be speech, not transcribing", seconds)
+            return
+
         started = time.perf_counter()
         transcript = await self.stt.transcribe(pcm, self.settings.sample_rate)
         text = transcript.text.strip()
