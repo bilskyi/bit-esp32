@@ -25,7 +25,7 @@ face" below.
 | Auth | `DEVICE_TOKEN`, 43 chars, in Railway vars and `firmware/main/secrets.h` |
 | Database | SQLite on a Railway volume at `/data/voice.db` |
 | Server, local | `uv run uvicorn server.main:app --host 0.0.0.0 --port 8000` |
-| Device | `/dev/cu.usbmodem1101`, WiFi `Xiaomi_CFB8`, gets `192.168.31.109` |
+| Device | serial port name is **not stable** - `ls /dev/cu.usbmodem*` before flashing; seen as both `usbmodem1101` and `usbmodem101`. WiFi `Xiaomi_CFB8`, gets `192.168.31.109` |
 
 `firmware/main/secrets.h` is git-ignored and holds the WiFi password, the device
 token and `SERVER_URI`. Only that last line differs between LAN and cloud.

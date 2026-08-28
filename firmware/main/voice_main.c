@@ -180,6 +180,16 @@ static volatile TickType_t s_last_activity = 0;
 static volatile bool s_button_down = false;
 // Set by net_task when the user presses during a reply; audio_out acts on it.
 static volatile bool s_abort_playback = false;
+// Set when a reply is cancelled, cleared by the "done" that closes it.
+//
+// Resetting the play buffer only discards what has already arrived. The server
+// runs up to playback_lead_s ahead of real time - four seconds - so the rest of
+// a cancelled reply is still in flight, and without this it lands in the buffer
+// a moment later, the amp comes back on, and the device carries on talking
+// after being told to stop. The server sends "done" at the end of every reply
+// including a cancelled one, so it is exactly the right boundary.
+static volatile bool s_discard_audio = false;
+static volatile uint32_t s_discarded_bytes = 0;
 // When the socket last went away, for the reconnect supervisor.
 static volatile TickType_t s_offline_since = 0;
 
@@ -694,7 +704,13 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
             break;
         case WEBSOCKET_EVENT_DATA:
             s_last_activity = xTaskGetTickCount();
-            if (e->op_code == 0x02) {  // binary: reply audio
+            if (e->op_code == 0x02 && s_discard_audio) {
+                // The tail of a reply the user already interrupted. Dropping it
+                // here rather than in audio_out_task matters: this send blocks
+                // when the buffer is full, so queueing audio nobody will hear
+                // also stalls the task that drains the socket.
+                s_discarded_bytes += (uint32_t)e->data_len;
+            } else if (e->op_code == 0x02) {  // binary: reply audio
                 // Block rather than drop. The server synthesises far faster
                 // than real time - a 7-second reply arrives in about two - so
                 // a non-blocking send silently threw most of it away and the
@@ -725,6 +741,14 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
                     }
                 } else if (memmem(e->data_ptr, e->data_len, "done", 4)) {
                     s_reply_finished = true;
+                    if (s_discard_audio) {
+                        // The cancelled reply is over; whatever comes next
+                        // belongs to a turn the user actually asked for.
+                        s_discard_audio = false;
+                        ESP_LOGI(TAG, "dropped %lu B of an interrupted reply",
+                                 (unsigned long)s_discarded_bytes);
+                        s_discarded_bytes = 0;
+                    }
                 } else if (memmem(e->data_ptr, e->data_len, "speaking", 8)) {
                     s_state = ST_SPEAKING;
                 } else if (memmem(e->data_ptr, e->data_len, "thinking", 8)) {
@@ -1294,6 +1318,9 @@ static void net_task(void *arg) {
                 // will be ST_IDLE and the reason for the change will be gone.
                 s_face_startle = true;
                 s_abort_playback = true;
+                // Everything still in flight for this reply is now unwanted.
+                s_discard_audio = true;
+                s_discarded_bytes = 0;
                 esp_websocket_client_send_text(s_ws, "{\"type\":\"cancel\"}", 17,
                                                SEND_TIMEOUT);
                 // Let audio_out mute and drain before the new utterance opens.
