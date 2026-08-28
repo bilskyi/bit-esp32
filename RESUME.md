@@ -91,6 +91,27 @@ possible but has not been needed.
 
 ## The blocking problem: the radio
 
+> **It did not reproduce on 28 Aug, and nothing was done to fix it.** Same
+> setup as when the 67% was measured - board in the laptop's USB port - and:
+>
+> ```
+> 6 packets transmitted, 6 packets received, 0.0% packet loss
+> min/avg/max = 45 / 102 / 193 ms
+> ```
+>
+> 102 ms is the power-save listen interval and is expected. RSSI held -59 to
+> -71 dBm across four captures, and the slowest upload of the day was 217 ms
+> with everything else at 4-17 ms. **Why it is fine now is unexplained.** Do
+> not assume it is cured; do not assume it is broken. Run the ping below first
+> and believe that, not this section.
+>
+> What *did* show up twice in four captures is a different fault wearing the
+> same coat: `no data from server for 20 s in state 3, forcing idle` - with the
+> link healthy. That is the server or the TLS connection, not the radio, and it
+> is what tripped the stuck-state timer that made interrupting misbehave. It is
+> the most concrete open lead in the project. See "Agreed next".
+
+
 Everything else is tuned. This is what stands between the current state and a
 device that simply works.
 
@@ -387,6 +408,20 @@ always worked, Railway is ~300 ms slower and drops far more often, because TLS
 needs several round trips in succession and falls apart on a lossy link where
 plain TCP scraped through. What changed is that switching between them now
 costs a long press instead of a toolchain.
+
+### 0. The twenty-second stalls — **start here**
+
+Twice in four captures on 28 Aug, with the radio measurably healthy, the device
+logged `no data from server for 20 s in state 3, forcing idle`. Twenty seconds
+of silence from the server in the middle of a reply. It is what forces
+`ST_IDLE` while audio is still playing, which is why a press sometimes recorded
+a question while the abandoned reply talked over it.
+
+Both halves of the evidence are available without the user: the device's serial
+log and `railway logs`. The question is what the server is doing while the
+device hears nothing - whether `end` arrived, whether a reply was generated,
+and where the time went. Nothing about this needs the button pressed, so it can
+be chased from the desk.
 
 ### 1a. Finish taking provisioning to the bench
 
