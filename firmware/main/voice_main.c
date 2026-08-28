@@ -180,6 +180,16 @@ static volatile TickType_t s_last_activity = 0;
 static volatile bool s_button_down = false;
 // Set by net_task when the user presses during a reply; audio_out acts on it.
 static volatile bool s_abort_playback = false;
+// True while the speaker is actually producing sound. Owned by audio_out_task.
+//
+// The interrupt used to key off s_state alone, and s_state can be wrong: the
+// stuck-state timer forces ST_IDLE after twenty seconds of server silence, and
+// the log caught audio starting three milliseconds after it did. A press then
+// found ST_IDLE, took the "start a new utterance" path instead of the
+// interrupt path, and the abandoned reply carried on talking over the new
+// question. Whether sound is coming out is a fact; what the state machine
+// believes is an opinion.
+static volatile bool s_playing = false;
 // Set when a reply is cancelled, cleared by the "done" that closes it.
 //
 // Resetting the play buffer only discards what has already arrived. The server
@@ -1112,6 +1122,7 @@ static void audio_out_task(void *arg) {
             i2s_channel_enable(s_tx);
             s_audio_level = 0;
             playing = false;
+            s_playing = false;
             s_reply_finished = false;
             s_abort_playback = false;
             ESP_LOGI(TAG, "playback aborted");
@@ -1155,6 +1166,7 @@ static void audio_out_task(void *arg) {
                 if (s_abort_playback) continue;  // handled at the top, amp stays shut
                 amp_enable(true);
                 playing = true;
+                s_playing = true;
                 s_play_dropped = 0;
                 ESP_LOGI(TAG, "playing");
             }
@@ -1197,6 +1209,7 @@ static void audio_out_task(void *arg) {
             amp_enable(false);
             s_audio_level = 0;
             playing = false;
+            s_playing = false;
             s_reply_finished = false;
             s_state = ST_IDLE;
             {
@@ -1352,7 +1365,14 @@ static void net_task(void *arg) {
 
             if (held) press_start = now;
 
-            if (held && (s_state == ST_SPEAKING || s_state == ST_THINKING) &&
+            // s_playing is in here because s_state can be wrong. The
+            // stuck-state timer forces ST_IDLE after twenty seconds of server
+            // silence, and the log caught audio starting three milliseconds
+            // later - a press then took the "new utterance" path and the
+            // abandoned reply talked over the question being recorded. If
+            // sound is coming out, a press stops it, whatever the state
+            // machine currently believes.
+            if (held && (s_state == ST_SPEAKING || s_state == ST_THINKING || s_playing) &&
                 esp_websocket_client_is_connected(s_ws)) {
                 // A press during a reply means "stop, I want to ask again".
                 //
