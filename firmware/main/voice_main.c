@@ -1403,7 +1403,10 @@ void app_main(void) {
     const bool asked = config_take_provisioning_request();
     if (pl_decide(config_is_provisioned(&cfg), asked, false) == PL_MODE_PROVISION) {
         if (provision_start() == ESP_OK) {
-            while (provision_is_active() && !provision_idle_expired()) {
+            // Three ways out: a successful trial plus its grace window, five
+            // minutes with nobody using the page, or provisioning stopping on
+            // its own. Only the first is the happy one.
+            while (provision_is_active() && !provision_complete() && !provision_idle_expired()) {
                 vTaskDelay(pdMS_TO_TICKS(200));
             }
             provision_stop();

@@ -17,6 +17,10 @@ static const char *TAG = "prov";
 static httpd_handle_t s_httpd = NULL;
 static TaskHandle_t s_dns_task = NULL;
 static volatile bool s_active = false;
+// A trial connected, and when. Together they are what lets provisioning end on
+// success rather than only on the idle timeout.
+static volatile bool s_succeeded = false;
+static volatile TickType_t s_succeeded_at = 0;
 static volatile TickType_t s_last_request = 0;
 static pl_unlock_t s_unlock;
 static setup_screen_t s_screen;
@@ -55,10 +59,23 @@ static const char PAGE_HEAD[] =
     "</style></head><body>\n"
     "<h1>Voice setup</h1>\n"
     "<form method=\"POST\" action=\"/save\">\n"
-    "<fieldset><legend>Network</legend>\n"
-    "<p>No networks found yet.</p>\n"
+    "<fieldset><legend>Network</legend>\n";
+
+// Between the two halves the scan results are written directly into the page.
+//
+// No JavaScript and no second request: the first board test served a page
+// whose network list was a static "No networks found yet.", because /scan
+// existed as an endpoint and nothing ever called it. Rendering the list where
+// the page is built cannot drift out of sync with itself that way, and it
+// works in a captive-portal WebView with scripting off.
+//
+// The cost is that GET / now blocks for the length of an all-channel scan.
+// Nothing else is happening at that moment, and a page that takes a moment to
+// arrive complete beats one that arrives instantly and empty.
+static const char PAGE_AFTER_LIST[] =
     "<p>Only 2.4&nbsp;GHz networks appear here - this device has no "
     "5&nbsp;GHz radio.</p>\n"
+    "<p><a href=\"/\">Scan again</a></p>\n"
     "</fieldset>\n"
     "<label>Password<br>\n"
     "<input type=\"password\" name=\"pass\" maxlength=\"" STR(PL_PASS_MAX) "\">\n"
@@ -155,6 +172,11 @@ static void json_escape(const char *src, char *dst, size_t dst_size) {
 // it is written. Miss it in one handler and that handler's traffic becomes
 // invisible to the idle timer.
 
+// Defined below, next to the scan it wraps: the page is assembled here but the
+// list it contains comes from the same code /scan uses, so the two cannot
+// disagree about what is in range.
+static void send_network_list(httpd_req_t *req);
+
 static esp_err_t index_get_handler(httpd_req_t *req) {
     s_last_request = xTaskGetTickCount();
 
@@ -166,6 +188,8 @@ static esp_err_t index_get_handler(httpd_req_t *req) {
 
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send_chunk(req, PAGE_HEAD, (ssize_t)(sizeof(PAGE_HEAD) - 1));
+    send_network_list(req);
+    httpd_resp_send_chunk(req, PAGE_AFTER_LIST, (ssize_t)(sizeof(PAGE_AFTER_LIST) - 1));
     httpd_resp_send_chunk(req, esc_uri, (ssize_t)strlen(esc_uri));
     httpd_resp_send_chunk(req, PAGE_TAIL, (ssize_t)(sizeof(PAGE_TAIL) - 1));
     httpd_resp_send_chunk(req, NULL, 0);  // ends the chunked response
@@ -333,6 +357,12 @@ static esp_err_t save_post_handler(httpd_req_t *req) {
             ESP_LOGW(TAG, "config_save_uri failed");
         }
         status = SS_STATUS_CONNECTED;
+        // Starts the grace window. Until this, provisioning had no way to end
+        // except the five-minute idle timeout, so a device that had just been
+        // configured successfully sat in its own access point for five more
+        // minutes before going to work. Found on the first board test.
+        s_succeeded_at = xTaskGetTickCount();
+        s_succeeded = true;
     } else if (outcome == PROV_TRIAL_DISCONNECTED) {
         // NO_AP_FOUND and everything else are different next actions for
         // whoever is holding the phone - "check the network name" versus
@@ -395,6 +425,104 @@ static esp_err_t status_get_handler(httpd_req_t *req) {
 // (esp-idf/docs/en/api-guides/wifi.rst:504) - and, blocking, ties up the one
 // httpd task for the scan's duration. That is fine: there is nothing else
 // this device should be doing with that task while someone is provisioning.
+// What a scan produced, so both the page and /scan can say the same thing.
+typedef enum {
+    SCAN_OK = 0,
+    SCAN_BUSY,   // a trial is running; esp_wifi_scan_start says ESP_ERR_WIFI_STATE
+    SCAN_FAILED,
+} scan_result_t;
+
+// Runs a blocking all-channel scan into `out`, strongest first, and reports
+// how many landed there. Owns the driver's record list on every path: it is
+// dynamically allocated and this device has 55 KB of heap during a
+// conversation, so a leak here is not survivable.
+//
+// static storage in the caller: ~20 wifi_ap_record_t would be a few KB on the
+// httpd task's stack, and these handlers run one at a time on that one task.
+static scan_result_t scan_networks(wifi_ap_record_t *out, uint16_t *count) {
+    *count = 0;
+
+    wifi_scan_config_t sc = {0};  // NULL SSID, all channels, active
+    esp_err_t err = esp_wifi_scan_start(&sc, true);
+    if (err == ESP_ERR_WIFI_STATE) return SCAN_BUSY;
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_scan_start: %s", esp_err_to_name(err));
+        return SCAN_FAILED;
+    }
+
+    uint16_t found = 0;
+    err = esp_wifi_scan_get_ap_num(&found);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_scan_get_ap_num: %s", esp_err_to_name(err));
+        // The scan completed and its results are queued in the driver; nothing
+        // has claimed them, so this path must free them itself. The BUSY path
+        // above must not - there, the scan never started.
+        esp_wifi_clear_ap_list();
+        return SCAN_FAILED;
+    }
+
+    uint16_t n = (found > PROV_SCAN_MAX) ? PROV_SCAN_MAX : found;
+    err = esp_wifi_scan_get_ap_records(&n, out);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_scan_get_ap_records: %s", esp_err_to_name(err));
+        // Frees the whole list itself on success; on failure it may not have.
+        esp_wifi_clear_ap_list();
+        return SCAN_FAILED;
+    }
+
+    // Strongest first. n is capped at PROV_SCAN_MAX, so a plain insertion sort
+    // costs nothing worth measuring.
+    for (uint16_t i = 1; i < n; i++) {
+        const wifi_ap_record_t key = out[i];
+        uint16_t j = i;
+        while (j > 0 && out[j - 1].rssi < key.rssi) {
+            out[j] = out[j - 1];
+            j--;
+        }
+        out[j] = key;
+    }
+
+    *count = n;
+    return SCAN_OK;
+}
+
+// The radio buttons, sent as chunks so no single buffer has to hold an escaped
+// SSID twice over. html_escape can turn one byte into six.
+static void send_network_list(httpd_req_t *req) {
+    static wifi_ap_record_t recs[PROV_SCAN_MAX];
+    uint16_t n = 0;
+
+    switch (scan_networks(recs, &n)) {
+        case SCAN_BUSY:
+            httpd_resp_sendstr_chunk(req, "<p>Busy trying the last network. Reload in a moment.</p>\n");
+            return;
+        case SCAN_FAILED:
+            httpd_resp_sendstr_chunk(req, "<p>The scan failed. Reload to try again.</p>\n");
+            return;
+        case SCAN_OK:
+            break;
+    }
+
+    if (n == 0) {
+        httpd_resp_sendstr_chunk(req, "<p>No networks in range.</p>\n");
+        return;
+    }
+
+    char esc[PL_SSID_MAX * 6 + 1];
+    char rssi[16];
+    for (uint16_t i = 0; i < n; i++) {
+        // ssid[33] is null-terminated by the driver even at the full 32 bytes.
+        html_escape((const char *)recs[i].ssid, esc, sizeof(esc));
+        httpd_resp_sendstr_chunk(req, "<label><input type=\"radio\" name=\"ssid\" value=\"");
+        httpd_resp_sendstr_chunk(req, esc);
+        httpd_resp_sendstr_chunk(req, "\" required> ");
+        httpd_resp_sendstr_chunk(req, esc);
+        const int len = snprintf(rssi, sizeof(rssi), " (%d dBm)", (int)recs[i].rssi);
+        httpd_resp_send_chunk(req, rssi, len);
+        httpd_resp_sendstr_chunk(req, "</label>\n");
+    }
+}
+
 static esp_err_t scan_get_handler(httpd_req_t *req) {
     s_last_request = xTaskGetTickCount();
 
@@ -866,6 +994,17 @@ void provision_stop(void) {
 }
 
 bool provision_is_active(void) { return s_active; }
+
+bool provision_complete(void) {
+    if (!s_active || !s_succeeded) return false;
+    const uint32_t since_ms = (uint32_t)(xTaskGetTickCount() - s_succeeded_at) *
+                               portTICK_PERIOD_MS;
+    // The wait is the point, not an afterthought: connecting the station just
+    // forced the access point onto the home network's channel, which can drop
+    // the phone mid-request, and this window is what lets one that
+    // reassociates poll GET /status and learn it worked.
+    return since_ms >= PROV_GRACE_MS;
+}
 
 bool provision_idle_expired(void) {
     if (!s_active) return false;

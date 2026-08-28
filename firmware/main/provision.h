@@ -30,6 +30,12 @@ bool provision_is_active(void);
 // through typing does, because typing produces requests.
 bool provision_idle_expired(void);
 
+// True once a trial has connected and PROV_GRACE_MS has passed since. This is
+// how provisioning ends on success; without it the only way out is the idle
+// timeout, which left a freshly configured device sitting in its own access
+// point for five more minutes.
+bool provision_complete(void);
+
 // What face_task should draw. Safe to call from another task: it copies.
 void provision_screen(setup_screen_t *out);
 
