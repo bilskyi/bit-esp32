@@ -62,6 +62,8 @@ is told to use one. `CONFIG_RTC_CLK_SRC_INT_RC=y`, so they are genuinely free.
 | Free heap on device | 172 KB at boot, **55 KB mid-conversation** — see below |
 | Codec | IMA ADPCM both directions, 4:1, verified against `audioop` |
 | Emotion tag rate | 29/30 tagged on the recorded run; brackets never reached spoken text |
+| Provisioning, flash | **55.4 KB**, and the app partition still has 48% free |
+| Provisioning, heap | **unknown** — needs a board; nothing below has run |
 | Emotion spread | 6-7 of 9 emotions across three 30-question runs; `neutral` share 33-40% |
 | Reply length | median 52-72 chars across three runs |
 | Tag latency cost | 60-110 ms to the first sentence, measured against a control |
@@ -239,7 +241,13 @@ flicking about once a second reads as nervous rather than thoughtful.
 
 ### Verified off the bench
 
-- 487 host checks, 0 failures. `cd firmware/host && make test`.
+- Host checks, 0 failures: **500** on the face, **50** on the provisioning
+  logic, **14872** on the setup screen. `cd firmware/host && make test`.
+  Everything runs twice — plain, and under `-fsanitize=address,undefined`.
+  `make test ASAN=0` skips the second for a toolchain without the runtime.
+  The sanitizer exists because a one-byte out-of-bounds read shipped past the
+  plain build and its own wrong-length test, which passed a string literal —
+  and a literal has enough bytes after it that the read lands in the same page.
 - All four sketches build with **zero warnings**.
 - 209 server tests. One reads the emotion names straight out of `face.c`, because
   the device matches them by substring and a rename would not raise anywhere —
@@ -276,17 +284,120 @@ survive the trip says so rather than showing plausible nonsense.
 
 ---
 
+## WiFi from a phone
+
+**Written, compiled, linked — and never run.** Design in
+`docs/superpowers/specs/2026-08-27-wifi-provisioning-design.md`.
+
+The network used to be compiled into `secrets.h`. Now NVS is the source and
+`secrets.h` is the fallback for whatever NVS lacks, so a board flashed with a
+filled-in header still joins immediately and is never asked anything. **The
+template ships empty on purpose** — it used to say `"your-2.4GHz-network"`,
+which is a non-empty string and would have counted as configured, so a board
+built from it unchanged would have waited forever for a network that does not
+exist instead of asking.
+
+| File | Depends on | Does |
+|---|---|---|
+| `main/provision_logic.c` | **nothing** | form decoding, URI shape, the unlock counter, the mode choice |
+| `main/setup_screen.c` | **nothing** | a 5×7 font and the four-line setup screen |
+| `main/config_store.c` | `nvs_flash` | NVS first, `secrets.h` behind it |
+| `main/provision.c` | ESP-IDF | the access point, `httpd`, a DNS stub, scanning, the trial |
+
+The first two follow `face.c`'s rules — no ESP-IDF header, no float, no
+allocation — so `host/` builds them. That is deliberate: form parsing and
+screen layout are where the bugs are, and both are now testable on a laptop.
+
+**How it behaves.** Nothing configured, or the hold gesture asked: raise an
+**open** access point `Voice-XXXX`, show its name, `192.168.4.1` and a
+four-digit code on the panel, serve one page. Pick a network, submit, and the
+device trials it before anything is saved. Configured and no request: connect
+and **wait forever**, exactly as before — a router rebooting is worth waiting
+out, and an AP that appeared on its own would turn a two-minute outage into a
+device that had stopped being a voice companion.
+
+**Why the access point is open.** WPA2 would mean reading eight hex digits off
+a 0.96" panel and typing them on a phone every single time, to stop a passerby
+inside a five-minute window — and it would make a device with no display
+impossible to provision at all. The lock sits on the one field that warrants
+it: the server URI, behind the code, five wrong tries and the attempt is over.
+Four digits are scriptable in under a minute; the attempt limit is what
+protects it, and standing next to the device is what gets you more attempts.
+
+**Why the panel is the source of truth.** Connecting the station forces the
+access point onto the home network's channel (`wifi.rst:1660`), so the phone
+can be dropped at the exact instant the password proves correct. A design whose
+only success signal was a web page would report "it worked" and "it broke" as
+the same silence. The page polls and is best-effort; the panel carries
+trying / connected / wrong password / not found / timed out, and says so.
+
+**The hold gesture reboots, and the spec said not to.** Hold the button and
+stay quiet for five seconds — `s_audio_level` already knows whether anyone is
+talking, so a long question can never trigger it — and the device records the
+request in NVS and restarts into provisioning. The spec wanted an in-place
+transition to keep the face's continuity. There is no safe one to write:
+`wifi_start()` does one-time initialisation (`esp_netif_init`, the default
+event loop, `esp_wifi_init`), so there is no second call to make, and inventing
+a teardown that could be neither run nor reviewed here would have been worse
+than losing an animation. This firmware already reboots for a clean slate.
+
+**A stuck button cannot be distinguished from a deliberate silent hold** — the
+signals are identical. It is handled by cost instead: nothing is erased on the
+way in, and the access point returns to the saved network five minutes after
+the last HTTP request.
+
+---
+
 ## Agreed next, in order
 
-### 1. Build-time switch between LAN and cloud
+### 1. Build-time switch between LAN and cloud — **answered, not dropped**
 
-The user's complaint, and it is fair: local felt instant and always worked;
-through Railway it is ~300 ms slower and drops far more often. TLS needs
-several round trips in succession, so it falls apart on a lossy link where
-plain TCP scraped through, and it adds a DNS dependency.
+This asked for `idf.py -DSERVER=lan` and `-DSERVER=cloud`, because `SERVER_URI`
+was compiled in and switching meant a reflash. WiFi provisioning made it moot:
+the URI is settable from the phone, behind the unlock code, so there is nothing
+left to switch at build time. Left here rather than deleted so nobody
+rediscovers it as an open item.
 
-Wanted: `idf.py -DSERVER=lan` and `-DSERVER=cloud`, choosing between two URIs in
-`secrets.h`. Roughly twenty minutes. Do not make them pick one forever.
+The complaint underneath it stands and is not addressed: local felt instant and
+always worked, Railway is ~300 ms slower and drops far more often, because TLS
+needs several round trips in succession and falls apart on a lossy link where
+plain TCP scraped through. What changed is that switching between them now
+costs a long press instead of a toolchain.
+
+### 1a. Take provisioning to the bench — **nothing below has run**
+
+The whole feature compiles and links, and none of it has been on hardware.
+In this order, because the first can invalidate the rest:
+
+1. **Does the access point come up and stay up on the intended supply?** An
+   access point cannot use modem sleep, so provisioning holds the radio awake —
+   the state that produced a 32-second 1 KB send the two times `WIFI_PS_NONE`
+   was tried here. It should survive, because the amplifier is silent during
+   provisioning and nothing is streaming, but that is an argument, not a
+   measurement. If the AP will not hold, it is supply and no code will fix it.
+2. **Measure `RESET_SILENCE_LEVEL`.** It is 400 in `voice_main.c` and that is a
+   placeholder, said so in the comment. Log `s_audio_level` for thirty seconds
+   with the button held in a quiet room, then again while speaking at
+   conversational distance, and put the threshold between the ranges nearer the
+   quiet one. **If the ranges overlap, the silence gate does not work in that
+   room** and the hold gesture needs rethinking rather than a number splitting
+   the difference.
+3. Join from a phone, load `192.168.4.1`, pick a network, submit. Watch the
+   panel — it is the authoritative report, because connecting the station forces
+   the access point onto the home network's channel and can drop the phone at
+   the exact moment of success.
+4. Reboot; it should join the saved network with no prompting.
+5. Hold silently — the countdown should appear and complete. Hold and talk — it
+   should never complete.
+6. Enter provisioning and walk away; it should return to the saved network five
+   minutes after the last HTTP request.
+
+**One known residual, and only a board can size it.** When a trial times out,
+the code cancels the attempt and waits up to 300 ms for the cancellation's own
+disconnect event before clearing the trial flag. If that event takes longer, it
+lands on `wifi_event`'s ordinary branch, which reconnects forever — with the
+credentials the user was just told had failed. The window is narrowed, not
+closed, and the code says so where it happens.
 
 ### 2. Cleanup, once the link is sound
 
@@ -358,6 +469,30 @@ afplay /System/Library/Sounds/Ping.aiff
 
 ## Traps already paid for
 
+- **`esp_wifi_set_config()` writes to flash unless you tell it not to.** The
+  default is `WIFI_STORAGE_FLASH` (`esp_wifi.h:1038`) and nothing in this
+  project had ever called `esp_wifi_set_storage()`. So provisioning's "try the
+  password before saving it" was writing the unverified password to the
+  driver's own NVS the instant it configured the station — everything the
+  design was built to prevent, through a second NVS nobody had thought about.
+  `provision_start()` now sets `WIFI_STORAGE_RAM`, which costs nothing here
+  because `wifi_start()` reapplies the configuration explicitly on every boot.
+- **An access point cannot use modem sleep.** Sleep is a station feature
+  (`wifi.rst:1773`, `:1795`), and an AP has to beacon. So provisioning holds
+  the radio in exactly the state that produced a 32-second 1 KB send the two
+  times `WIFI_PS_NONE` was tried here. It should survive — the amplifier is
+  silent and nothing is streaming — but that is reasoning, not a measurement,
+  and it is the first thing to check on the bench.
+- **Source order is not synchronisation.** A fix that called
+  `esp_wifi_disconnect()` before clearing a flag looked correct and was not:
+  the disconnect event is dispatched on the event-loop task while the flag
+  clears on the HTTP task, so the flag almost certainly won. Ordering two
+  statements in one task says nothing about a third.
+- **Substring matching on short Cyrillic words is a trap.** `"ого"` as a
+  surprise marker hides inside `нічого`, `нікого` and `когось`, so
+  `"Дякую, нічого не потрібно."` came back `surprised` despite containing
+  `дякую`. Word boundaries fix that class; they do not fix `надо же` or
+  `no way`, whose boundaries are intact. See `_SURPRISED` in `server/emotion.py`.
 - **Restarting the server strands the device.** A supervisor now rebuilds the
   client after 15 s offline and reboots after 90 s, but a board stuck from
   before that landed still needs a manual reset.
