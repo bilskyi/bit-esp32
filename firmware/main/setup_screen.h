@@ -27,6 +27,7 @@ typedef enum {
     SS_STATUS_BAD_PASSWORD,
     SS_STATUS_NOT_FOUND,
     SS_STATUS_TIMED_OUT,
+    SS_STATUS_LEAVING,       // the exit gesture is part-way through
     SS_STATUS_COUNT
 } ss_status_t;
 

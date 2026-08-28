@@ -1189,11 +1189,38 @@ static void button_task(void *arg) {
 // is this project's blocking problem.
 #define SHORT_PRESS_MS 200
 
+// Counting presses inside a window, in the one place both callers can share.
+//
+// There are two, and they never run at once: net_task counts them to *enter*
+// provisioning while the device is working, and app_main counts them to
+// *leave* it while it is provisioning - net_task does not exist yet at that
+// point, it is created after the radio is up. Each keeps its own instance
+// rather than sharing state, because the same run of taps must not be seen
+// by both.
+typedef struct {
+    uint8_t taps;
+    TickType_t first;
+    bool was_down;
+} tap_counter_t;
+
+// Feed it the debounced button every loop. Returns how many presses are in the
+// current run, or 0 once the window lapses.
+static uint8_t tap_count(tap_counter_t *c, bool down, TickType_t now) {
+    if (c->taps > 0 && (uint32_t)(now - c->first) * portTICK_PERIOD_MS > RESET_WINDOW_MS) {
+        c->taps = 0;
+    }
+    if (down && !c->was_down) {  // the press edge, not the hold
+        if (c->taps == 0) c->first = now;
+        c->taps++;
+    }
+    c->was_down = down;
+    return c->taps;
+}
+
 static void net_task(void *arg) {
     static uint8_t chunk[1024];
     bool held = false;
-    uint8_t taps = 0;
-    TickType_t first_tap = 0;
+    tap_counter_t taps_in = {0};
     TickType_t press_start = 0;
 
     TickType_t busy_since = 0;
@@ -1202,12 +1229,10 @@ static void net_task(void *arg) {
         const bool down = s_button_down;
         const TickType_t now = xTaskGetTickCount();
 
-        // The run of taps expires on its own, which is what lets the face go
-        // back to normal after four presses that were never going to be five.
-        if (taps > 0 && (uint32_t)(now - first_tap) * portTICK_PERIOD_MS > RESET_WINDOW_MS) {
-            taps = 0;
-            s_face_reset_pct = 0;
-        }
+        const uint8_t taps = tap_count(&taps_in, down, now);
+        s_face_reset_pct = (taps >= RESET_TAPS_VISIBLE)
+                               ? (uint8_t)((taps * 100u) / RESET_TAPS)
+                               : 0;
 
         if (taps >= RESET_TAPS) {
             ESP_LOGW(TAG, "hold-to-reset completed; restarting into provisioning");
@@ -1251,24 +1276,7 @@ static void net_task(void *arg) {
         if (down != held) {
             held = down;
 
-            if (held) {
-                press_start = now;
-                // Count the press edges, not the holds. A stuck button is one
-                // continuous press and can never reach five - which is the
-                // whole reason this gesture replaced holding: a stuck button
-                // and a deliberate hold are the same signal, and a stuck
-                // button and five taps are not.
-                if (taps == 0 ||
-                    (uint32_t)(now - first_tap) * portTICK_PERIOD_MS > RESET_WINDOW_MS) {
-                    taps = 1;
-                    first_tap = now;
-                } else {
-                    taps++;
-                }
-                s_face_reset_pct = (taps >= RESET_TAPS_VISIBLE)
-                                       ? (uint8_t)((taps * 100u) / RESET_TAPS)
-                                       : 0;
-            }
+            if (held) press_start = now;
 
             if (held && (s_state == ST_SPEAKING || s_state == ST_THINKING) &&
                 esp_websocket_client_is_connected(s_ws)) {
@@ -1450,11 +1458,33 @@ void app_main(void) {
     const bool asked = config_take_provisioning_request();
     if (pl_decide(config_is_provisioned(&cfg), asked, false) == PL_MODE_PROVISION) {
         if (provision_start() == ESP_OK) {
-            // Three ways out: a successful trial plus its grace window, five
-            // minutes with nobody using the page, or provisioning stopping on
-            // its own. Only the first is the happy one.
+            // Four ways out: a successful trial plus its grace window, five
+            // minutes with nobody using the page, the same five taps that got
+            // here, or provisioning stopping on its own. Only the first is the
+            // happy one.
+            //
+            // The taps are counted here rather than in net_task because
+            // net_task does not exist yet - it is created once the radio is
+            // up, which is after this returns.
+            tap_counter_t taps_out = {0};
+            uint8_t shown = 0;
             while (provision_is_active() && !provision_complete() && !provision_idle_expired()) {
-                vTaskDelay(pdMS_TO_TICKS(200));
+                const uint8_t taps = tap_count(&taps_out, s_button_down, xTaskGetTickCount());
+                if (taps >= RESET_TAPS) {
+                    ESP_LOGW(TAG, "five taps: leaving setup without configuring");
+                    break;
+                }
+                // Same warning the entry gesture gives, in the only place this
+                // screen has for it: a gesture that fires with no notice is
+                // exactly what the countdown exists to prevent.
+                if (taps >= RESET_TAPS_VISIBLE && taps != shown) {
+                    provision_set_status(SS_STATUS_LEAVING);
+                    shown = taps;
+                } else if (taps == 0 && shown != 0) {
+                    provision_set_status(SS_STATUS_WAITING);
+                    shown = 0;
+                }
+                vTaskDelay(pdMS_TO_TICKS(20));  // fast enough not to miss a tap
             }
             provision_stop();
             config_load(&cfg);  // pick up whatever was just saved

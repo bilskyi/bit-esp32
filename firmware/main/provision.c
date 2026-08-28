@@ -1013,6 +1013,13 @@ bool provision_idle_expired(void) {
     return idle_ms > PROV_AP_IDLE_MS;
 }
 
+void provision_set_status(ss_status_t status) {
+    if (s_screen_lock == NULL) return;
+    xSemaphoreTake(s_screen_lock, portMAX_DELAY);
+    s_screen.status = status;
+    xSemaphoreGive(s_screen_lock);
+}
+
 void provision_screen(setup_screen_t *out) {
     if (s_screen_lock != NULL) {
         xSemaphoreTake(s_screen_lock, portMAX_DELAY);

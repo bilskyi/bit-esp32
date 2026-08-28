@@ -39,6 +39,12 @@ bool provision_complete(void);
 // What face_task should draw. Safe to call from another task: it copies.
 void provision_screen(setup_screen_t *out);
 
+// Overwrite the status line from outside. The exit gesture is counted by
+// whoever is driving the provisioning loop, not in here, so it needs a way to
+// say what it is doing - a gesture that fires with no warning is the thing the
+// entry gesture's countdown exists to avoid.
+void provision_set_status(ss_status_t status);
+
 // ---------------------------------------------------------- the WiFi trial
 //
 // A credential trial needs the station connection state that wifi_event()
