@@ -1120,6 +1120,19 @@ static void audio_out_task(void *arg) {
 
         size_t got = xStreamBufferReceive(s_play_buf, coded, sizeof(coded), pdMS_TO_TICKS(20));
 
+        if (got > 0 && s_discard_audio) {
+            // Stale by definition, and this is the one place that can catch
+            // it. The receive handler checks the same flag, but a send that
+            // was already blocked inside xStreamBufferSend waiting for room
+            // has passed that check: the abort frees the room, the send wakes
+            // and lands audio in the buffer that was just cleared. Measured -
+            // "playback aborted" and "playing" in the same millisecond, then
+            // 4.2 s of the abandoned reply. It only happened when the buffer
+            // had filled, which is why it was intermittent.
+            s_discarded_bytes += (uint32_t)got;
+            continue;
+        }
+
         if (got > 0) {
             if (!playing) {
                 play_started = xTaskGetTickCount();
@@ -1348,6 +1361,14 @@ static void net_task(void *arg) {
                 // round trip. The spec rules out barge-in, but that is about
                 // detecting speech during playback, which needs echo
                 // cancellation. A deliberate button press needs none.
+                // Mute here, not in audio_out_task. Setting a flag and waiting
+                // for the other task to notice costs a scheduling hop plus
+                // however long it is blocked inside i2s_channel_write - which
+                // is one DMA buffer, tens of milliseconds. This is a single
+                // GPIO write and it happens on the press itself, so the
+                // speaker goes quiet as fast as the button is debounced.
+                // audio_out_task still does the rest of the teardown.
+                amp_enable(false);
                 ESP_LOGI(TAG, "interrupted while in state %d", (int)s_state);
                 // Flag it rather than calling face_startle here: face_task
                 // owns the animation, and this is a different task. It also
