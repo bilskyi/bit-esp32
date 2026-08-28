@@ -134,6 +134,12 @@
 #define SEND_TIMEOUT pdMS_TO_TICKS(12000)
 // Longest the device will wait on the server before re-arming the button.
 #define STUCK_TIMEOUT_MS 20000
+
+// How long the socket has to be down before the panel offers the way out.
+// Long enough that an ordinary reconnect never shows it - the supervisor
+// rebuilds the client at 15 s - short enough to be there when someone is
+// standing in front of a device that is plainly not working.
+#define OFFLINE_HINT_MS 8000
 // How long the socket task may wait for room in the play buffer.
 // Short on purpose. The server now paces the reply to roughly real time, so
 // the buffer should almost never be full; blocking this task for seconds left
@@ -905,6 +911,22 @@ static void face_task(void *arg) {
             face_set_reset_progress(&s_face, s_face_reset_pct, t);
             face_tick(&s_face, t);
             fb = face_framebuffer(&s_face);
+
+            // A gesture nobody can discover is knowledge that lives in one
+            // person's head. Say it on the panel in the one situation where
+            // it is needed - the device visibly stuck with no server - and
+            // nowhere else, so it does not become furniture.
+            //
+            // The face's own buffer is not written to: it is copied and the
+            // line goes on the copy. face.c owns f->fb and this is the whole
+            // reason setup_screen.c renders into a buffer it is handed.
+            const TickType_t off = s_offline_since;
+            if (off != 0 &&
+                (uint32_t)(xTaskGetTickCount() - off) * portTICK_PERIOD_MS > OFFLINE_HINT_MS) {
+                memcpy(s_setup_fb, fb, FACE_FB_BYTES);
+                ss_draw_text(s_setup_fb, 0, FACE_H - SS_GLYPH_H, "5 presses = setup");
+                fb = s_setup_fb;
+            }
         }
 
         // A panel that stops acknowledging - a wire off, a brownout - must be
@@ -1154,22 +1176,25 @@ static void button_task(void *arg) {
 // signals are identical and no scheme distinguishes them, so it is handled by
 // cost instead: the access point times out back to the saved network, and
 // nothing is erased on the way in.
-#define RESET_HOLD_MS 5000
-// Unmeasured. face.c normalises loudness against a decaying peak, which is
-// the wrong tool here - silence has no recent peak - so this is an absolute
-// threshold on raw block_level() output and it has to come off the bench.
-// The procedure is in the spec: log s_audio_level for thirty seconds in a
-// quiet room, then again while speaking, and put this between the two ranges
-// nearer the quiet one. If they overlap, the silence gate does not work in
-// that room and this whole gesture needs rethinking rather than a number
-// splitting the difference.
-#define RESET_SILENCE_LEVEL 400
+#define RESET_TAPS 5
+#define RESET_WINDOW_MS 3000
+// The face starts showing the count from here, so the gesture cannot complete
+// without warning.
+#define RESET_TAPS_VISIBLE 3
+
+// Below this, a press was not a question - nobody says anything in a fifth of
+// a second - so the utterance is cancelled rather than ended. Without it each
+// tap of the reset gesture would run start/end and cost a Groq STT call on a
+// rate-limited tier, five per gesture, plus five round trips on the link that
+// is this project's blocking problem.
+#define SHORT_PRESS_MS 200
 
 static void net_task(void *arg) {
     static uint8_t chunk[1024];
     bool held = false;
-    bool silent_run = false;
-    TickType_t silent_start = 0;
+    uint8_t taps = 0;
+    TickType_t first_tap = 0;
+    TickType_t press_start = 0;
 
     TickType_t busy_since = 0;
 
@@ -1177,24 +1202,14 @@ static void net_task(void *arg) {
         const bool down = s_button_down;
         const TickType_t now = xTaskGetTickCount();
 
-        // Armed in ST_LISTENING and when the socket is down, and nowhere else.
-        // During a reply a hold means "stop, I want to ask again", which is the
-        // commoner intent by a long way, and the two must not compete for the
-        // same gesture.
-        const bool armed = (s_state == ST_LISTENING) || !esp_websocket_client_is_connected(s_ws);
-        if (down && armed && s_audio_level < RESET_SILENCE_LEVEL) {
-            if (!silent_run) { silent_run = true; silent_start = now; }
-        } else {
-            silent_run = false;  // speech, a release, or a state that does not arm it
+        // The run of taps expires on its own, which is what lets the face go
+        // back to normal after four presses that were never going to be five.
+        if (taps > 0 && (uint32_t)(now - first_tap) * portTICK_PERIOD_MS > RESET_WINDOW_MS) {
+            taps = 0;
+            s_face_reset_pct = 0;
         }
 
-        const uint32_t silent_ms =
-            silent_run ? (uint32_t)(now - silent_start) * portTICK_PERIOD_MS : 0;
-        s_face_reset_pct = silent_ms >= RESET_HOLD_MS
-                               ? 100
-                               : (uint8_t)((silent_ms * 100u) / RESET_HOLD_MS);
-
-        if (silent_ms >= RESET_HOLD_MS) {
+        if (taps >= RESET_TAPS) {
             ESP_LOGW(TAG, "hold-to-reset completed; restarting into provisioning");
             // A hold in ST_LISTENING is also an utterance in flight. Abandon it
             // the way the interrupt path already does, so the server is not left
@@ -1235,6 +1250,25 @@ static void net_task(void *arg) {
 
         if (down != held) {
             held = down;
+
+            if (held) {
+                press_start = now;
+                // Count the press edges, not the holds. A stuck button is one
+                // continuous press and can never reach five - which is the
+                // whole reason this gesture replaced holding: a stuck button
+                // and a deliberate hold are the same signal, and a stuck
+                // button and five taps are not.
+                if (taps == 0 ||
+                    (uint32_t)(now - first_tap) * portTICK_PERIOD_MS > RESET_WINDOW_MS) {
+                    taps = 1;
+                    first_tap = now;
+                } else {
+                    taps++;
+                }
+                s_face_reset_pct = (taps >= RESET_TAPS_VISIBLE)
+                                       ? (uint8_t)((taps * 100u) / RESET_TAPS)
+                                       : 0;
+            }
 
             if (held && (s_state == ST_SPEAKING || s_state == ST_THINKING) &&
                 esp_websocket_client_is_connected(s_ws)) {
@@ -1290,19 +1324,32 @@ static void net_task(void *arg) {
                 while ((got = xStreamBufferReceive(s_mic_buf, chunk, sizeof(chunk), 0)) > 0) {
                     esp_websocket_client_send_bin(s_ws, (char *)chunk, got, SEND_TIMEOUT);
                 }
-                esp_websocket_client_send_text(s_ws, "{\"type\":\"end\"}", 14, SEND_TIMEOUT);
-                s_state = ST_THINKING;
-                s_last_activity = now;
-                ESP_LOGI(TAG, "thinking: sent %lu B (%.1f s), %lu dropped, %lu failures, slowest send %lu ms, heap %lu",
-                         (unsigned long)s_sent_bytes, s_sent_bytes / 32000.0f,
-                         (unsigned long)s_dropped_blocks, (unsigned long)s_send_failures,
-                         (unsigned long)(s_slowest_send * portTICK_PERIOD_MS),
-                         (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
-                wifi_ap_record_t ap_after;
-                if (esp_wifi_sta_get_ap_info(&ap_after) == ESP_OK) {
-                    // A drop between press and release points at the radio
-                    // losing ground while transmitting, not at distance.
-                    ESP_LOGI(TAG, "rssi after upload: %d dBm", ap_after.rssi);
+                // A press too short to have said anything is not a question -
+                // it is a miss, or one tap of the reset gesture. Cancelling
+                // costs the server nothing; ending would spend an STT call on
+                // a fifth of a second of room tone, five times per gesture.
+                const uint32_t press_ms = (uint32_t)(now - press_start) * portTICK_PERIOD_MS;
+                if (press_ms < SHORT_PRESS_MS) {
+                    esp_websocket_client_send_text(s_ws, "{\"type\":\"cancel\"}", 17, SEND_TIMEOUT);
+                    s_state = ST_IDLE;
+                    s_last_activity = now;
+                    ESP_LOGI(TAG, "press of %lu ms: cancelled, not a question",
+                             (unsigned long)press_ms);
+                } else {
+                    esp_websocket_client_send_text(s_ws, "{\"type\":\"end\"}", 14, SEND_TIMEOUT);
+                    s_state = ST_THINKING;
+                    s_last_activity = now;
+                    ESP_LOGI(TAG, "thinking: sent %lu B (%.1f s), %lu dropped, %lu failures, slowest send %lu ms, heap %lu",
+                             (unsigned long)s_sent_bytes, s_sent_bytes / 32000.0f,
+                             (unsigned long)s_dropped_blocks, (unsigned long)s_send_failures,
+                             (unsigned long)(s_slowest_send * portTICK_PERIOD_MS),
+                             (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
+                    wifi_ap_record_t ap_after;
+                    if (esp_wifi_sta_get_ap_info(&ap_after) == ESP_OK) {
+                        // A drop between press and release points at the radio
+                        // losing ground while transmitting, not at distance.
+                        ESP_LOGI(TAG, "rssi after upload: %d dBm", ap_after.rssi);
+                    }
                 }
             }
         }
