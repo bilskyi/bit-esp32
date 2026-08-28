@@ -63,7 +63,8 @@ is told to use one. `CONFIG_RTC_CLK_SRC_INT_RC=y`, so they are genuinely free.
 | Codec | IMA ADPCM both directions, 4:1, verified against `audioop` |
 | Emotion tag rate | 29/30 tagged on the recorded run; brackets never reached spoken text |
 | Provisioning, flash | **55.4 KB**, and the app partition still has 48% free |
-| Provisioning, heap | **unknown** — needs a board; nothing below has run |
+| Provisioning, heap | **unknown** — not logged; measure before trusting it |
+| Provisioning, end to end | works: phone → NVS → boots on the saved network. 28 Aug |
 | Emotion spread | 6-7 of 9 emotions across three 30-question runs; `neutral` share 33-40% |
 | Reply length | median 52-72 chars across three runs |
 | Tag latency cost | 60-110 ms to the first sentence, measured against a control |
@@ -286,8 +287,31 @@ survive the trip says so rather than showing plausible nonsense.
 
 ## WiFi from a phone
 
-**Written, compiled, linked — and never run.** Design in
+**Works.** A network picked on a phone, stored in NVS, and the device coming up
+on it with `WIFI_SSID` empty in `secrets.h` — so the network came entirely from
+provisioning. Design in
 `docs/superpowers/specs/2026-08-27-wifi-provisioning-design.md`.
+
+Measured on the board, 28 Aug:
+
+| | |
+|---|---|
+| Access point | comes up in APSTA, DHCP on 192.168.4.1, DNS stub bound, **holds** — 40 s idle on laptop USB with no reboot or brownout |
+| Captive portal | **pops up by itself on iOS** — `captive.apple.com` redirected to the page. Not relied on, and it happened anyway |
+| Panel | the 5×7 font is legible on real glass; the status line reads |
+| Boot on a saved network | IP in 2.0 s, TLS validated, socket connected in 10 s, STA only with no access point left up |
+| Flash | 55.4 KB for the feature; app partition 48% free |
+| Heap during provisioning | **still unknown** — not logged, and worth a number before trusting it |
+
+**Three bugs the bench found that no amount of reading had.** The wiring called
+`provision_start()` before `esp_wifi_init()`, so it could not start at all. The
+page's network list was a static "No networks found yet." with a `/scan`
+endpoint nothing ever called. And a successful trial did not end provisioning —
+`PROV_GRACE_MS` was a constant nothing consumed, so a correctly configured
+device sat in its own access point for five more minutes. All three are fixed.
+
+**Not yet tried on the board:** the hold-to-reset gesture, because
+`RESET_SILENCE_LEVEL` is still the unmeasured placeholder. See "Agreed next".
 
 The network used to be compiled into `secrets.h`. Now NVS is the source and
 `secrets.h` is the fallback for whatever NVS lacks, so a board flashed with a
@@ -364,33 +388,31 @@ needs several round trips in succession and falls apart on a lossy link where
 plain TCP scraped through. What changed is that switching between them now
 costs a long press instead of a toolchain.
 
-### 1a. Take provisioning to the bench — **nothing below has run**
+### 1a. Finish taking provisioning to the bench
 
-The whole feature compiles and links, and none of it has been on hardware.
-In this order, because the first can invalidate the rest:
+The path a user actually walks — raise the access point, pick a network on a
+phone, come up on it after a reboot — is done and recorded above. What is left:
 
-1. **Does the access point come up and stay up on the intended supply?** An
-   access point cannot use modem sleep, so provisioning holds the radio awake —
-   the state that produced a 32-second 1 KB send the two times `WIFI_PS_NONE`
-   was tried here. It should survive, because the amplifier is silent during
-   provisioning and nothing is streaming, but that is an argument, not a
-   measurement. If the AP will not hold, it is supply and no code will fix it.
-2. **Measure `RESET_SILENCE_LEVEL`.** It is 400 in `voice_main.c` and that is a
-   placeholder, said so in the comment. Log `s_audio_level` for thirty seconds
-   with the button held in a quiet room, then again while speaking at
-   conversational distance, and put the threshold between the ranges nearer the
-   quiet one. **If the ranges overlap, the silence gate does not work in that
-   room** and the hold gesture needs rethinking rather than a number splitting
-   the difference.
-3. Join from a phone, load `192.168.4.1`, pick a network, submit. Watch the
-   panel — it is the authoritative report, because connecting the station forces
-   the access point onto the home network's channel and can drop the phone at
-   the exact moment of success.
-4. Reboot; it should join the saved network with no prompting.
-5. Hold silently — the countdown should appear and complete. Hold and talk — it
-   should never complete.
-6. Enter provisioning and walk away; it should return to the saved network five
+1. **Measure `RESET_SILENCE_LEVEL`.** It is 400 in `voice_main.c` and that is a
+   placeholder, said so in the comment, and it is the only thing standing
+   between the hold-to-reset gesture and a first try. Log `s_audio_level` for
+   thirty seconds with the button held in a quiet room, then again while
+   speaking at conversational distance, and put the threshold between the two
+   ranges nearer the quiet one. **If the ranges overlap, the silence gate does
+   not work in that room** and the gesture needs rethinking rather than a
+   number splitting the difference.
+2. Then hold silently — the countdown should appear and complete, and the
+   device should restart into provisioning. Hold and talk — it should never
+   complete.
+3. Enter provisioning and walk away; it should return to the saved network five
    minutes after the last HTTP request.
+4. **Log the heap while the access point is up.** Nothing measures it, and this
+   device runs at 55 KB free during a conversation. `httpd` with two sockets, a
+   DNS task and the AP are not free.
+5. **Does the access point still hold with a phone attached and traffic
+   flowing, on the phone charger rather than laptop USB?** It held idle for
+   40 s on USB, which is the encouraging half. An access point cannot use modem
+   sleep, and this board has died twice from an awake radio.
 
 **One known residual, and only a board can size it.** When a trial times out,
 the code cancels the attempt and waits up to 300 ms for the cancellation's own
