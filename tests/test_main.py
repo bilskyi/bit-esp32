@@ -215,3 +215,35 @@ def test_websocket_still_rejects_a_bad_bearer_with_no_session():
     with client(device_token="s3cret") as c, pytest.raises(WebSocketDisconnect):
         with c.websocket_connect("/ws", headers={"Authorization": "Bearer wrong"}) as ws:
             ws.receive_text()
+
+
+# -------------------------------------------------------- style settings API
+
+def test_style_settings_requires_login():
+    with client() as c:
+        r = c.get("/settings/style/web")
+    assert r.status_code == 401
+
+
+def test_style_settings_roundtrips_after_login():
+    with client() as c:
+        c.post("/login", json={"username": "test", "password": "test123"})
+        put = c.put("/settings/style/web", json={"max_sentences": 4, "markdown_allowed": True})
+        assert put.status_code == 200
+        got = c.get("/settings/style/web").json()
+    assert got == {"surface": "web", "max_sentences": 4, "markdown_allowed": True}
+
+
+def test_style_settings_default_before_any_override():
+    with client() as c:
+        c.post("/login", json={"username": "test", "password": "test123"})
+        got = c.get("/settings/style/esp32").json()
+    assert got == {"surface": "esp32", "max_sentences": 2, "markdown_allowed": False}
+
+
+def test_a_web_style_override_does_not_affect_esp32():
+    with client() as c:
+        c.post("/login", json={"username": "test", "password": "test123"})
+        c.put("/settings/style/web", json={"max_sentences": 4, "markdown_allowed": True})
+        got = c.get("/settings/style/esp32").json()
+    assert got == {"surface": "esp32", "max_sentences": 2, "markdown_allowed": False}

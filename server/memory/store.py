@@ -21,7 +21,7 @@ import struct
 from datetime import datetime, timezone
 from typing import Awaitable, Callable
 
-from sqlalchemy import Integer, Float, LargeBinary, String, DateTime, select, delete
+from sqlalchemy import Integer, Float, LargeBinary, String, DateTime, Boolean, select, delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -74,6 +74,13 @@ class SessionUsage(Base):
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     tts_chars: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class StyleOverride(Base):
+    __tablename__ = "style_overrides"
+    surface: Mapped[str] = mapped_column(String(16), primary_key=True)
+    max_sentences: Mapped[int] = mapped_column(Integer)
+    markdown_allowed: Mapped[bool] = mapped_column(Boolean)
 
 
 class Store:
@@ -296,3 +303,22 @@ class Store:
                 }
                 for r in rows.all()
             ]
+
+    async def get_style_override(self, surface: str) -> dict | None:
+        async with self._session() as s:
+            row = await s.get(StyleOverride, surface)
+            if row is None:
+                return None
+            return {"max_sentences": row.max_sentences, "markdown_allowed": row.markdown_allowed}
+
+    async def set_style_override(self, surface: str, max_sentences: int, markdown_allowed: bool) -> None:
+        async with self._session() as s:
+            row = await s.get(StyleOverride, surface)
+            if row is None:
+                s.add(StyleOverride(
+                    surface=surface, max_sentences=max_sentences, markdown_allowed=markdown_allowed
+                ))
+            else:
+                row.max_sentences = max_sentences
+                row.markdown_allowed = markdown_allowed
+            await s.commit()

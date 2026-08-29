@@ -18,6 +18,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from server.accounts import Accounts
 from server.config import Settings
 from server.memory.store import Store
+from server.persona import ESP32, WEB, Style
 from server.providers.edge_tts import EdgeTTS
 from server.providers.embeddings import FastEmbedEmbedder
 from server.providers.groq_llm import GroqLLM
@@ -67,9 +68,24 @@ def _authorise_connection(ws: WebSocket, settings: Settings) -> str | None:
     return None
 
 
+async def _resolve_style(store, surface: str) -> Style:
+    default = ESP32 if surface == "esp32" else WEB
+    if store is None:
+        return default
+    override = await store.get_style_override(surface)
+    if override is None:
+        return default
+    return Style(max_sentences=override["max_sentences"], markdown_allowed=override["markdown_allowed"])
+
+
 class LoginIn(BaseModel):
     username: str
     password: str
+
+
+class StyleIn(BaseModel):
+    max_sentences: int
+    markdown_allowed: bool
 
 
 class MemoryIn(BaseModel):
@@ -196,6 +212,16 @@ def create_app(
         await app.state.store.forget(device_id)
         return {"status": "ok"}
 
+    @app.get("/settings/style/{surface}", dependencies=[Depends(require_login)])
+    async def get_style(surface: str) -> dict:
+        style = await _resolve_style(app.state.store, surface)
+        return {"surface": surface, "max_sentences": style.max_sentences, "markdown_allowed": style.markdown_allowed}
+
+    @app.put("/settings/style/{surface}", dependencies=[Depends(require_login)])
+    async def put_style(surface: str, body: StyleIn) -> dict:
+        await app.state.store.set_style_override(surface, body.max_sentences, body.markdown_allowed)
+        return {"status": "ok"}
+
     @app.websocket("/ws")
     async def ws_endpoint(websocket: WebSocket) -> None:
         surface = _authorise_connection(websocket, settings)
@@ -206,6 +232,7 @@ def create_app(
         await websocket.accept()
 
         device_id = websocket.query_params.get("device", "default")
+        style = await _resolve_style(app.state.store, surface)
         session = Session(
             transport=WebSocketTransport(websocket),
             stt=app.state.stt,
@@ -215,6 +242,7 @@ def create_app(
             store=app.state.store,
             device_id=device_id,
             embedder=app.state.embedder,
+            style=style,
         )
         await session.load_memory()
 
