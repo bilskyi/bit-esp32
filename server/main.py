@@ -9,10 +9,12 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+from starlette.middleware.sessions import SessionMiddleware
 
+from server.accounts import Accounts
 from server.config import Settings
 from server.memory.store import Store
 from server.providers.edge_tts import EdgeTTS
@@ -49,6 +51,11 @@ def _authorised(ws: WebSocket, settings: Settings) -> bool:
     return _token_ok(ws.headers.get("authorization", ""), settings)
 
 
+class LoginIn(BaseModel):
+    username: str
+    password: str
+
+
 class MemoryIn(BaseModel):
     text: str
 
@@ -57,12 +64,18 @@ class MemoryIn(BaseModel):
 _MEMORY_UI_HTML = (Path(__file__).parent / "static" / "memory.html").read_text()
 
 
-def create_app(settings=None, stt=None, llm=None, tts=None, store=None, embedder=None) -> FastAPI:
+def create_app(
+    settings=None, stt=None, llm=None, tts=None, store=None, embedder=None, accounts=None
+) -> FastAPI:
     """Build the app. Providers are injectable so tests need no network."""
     settings = settings or Settings()
     logging.basicConfig(level=settings.log_level.upper())
 
     injected = store is not None
+    accounts_injected = accounts is not None
+
+    if not settings.session_secret_key:
+        log.warning("SESSION_SECRET_KEY is not set - session cookies are signed with an empty key")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -70,6 +83,10 @@ def create_app(settings=None, stt=None, llm=None, tts=None, store=None, embedder
         if not injected:
             app.state.store = Store(f"sqlite+aiosqlite:///{settings.db_path}")
             await app.state.store.init()
+        app.state.accounts = accounts
+        if not accounts_injected:
+            app.state.accounts = Accounts(f"sqlite+aiosqlite:///{settings.db_path}")
+            await app.state.accounts.init()
         if settings.provider_mode == "mock":
             log.warning("PROVIDER_MODE=mock: speech is not actually transcribed")
             app.state.stt = stt or MockSTT()
@@ -87,17 +104,40 @@ def create_app(settings=None, stt=None, llm=None, tts=None, store=None, embedder
         yield
         if not injected and app.state.store is not None:
             await app.state.store.close()
+        if not accounts_injected and app.state.accounts is not None:
+            await app.state.accounts.close()
 
     app = FastAPI(title="voice-companion", lifespan=lifespan)
     app.state.settings = settings
+    # https_only=False: Railway terminates TLS at its edge and forwards to
+    # this container over plain HTTP, so the app itself never sees "https".
+    # Setting this True here would make the cookie fail to round-trip in
+    # production, not just in tests. A known simplification, not an oversight.
+    app.add_middleware(SessionMiddleware, secret_key=settings.session_secret_key or "dev-only-insecure-key")
 
     async def require_token(authorization: str = Header(default="")) -> None:
         if not _token_ok(authorization, settings):
             raise HTTPException(status_code=401, detail="unauthorized")
 
+    async def require_login(request: Request) -> None:
+        if not request.session.get("user"):
+            raise HTTPException(status_code=401, detail="unauthorized")
+
     @app.get("/healthz")
     async def healthz() -> dict:
         return {"status": "ok", "auth": settings.auth_required}
+
+    @app.post("/login")
+    async def login(request: Request, body: LoginIn) -> dict:
+        if not await app.state.accounts.verify_password(body.username, body.password):
+            raise HTTPException(status_code=401, detail="wrong username or password")
+        request.session["user"] = body.username
+        return {"status": "ok"}
+
+    @app.post("/logout")
+    async def logout(request: Request) -> dict:
+        request.session.clear()
+        return {"status": "ok"}
 
     @app.get("/memory", response_class=HTMLResponse)
     async def memory_ui() -> str:

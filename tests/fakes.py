@@ -74,6 +74,15 @@ class FakeEmbedder:
         return [0.0]
 
 
+class FakeAccounts:
+    def __init__(self, username: str = "test", password: str = "test123") -> None:
+        self._username = username
+        self._password = password
+
+    async def verify_password(self, username: str, password: str) -> bool:
+        return username == self._username and password == self._password
+
+
 class FakeStore:
     def __init__(self, facts: list[str] | None = None, standing: list[str] | None = None) -> None:
         self.facts = {"default": list(facts or [])}

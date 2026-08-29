@@ -68,6 +68,12 @@ class Settings(BaseSettings):
     # disables the check, which is only appropriate on a laptop.
     device_token: str = ""
 
+    # Signs the web login's session cookie. Must be set on Railway before
+    # this deploys, same category as DEVICE_TOKEN and GROQ_API_KEY. Starlette
+    # will still sign cookies with an empty key (fine for local dev and
+    # tests), just not securely.
+    session_secret_key: str = ""
+
     sample_rate: int = 16000
     db_path: str = "voice.db"
 

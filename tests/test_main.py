@@ -7,11 +7,11 @@ from starlette.websockets import WebSocketDisconnect
 
 from server.config import Settings
 from server.main import create_app
-from tests.fakes import FakeEmbedder, FakeLLM, FakeSTT, FakeStore, FakeTTS
+from tests.fakes import FakeAccounts, FakeEmbedder, FakeLLM, FakeSTT, FakeStore, FakeTTS
 
 
 @contextmanager
-def client(store=None, **kw):
+def client(store=None, accounts=None, **kw):
     app = create_app(
         settings=Settings(_env_file=None, **kw),
         stt=FakeSTT(),
@@ -19,6 +19,7 @@ def client(store=None, **kw):
         tts=FakeTTS(),
         store=store or FakeStore(),
         embedder=FakeEmbedder(),
+        accounts=accounts or FakeAccounts(),
     )
     with TestClient(app) as c:
         yield c
@@ -173,3 +174,30 @@ def test_memory_ui_never_builds_fact_text_as_markup():
         r = c.get("/memory")
     assert "textContent = item.text" in r.text
     assert "innerHTML = item.text" not in r.text
+
+
+def test_login_with_the_right_password_sets_a_session_cookie():
+    with client() as c:
+        r = c.post("/login", json={"username": "test", "password": "test123"})
+        assert r.status_code == 200
+        assert "session" in r.cookies
+
+
+def test_login_with_the_wrong_password_is_rejected():
+    with client() as c:
+        r = c.post("/login", json={"username": "test", "password": "wrong"})
+    assert r.status_code == 401
+
+
+def test_login_with_an_unknown_username_is_rejected():
+    with client() as c:
+        r = c.post("/login", json={"username": "nobody", "password": "anything"})
+    assert r.status_code == 401
+
+
+def test_logout_clears_the_session():
+    with client() as c:
+        c.post("/login", json={"username": "test", "password": "test123"})
+        r = c.post("/logout")
+        assert r.status_code == 200
+        assert "session" not in r.cookies or r.cookies.get("session") == ""
