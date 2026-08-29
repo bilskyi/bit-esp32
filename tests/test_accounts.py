@@ -32,6 +32,17 @@ async def test_creating_a_user_twice_replaces_the_password(accounts):
     assert await accounts.verify_password("oleksandr", "second-password") is True
 
 
+async def test_a_password_over_72_bytes_does_not_crash_hashing_or_checking(accounts):
+    long_pw = "п" * 40  # 80 bytes in UTF-8, over bcrypt's 72-byte limit
+    await accounts.create_user("oleksandr", long_pw)
+    assert await accounts.verify_password("oleksandr", long_pw) is True
+
+
+async def test_a_wrong_password_over_72_bytes_is_still_rejected(accounts):
+    await accounts.create_user("oleksandr", "п" * 40)
+    assert await accounts.verify_password("oleksandr", "х" * 40) is False
+
+
 async def test_password_is_not_stored_in_plain_text(accounts):
     from sqlalchemy import select
 

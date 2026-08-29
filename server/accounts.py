@@ -13,6 +13,19 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
+_BCRYPT_MAX_BYTES = 72
+
+
+def _bcrypt_bytes(password: str) -> bytes:
+    """bcrypt only ever looks at the first 72 bytes of input. Truncating
+    explicitly here means hashing and checking always agree, instead of
+    depending on whether the installed bcrypt version truncates silently or
+    raises - and a password over the limit is common in this project's own
+    languages: 37 Cyrillic characters is already 74 bytes.
+    """
+    return password.encode("utf-8")[:_BCRYPT_MAX_BYTES]
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -41,7 +54,7 @@ class Accounts:
     async def create_user(self, username: str, password: str) -> None:
         """Create the account, or replace the password if it already exists."""
         password_hash = await asyncio.to_thread(
-            lambda: bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("ascii")
+            lambda: bcrypt.hashpw(_bcrypt_bytes(password), bcrypt.gensalt()).decode("ascii")
         )
         async with self._session() as s:
             existing = (await s.scalars(select(User).where(User.username == username))).first()
@@ -57,8 +70,8 @@ class Accounts:
             if user is None:
                 # Hash something anyway - a real username and an unknown one
                 # should not be distinguishable by response time.
-                await asyncio.to_thread(lambda: bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()))
+                await asyncio.to_thread(lambda: bcrypt.hashpw(_bcrypt_bytes(password), bcrypt.gensalt()))
                 return False
             return await asyncio.to_thread(
-                lambda: bcrypt.checkpw(password.encode("utf-8"), user.password_hash.encode("ascii"))
+                lambda: bcrypt.checkpw(_bcrypt_bytes(password), user.password_hash.encode("ascii"))
             )
