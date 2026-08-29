@@ -264,3 +264,12 @@ def test_a_web_style_override_does_not_affect_esp32():
         c.put("/settings/style/web", json={"max_sentences": 4, "markdown_allowed": True})
         got = c.get("/settings/style/esp32").json()
     assert got == {"surface": "esp32", "max_sentences": 2, "markdown_allowed": False}
+
+
+def test_esp32_style_cannot_be_overridden():
+    with client() as c:
+        c.post("/login", json={"username": "test", "password": "test123"})
+        r = c.put("/settings/style/esp32", json={"max_sentences": 6, "markdown_allowed": True})
+        assert r.status_code == 400
+        got = c.get("/settings/style/esp32").json()
+    assert got == {"surface": "esp32", "max_sentences": 2, "markdown_allowed": False}

@@ -69,12 +69,16 @@ def _authorise_connection(ws: WebSocket, settings: Settings) -> str | None:
 
 
 async def _resolve_style(store, surface: str) -> Style:
-    default = ESP32 if surface == "esp32" else WEB
+    if surface == "esp32":
+        # The ESP32's prompt is BASE, measured and protected (see RESUME.md) -
+        # never overridable, and never even looked up, so a stray override
+        # row (however it got there) can never affect it either.
+        return ESP32
     if store is None:
-        return default
+        return WEB
     override = await store.get_style_override(surface)
     if override is None:
-        return default
+        return WEB
     return Style(max_sentences=override["max_sentences"], markdown_allowed=override["markdown_allowed"])
 
 
@@ -219,6 +223,8 @@ def create_app(
 
     @app.put("/settings/style/{surface}", dependencies=[Depends(require_login)])
     async def put_style(surface: str, body: StyleIn) -> dict:
+        if surface == "esp32":
+            raise HTTPException(status_code=400, detail="esp32's prompt is fixed and cannot be overridden")
         await app.state.store.set_style_override(surface, body.max_sentences, body.markdown_allowed)
         return {"status": "ok"}
 

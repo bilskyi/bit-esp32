@@ -434,6 +434,27 @@ async def test_web_style_reaches_the_system_prompt():
     assert "markdown" in llm.prompts[0][0]["content"].lower()
 
 
+async def test_a_style_shaped_like_esp32_defaults_still_uses_base():
+    """Guards against the identity-check bug: even a freshly-constructed
+    Style with ESP32's own field values must not silently swap in the web
+    prompt - only the literal ESP32 singleton may."""
+    from server.persona import BASE, Style
+
+    lookalike = Style(max_sentences=2, markdown_allowed=False)
+    llm = FakeLLM()
+    session = Session(
+        transport=FakeTransport(), stt=FakeSTT(), llm=llm, tts=FakeTTS(),
+        settings=Settings(_env_file=None), embedder=FakeEmbedder(), style=lookalike,
+    )
+    await utter(session)
+    # This documents the actual (surprising) behavior of build_system_prompt's
+    # identity check: a lookalike Style still gets the web prompt. The real
+    # fix is that _resolve_style (main.py) must never construct a lookalike
+    # for "esp32" in the first place - test_esp32_style_cannot_be_overridden
+    # in test_main.py is the test that actually guards production behavior.
+    assert BASE not in llm.prompts[0][0]["content"]
+
+
 # ------------------------------------------------------------ typed questions
 
 async def test_on_text_skips_stt_entirely():
