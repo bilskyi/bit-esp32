@@ -48,8 +48,23 @@ def _token_ok(header: str, settings: Settings) -> bool:
     return scheme.lower() == "bearer" and token == settings.device_token
 
 
-def _authorised(ws: WebSocket, settings: Settings) -> bool:
-    return _token_ok(ws.headers.get("authorization", ""), settings)
+def _authorise_connection(ws: WebSocket, settings: Settings) -> str | None:
+    """Which surface authorised this connection, or None if neither did.
+
+    A real bearer token always wins as "esp32", regardless of whether
+    settings.auth_required is even true - this is deliberately stricter than
+    _token_ok's "no token configured means anyone passes" behaviour, so an
+    open dev server does not silently mislabel a browser as the device.
+    """
+    header = ws.headers.get("authorization", "")
+    scheme, _, token = header.partition(" ")
+    if settings.device_token and scheme.lower() == "bearer" and token == settings.device_token:
+        return "esp32"
+    if ws.session.get("user"):
+        return "web"
+    if not settings.auth_required:
+        return "esp32"
+    return None
 
 
 class LoginIn(BaseModel):
@@ -183,8 +198,9 @@ def create_app(
 
     @app.websocket("/ws")
     async def ws_endpoint(websocket: WebSocket) -> None:
-        if not _authorised(websocket, settings):
-            log.warning("rejected unauthorised device")
+        surface = _authorise_connection(websocket, settings)
+        if surface is None:
+            log.warning("rejected unauthorised connection")
             await websocket.close(code=4401)
             return
         await websocket.accept()

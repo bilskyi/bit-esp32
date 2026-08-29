@@ -201,3 +201,17 @@ def test_logout_clears_the_session():
         r = c.post("/logout")
         assert r.status_code == 200
         assert "session" not in r.cookies or r.cookies.get("session") == ""
+
+
+def test_websocket_accepts_a_valid_session_cookie_with_no_bearer_token():
+    with client(device_token="s3cret") as c:
+        c.post("/login", json={"username": "test", "password": "test123"})
+        with c.websocket_connect("/ws") as ws:
+            ws.send_text(json.dumps({"type": "start"}))
+            assert json.loads(ws.receive_text())["value"] == "listening"
+
+
+def test_websocket_still_rejects_a_bad_bearer_with_no_session():
+    with client(device_token="s3cret") as c, pytest.raises(WebSocketDisconnect):
+        with c.websocket_connect("/ws", headers={"Authorization": "Bearer wrong"}) as ws:
+            ws.receive_text()
