@@ -156,13 +156,8 @@ def create_app(
     app.add_middleware(
         SessionMiddleware,
         secret_key=session_secret_key,
-        # Railway terminates TLS at its edge and forwards to this container
-        # over plain HTTP, so the app itself never sees "https". Passing
-        # https_only=True here would make the cookie fail to round-trip in
-        # production, not just in tests - explicit False, not relying on
-        # Starlette's own default, so this stays true if that default ever
-        # changes.
-        https_only=False,
+        https_only=settings.session_cookie_secure,
+        same_site="lax",
     )
 
     async def require_token(authorization: str = Header(default="")) -> None:

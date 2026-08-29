@@ -12,6 +12,7 @@ from tests.fakes import FakeAccounts, FakeEmbedder, FakeLLM, FakeSTT, FakeStore,
 
 @contextmanager
 def client(store=None, accounts=None, **kw):
+    kw.setdefault("session_cookie_secure", False)
     app = create_app(
         settings=Settings(_env_file=None, **kw),
         stt=FakeSTT(),

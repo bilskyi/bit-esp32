@@ -75,6 +75,14 @@ class Settings(BaseSettings):
     # and tests, but existing sessions won't survive a restart.
     session_secret_key: str = ""
 
+    # Whether the session cookie requires HTTPS. True is correct in
+    # production (Railway's edge terminates real HTTPS; this is what makes
+    # the cookie Secure). Local dev over plain http://localhost and
+    # Starlette's TestClient both need this False, since neither is HTTPS -
+    # that is the actual constraint, not anything about how Railway proxies
+    # requests internally.
+    session_cookie_secure: bool = True
+
     sample_rate: int = 16000
     db_path: str = "voice.db"
 
