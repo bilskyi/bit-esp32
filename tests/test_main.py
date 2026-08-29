@@ -7,6 +7,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from server.config import Settings
 from server.main import create_app
+from server.persona import BASE
 from tests.fakes import FakeAccounts, FakeEmbedder, FakeLLM, FakeSTT, FakeStore, FakeTTS
 
 
@@ -293,3 +294,36 @@ def test_esp32_style_cannot_be_overridden():
         assert r.status_code == 400
         got = c.get("/settings/style/esp32").json()
     assert got == {"surface": "esp32", "max_sentences": 2, "markdown_allowed": False}
+
+
+def test_esp32_style_ignores_a_directly_seeded_override_row():
+    """Guards the actual Critical bug: even if an esp32 override row exists
+    in the database - however it got there, not just via the now-blocked
+    API write - it must never reach the device's prompt."""
+    store = FakeStore()
+    store._styles["esp32"] = {"max_sentences": 6, "markdown_allowed": True}
+    with client(store=store) as c:
+        c.post("/login", json={"username": "test", "password": "test123"})
+        got = c.get("/settings/style/esp32").json()
+    assert got == {"surface": "esp32", "max_sentences": 2, "markdown_allowed": False}
+
+
+def test_esp32_system_prompt_stays_base_despite_a_seeded_override():
+    """Same guard as above, but checked against what a real Session actually
+    sends the LLM, not just what the settings API reports."""
+    store = FakeStore()
+    store._styles["esp32"] = {"max_sentences": 6, "markdown_allowed": True}
+    with client(store=store) as c, c.websocket_connect("/ws") as ws:
+        ws.send_text(json.dumps({"type": "start"}))
+        assert json.loads(ws.receive_text())["value"] == "listening"
+        ws.send_bytes(b"\x00\x01" * 32000)
+        ws.send_text(json.dumps({"type": "end"}))
+        for _ in range(20):
+            message = ws.receive()
+            if "bytes" in message and message["bytes"] is not None:
+                continue
+            payload = json.loads(message["text"])
+            if payload.get("type") == "state" and payload["value"] == "idle":
+                break
+        llm = c.app.state.llm
+    assert llm.prompts[0][0] == {"role": "system", "content": BASE}
