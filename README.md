@@ -46,7 +46,7 @@ For the real pipeline, put a Groq key in `.env` and drop `PROVIDER_MODE`.
 uv run pytest
 ```
 
-247 tests, no network, no hardware, under ten seconds.
+284 tests, no network, no hardware, under ten seconds.
 
 ## Protocol
 
@@ -73,7 +73,10 @@ Authorization: Bearer <DEVICE_TOKEN>
 ```
 
 Leaving `DEVICE_TOKEN` empty disables the check. Set it before the URL is
-public: an open socket lets anyone drain the Groq free tier.
+public: an open socket lets anyone drain the Groq free tier. `/ws` also
+accepts a logged-in session cookie as an alternative credential, so a browser
+that has called `POST /login` can open the socket with no bearer token at
+all.
 
 A typed question (`"text"`) gets a written `{"type":"reply","value":"..."}`
 reply, streamed sentence by sentence like TTS is - no audio is synthesised
@@ -103,7 +106,9 @@ Embeddings are local: `fastembed` (ONNX Runtime, no PyTorch) with
 API, no external account, no per-request cost or rate limit.
 
 An HTTP API manages both, behind the same `DEVICE_TOKEN` bearer scheme as
-`/ws` — one shared secret, not per-device, same as the WebSocket:
+`/ws` — one shared secret, not per-device, same as the WebSocket. A logged-in
+web session's cookie works here too, so the same routes are reachable from
+either door:
 
 | Method | Path | Does |
 |---|---|---|
@@ -111,6 +116,16 @@ An HTTP API manages both, behind the same `DEVICE_TOKEN` bearer scheme as
 | `POST` | `/memory/{device_id}` | add a standing instruction (`{"text": "..."}`) |
 | `DELETE` | `/memory/{device_id}/{fact_id}` | remove one entry |
 | `DELETE` | `/memory/{device_id}` | wipe a device's memory entirely |
+
+The web login and the per-surface persona settings are gated by the session
+cookie only, not the device token:
+
+| Method | Path | Does |
+|---|---|---|
+| `POST` | `/login` | verify `{"username", "password"}`, set the session cookie |
+| `POST` | `/logout` | clear the session |
+| `GET` | `/settings/style/{surface}` | read the persona style for `esp32` or `web` |
+| `PUT` | `/settings/style/{surface}` | set a style override (`esp32` rejects this — its prompt is fixed) |
 
 `RELEVANT_FACTS_LIMIT` (default 6) caps how many auto facts reach the prompt
 per turn. `EMBEDDING_CACHE_DIR` should point at the same Railway volume the
@@ -127,6 +142,7 @@ server/
   lang.py              uk/ru/en detection, voice selection
   audio.py             streaming MP3 -> 16 kHz PCM, WAV wrapper
   persona.py           system prompt
+  accounts.py          password accounts, separate from the facts/usage store
   costs.py             per-session usage accounting
   config.py            pydantic-settings
   providers/
@@ -176,12 +192,18 @@ process to supervise.
 railway up
 ```
 
-Set `GROQ_API_KEY` and `DEVICE_TOKEN` as variables. Two things to get right:
+Set `GROQ_API_KEY`, `DEVICE_TOKEN` and `SESSION_SECRET_KEY` as variables. Two
+things to get right:
 
 - **Attach a volume** at `/data` and set `DB_PATH=/data/voice.db`. SQLite is a
   file; without a volume every redeploy forgets everything.
 - Memory sits far below the 512 MB ceiling — nothing is loaded locally, and the
   MP3 decoder works on a few KB at a time.
+
+Before the web login can be used, set the one account's password once:
+`uv run python scripts/create_account.py --username <you> --password <...>`.
+Against the production volume, run it via
+`railway run python scripts/create_account.py --username <you> --password <...>`.
 
 ## Deliberately out of scope
 
