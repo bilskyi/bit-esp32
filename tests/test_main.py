@@ -175,6 +175,25 @@ def test_memory_is_scoped_per_device():
     assert listed == []
 
 
+def test_memory_reachable_via_login_cookie_with_no_bearer_token():
+    with client(device_token="s3cret") as c:
+        c.post("/login", json={"username": "test", "password": "test123"})
+        r = c.get("/memory/default")
+    assert r.status_code == 200
+
+
+def test_memory_still_reachable_via_bearer_token_with_no_login():
+    with client(device_token="s3cret") as c:
+        r = c.get("/memory/default", headers={"Authorization": "Bearer s3cret"})
+    assert r.status_code == 200
+
+
+def test_memory_rejects_neither_credential():
+    with client(device_token="s3cret") as c:
+        r = c.get("/memory/default")
+    assert r.status_code == 401
+
+
 def test_memory_ui_is_served_with_no_token_needed():
     """The page itself carries no data; only its own fetch calls are gated."""
     with client(device_token="s3cret") as c:

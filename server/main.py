@@ -173,6 +173,13 @@ def create_app(
         if not request.session.get("user"):
             raise HTTPException(status_code=401, detail="unauthorized")
 
+    async def require_token_or_login(request: Request, authorization: str = Header(default="")) -> None:
+        if _token_ok(authorization, settings):
+            return
+        if request.session.get("user"):
+            return
+        raise HTTPException(status_code=401, detail="unauthorized")
+
     @app.get("/healthz")
     async def healthz() -> dict:
         return {"status": "ok", "auth": settings.auth_required}
@@ -195,23 +202,23 @@ def create_app(
         # own fetch calls hit the endpoints below, which do check the token.
         return _MEMORY_UI_HTML
 
-    @app.get("/memory/{device_id}", dependencies=[Depends(require_token)])
+    @app.get("/memory/{device_id}", dependencies=[Depends(require_token_or_login)])
     async def list_memory(device_id: str) -> list[dict]:
         return await app.state.store.list_memory(device_id)
 
-    @app.post("/memory/{device_id}", dependencies=[Depends(require_token)])
+    @app.post("/memory/{device_id}", dependencies=[Depends(require_token_or_login)])
     async def add_memory(device_id: str, body: MemoryIn) -> dict:
         vector = await app.state.embedder.embed_documents([body.text])
         fact_id = await app.state.store.add_user_fact(device_id, body.text, vector[0])
         return {"id": fact_id}
 
-    @app.delete("/memory/{device_id}/{fact_id}", dependencies=[Depends(require_token)])
+    @app.delete("/memory/{device_id}/{fact_id}", dependencies=[Depends(require_token_or_login)])
     async def delete_memory_item(device_id: str, fact_id: int) -> dict:
         if not await app.state.store.delete_fact(device_id, fact_id):
             raise HTTPException(status_code=404, detail="not found")
         return {"status": "ok"}
 
-    @app.delete("/memory/{device_id}", dependencies=[Depends(require_token)])
+    @app.delete("/memory/{device_id}", dependencies=[Depends(require_token_or_login)])
     async def clear_memory(device_id: str) -> dict:
         await app.state.store.forget(device_id)
         return {"status": "ok"}
