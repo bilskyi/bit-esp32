@@ -69,9 +69,10 @@ class Settings(BaseSettings):
     device_token: str = ""
 
     # Signs the web login's session cookie. Must be set on Railway before
-    # this deploys, same category as DEVICE_TOKEN and GROQ_API_KEY. Starlette
-    # will still sign cookies with an empty key (fine for local dev and
-    # tests), just not securely.
+    # this deploys, same category as DEVICE_TOKEN and GROQ_API_KEY. Left
+    # empty, the app signs with a random key generated once per process
+    # start (see main.py) rather than a fixed fallback - fine for local dev
+    # and tests, but existing sessions won't survive a restart.
     session_secret_key: str = ""
 
     sample_rate: int = 16000
