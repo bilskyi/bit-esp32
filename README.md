@@ -58,6 +58,7 @@ frames are JSON control messages.
 | device → server | `{"type":"start"}` | button pressed, audio follows |
 | device → server | binary | PCM chunks, sent *while* the button is held |
 | device → server | `{"type":"end"}` | button released, utterance complete |
+| device → server | `{"type":"text","value":"..."}` | typed question, no audio to follow |
 | server → device | `{"type":"state","value":"listening\|thinking\|speaking\|idle"}` | drives the LED |
 | server → device | binary | PCM chunks of the reply |
 | server → device | `{"type":"done"}` | playback finished, re-arm mute |
@@ -73,6 +74,10 @@ Authorization: Bearer <DEVICE_TOKEN>
 
 Leaving `DEVICE_TOKEN` empty disables the check. Set it before the URL is
 public: an open socket lets anyone drain the Groq free tier.
+
+A typed question (`"text"`) gets a written `{"type":"reply","value":"..."}`
+reply, streamed sentence by sentence like TTS is - no audio is synthesised
+for it. A spoken question still gets a spoken reply, exactly as before.
 
 Multiple devices are separated by `?device=<id>`, which scopes their memory.
 

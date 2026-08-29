@@ -269,6 +269,8 @@ def create_app(
                     await session.on_end()
                 elif kind == "cancel":
                     await session.on_cancel()
+                elif kind == "text":
+                    await session.on_text(control.get("value", ""))
                 else:
                     log.debug("ignoring control message %r", kind)
         except WebSocketDisconnect:

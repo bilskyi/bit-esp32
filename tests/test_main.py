@@ -96,6 +96,23 @@ def test_malformed_json_does_not_kill_the_connection():
         assert json.loads(ws.receive_text())["value"] == "listening"
 
 
+def test_text_frame_gets_a_written_reply_with_no_audio():
+    with client() as c, c.websocket_connect("/ws") as ws:
+        ws.send_text(json.dumps({"type": "text", "value": "Привіт!"}))
+        seen, audio_frames = [], 0
+        for _ in range(20):
+            message = ws.receive()
+            if message.get("bytes") is not None:
+                audio_frames += 1
+                continue
+            payload = json.loads(message["text"])
+            seen.append(payload)
+            if payload.get("value") == "idle":
+                break
+    assert audio_frames == 0
+    assert any(p.get("type") == "reply" for p in seen)
+
+
 # ---------------------------------------------------------- memory / customization API
 
 def test_memory_list_is_open_when_no_token_is_configured():
