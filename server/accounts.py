@@ -5,6 +5,8 @@ and usage, a different bounded concern from who is allowed to log in. Same
 SQLite file, same Store.__init__(url) pattern, its own table.
 """
 
+import asyncio
+
 import bcrypt
 from sqlalchemy import Integer, String, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -38,7 +40,9 @@ class Accounts:
 
     async def create_user(self, username: str, password: str) -> None:
         """Create the account, or replace the password if it already exists."""
-        password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("ascii")
+        password_hash = await asyncio.to_thread(
+            lambda: bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("ascii")
+        )
         async with self._session() as s:
             existing = (await s.scalars(select(User).where(User.username == username))).first()
             if existing is not None:
@@ -53,6 +57,8 @@ class Accounts:
             if user is None:
                 # Hash something anyway - a real username and an unknown one
                 # should not be distinguishable by response time.
-                bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt())
+                await asyncio.to_thread(lambda: bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()))
                 return False
-            return bcrypt.checkpw(password.encode("utf-8"), user.password_hash.encode("ascii"))
+            return await asyncio.to_thread(
+                lambda: bcrypt.checkpw(password.encode("utf-8"), user.password_hash.encode("ascii"))
+            )
