@@ -34,3 +34,14 @@ class TTSProvider(Protocol):
     def synthesise(self, text: str, voice: str) -> AsyncIterator[bytes]:
         """Yield 16 kHz 16-bit mono little-endian PCM for `text`."""
         ...
+
+
+class Embedder(Protocol):
+    """Two methods, not one: multilingual-e5-family models are asymmetric —
+    a stored fact and a live question are embedded with different prefixes,
+    so mixing them up quietly makes retrieval worse rather than raising.
+    """
+
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]: ...
+
+    async def embed_query(self, text: str) -> list[float]: ...

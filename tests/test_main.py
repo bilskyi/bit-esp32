@@ -7,17 +7,18 @@ from starlette.websockets import WebSocketDisconnect
 
 from server.config import Settings
 from server.main import create_app
-from tests.fakes import FakeLLM, FakeSTT, FakeStore, FakeTTS
+from tests.fakes import FakeEmbedder, FakeLLM, FakeSTT, FakeStore, FakeTTS
 
 
 @contextmanager
-def client(**kw):
+def client(store=None, **kw):
     app = create_app(
         settings=Settings(_env_file=None, **kw),
         stt=FakeSTT(),
         llm=FakeLLM("Все добре."),
         tts=FakeTTS(),
-        store=FakeStore(),
+        store=store or FakeStore(),
+        embedder=FakeEmbedder(),
     )
     with TestClient(app) as c:
         yield c
@@ -92,3 +93,65 @@ def test_malformed_json_does_not_kill_the_connection():
         ws.send_text("{not json")
         ws.send_text(json.dumps({"type": "start"}))
         assert json.loads(ws.receive_text())["value"] == "listening"
+
+
+# ---------------------------------------------------------- memory / customization API
+
+def test_memory_list_is_open_when_no_token_is_configured():
+    with client() as c:
+        r = c.get("/memory/default")
+    assert r.status_code == 200 and r.json() == []
+
+
+def test_memory_list_requires_auth_when_configured():
+    with client(device_token="s3cret") as c:
+        r = c.get("/memory/default")
+    assert r.status_code == 401
+
+
+def test_memory_list_accepts_the_right_token():
+    with client(device_token="s3cret") as c:
+        r = c.get("/memory/default", headers={"Authorization": "Bearer s3cret"})
+    assert r.status_code == 200
+
+
+def test_posting_a_standing_instruction_makes_it_listable():
+    with client() as c:
+        added = c.post("/memory/default", json={"text": "Always answer informally"})
+        assert added.status_code == 200
+        listed = c.get("/memory/default").json()
+    assert any(
+        item["text"] == "Always answer informally" and item["source"] == "user"
+        for item in listed
+    )
+
+
+def test_deleting_one_entry_leaves_the_others():
+    with client() as c:
+        keep = c.post("/memory/default", json={"text": "keep me"}).json()["id"]
+        drop = c.post("/memory/default", json={"text": "drop me"}).json()["id"]
+        c.delete(f"/memory/default/{drop}")
+        listed = c.get("/memory/default").json()
+    ids = {item["id"] for item in listed}
+    assert keep in ids and drop not in ids
+
+
+def test_deleting_an_unknown_entry_is_a_404():
+    with client() as c:
+        r = c.delete("/memory/default/999")
+    assert r.status_code == 404
+
+
+def test_clearing_a_device_removes_everything():
+    with client() as c:
+        c.post("/memory/default", json={"text": "temporary"})
+        c.delete("/memory/default")
+        listed = c.get("/memory/default").json()
+    assert listed == []
+
+
+def test_memory_is_scoped_per_device():
+    with client() as c:
+        c.post("/memory/dev1", json={"text": "dev1 only"})
+        listed = c.get("/memory/dev2").json()
+    assert listed == []

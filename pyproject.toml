@@ -12,6 +12,7 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0",
     "aiosqlite>=0.20",
     "av>=18.1.0",
+    "fastembed>=0.5",
 ]
 
 [dependency-groups]

@@ -5,7 +5,7 @@ import pytest
 
 from server.config import Settings
 from server.session import Session, State
-from tests.fakes import FakeLLM, FakeSTT, FakeTransport, FakeTTS, SlowTTS
+from tests.fakes import FakeEmbedder, FakeLLM, FakeSTT, FakeTransport, FakeTTS, SlowTTS
 
 
 def build(stt=None, llm=None, tts=None, **kw):
@@ -16,6 +16,7 @@ def build(stt=None, llm=None, tts=None, **kw):
         llm=llm or FakeLLM(),
         tts=tts or FakeTTS(),
         settings=Settings(_env_file=None, **kw),
+        embedder=FakeEmbedder(),
     )
     return session, transport
 
@@ -157,10 +158,39 @@ async def test_remembered_facts_reach_the_system_prompt():
         tts=FakeTTS(),
         settings=Settings(_env_file=None),
         store=FakeStore(["Lives in Kyiv"]),
+        embedder=FakeEmbedder(),
     )
     await session.load_memory()
     await utter(session)
     assert "Lives in Kyiv" in llm.prompts[0][0]["content"]
+
+
+async def test_relevant_facts_are_looked_up_per_question_not_once_at_connect():
+    """Retrieval has to happen after the transcript exists - there is no
+    question to rank against at connection time."""
+    from tests.fakes import FakeStore
+
+    llm = FakeLLM()
+    store = FakeStore(["Owns a cat named Musya"])
+    session, _ = build(llm=llm)
+    session.store = store
+
+    await session.load_memory()
+    assert session.facts == [], "nothing has been retrieved before the first question"
+    await utter(session)
+    assert "Owns a cat named Musya" in llm.prompts[0][0]["content"]
+
+
+async def test_standing_instructions_reach_every_reply_regardless_of_the_question():
+    from tests.fakes import FakeStore
+
+    llm = FakeLLM()
+    session, _ = build(llm=llm)
+    session.store = FakeStore(standing=["Always answer informally"])
+
+    await session.load_memory()
+    await utter(session)
+    assert "Always answer informally" in llm.prompts[0][0]["content"]
 
 
 async def test_finish_extracts_and_stores_facts():

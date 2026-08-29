@@ -6,6 +6,7 @@ without an API key. Never enable this in production; it does not transcribe.
 """
 
 import asyncio
+import hashlib
 import json
 from typing import AsyncIterator
 
@@ -42,3 +43,25 @@ class MockLLM:
     async def complete(self, messages: list[dict], max_tokens: int) -> str:
         # The only caller is fact extraction, which wants a JSON array.
         return json.dumps(["Uses a mock LLM for local testing"], ensure_ascii=False)
+
+
+class MockEmbedder:
+    """No model, no download, no network - a hash is not a real embedding,
+    but PROVIDER_MODE=mock only has to exercise the plumbing.
+
+    hash() is randomised per process (PYTHONHASHSEED), so it is unusable
+    here; md5 is not.
+    """
+
+    _DIMS = 8
+
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [self._vec(t) for t in texts]
+
+    async def embed_query(self, text: str) -> list[float]:
+        return self._vec(text)
+
+    @classmethod
+    def _vec(cls, text: str) -> list[float]:
+        digest = hashlib.md5(text.encode("utf-8")).digest()
+        return [b / 255.0 for b in digest[: cls._DIMS]]

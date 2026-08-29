@@ -40,7 +40,9 @@ class State(str, Enum):
 
 
 class Session:
-    def __init__(self, transport, stt, llm, tts, settings, store=None, device_id="default"):
+    def __init__(
+        self, transport, stt, llm, tts, settings, store=None, device_id="default", embedder=None
+    ):
         self.transport = transport
         self.stt = stt
         self.llm = llm
@@ -48,10 +50,12 @@ class Session:
         self.settings = settings
         self.store = store
         self.device_id = device_id
+        self.embedder = embedder
 
         self.state = State.IDLE
         self.history: list[dict] = []
         self.facts: list[str] = []
+        self.standing_instructions: list[str] = []
         self.usage = Usage()
 
         self._buf = bytearray()
@@ -62,7 +66,7 @@ class Session:
 
     async def load_memory(self) -> None:
         if self.store is not None:
-            self.facts = await self.store.recent_facts(self.device_id)
+            self.standing_instructions = await self.store.user_facts(self.device_id)
 
     # -- events from the device -------------------------------------------
 
@@ -168,7 +172,8 @@ class Session:
         if self.history:
             facts = await extract_facts(self.llm, self.history)
             if facts:
-                await self.store.add_facts(self.device_id, facts)
+                embeddings = await self.embedder.embed_documents(facts)
+                await self.store.add_facts(self.device_id, facts, embeddings)
         if not self.usage.is_empty:
             await self.store.log_usage(self.device_id, self.usage)
 
@@ -200,8 +205,17 @@ class Session:
             return
         log.info("stt %.0f ms: %s", (time.perf_counter() - started) * 1000, text)
 
+        if self.store is not None:
+            query_vector = await self.embedder.embed_query(text)
+            self.facts = await self.store.relevant_facts(
+                self.device_id, query_vector, limit=self.settings.relevant_facts_limit
+            )
+
         messages = build_messages(
-            build_system_prompt(self.facts),
+            # persona.py takes one flat list; standing instructions come
+            # first so a relevant fact never pushes a user's own rule out of
+            # the prompt if both were ever truncated upstream.
+            build_system_prompt(self.standing_instructions + self.facts),
             self.history,
             text,
             self.settings.max_context_tokens,

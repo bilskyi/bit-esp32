@@ -58,3 +58,112 @@ async def test_usage_is_persisted(store):
 async def test_init_is_safe_to_run_twice(store):
     await store.init()
     assert await store.recent_facts("dev1") == []
+
+
+# --------------------------------------------------------- ranked retrieval
+
+async def test_relevant_facts_ranks_by_similarity_not_recency(store):
+    """The one test that would fail against the old newest-first behaviour."""
+    await store.add_facts("dev1", ["Owns a cat named Musya"], embeddings=[[1.0, 0.0]])
+    await store.add_facts("dev1", ["Lives in Kyiv"], embeddings=[[0.0, 1.0]])  # added later
+    result = await store.relevant_facts("dev1", [0.9, 0.1], limit=1)
+    assert result == ["Owns a cat named Musya"], "the older, more similar fact should win"
+
+
+async def test_relevant_facts_respects_the_limit(store):
+    await store.add_facts(
+        "dev1",
+        [f"fact {i}" for i in range(5)],
+        embeddings=[[float(i), 1.0] for i in range(5)],
+    )
+    assert len(await store.relevant_facts("dev1", [2.0, 1.0], limit=2)) == 2
+
+
+async def test_relevant_facts_ignores_other_devices(store):
+    await store.add_facts("dev1", ["dev1 fact"], embeddings=[[1.0, 0.0]])
+    await store.add_facts("dev2", ["dev2 fact"], embeddings=[[1.0, 0.0]])
+    assert await store.relevant_facts("dev1", [1.0, 0.0]) == ["dev1 fact"]
+
+
+async def test_relevant_facts_skips_rows_with_no_embedding(store):
+    """A fact stored before embeddings existed must not crash retrieval."""
+    await store.add_facts("dev1", ["no vector yet"])  # embeddings=None
+    assert await store.relevant_facts("dev1", [1.0, 0.0]) == []
+
+
+async def test_relevant_facts_with_no_query_is_empty(store):
+    await store.add_facts("dev1", ["something"], embeddings=[[1.0, 0.0]])
+    assert await store.relevant_facts("dev1", None) == []
+
+
+# --------------------------------------------------- user-authored standing instructions
+
+async def test_user_facts_are_empty_by_default(store):
+    assert await store.user_facts("dev1") == []
+
+
+async def test_add_user_fact_makes_it_a_standing_instruction(store):
+    await store.add_user_fact("dev1", "Always answer informally")
+    assert await store.user_facts("dev1") == ["Always answer informally"]
+
+
+async def test_user_facts_do_not_appear_in_auto_retrieval(store):
+    """Standing instructions are never ranked - they always apply, so they
+    must not compete with auto facts for the top-K slots."""
+    await store.add_user_fact("dev1", "Always answer informally", embedding=[1.0, 0.0])
+    assert await store.relevant_facts("dev1", [1.0, 0.0]) == []
+
+
+async def test_list_memory_shows_both_kinds_with_their_source(store):
+    await store.add_facts("dev1", ["An auto fact"], embeddings=[[1.0, 0.0]])
+    await store.add_user_fact("dev1", "A user instruction")
+    rows = await store.list_memory("dev1")
+    sources = {r["text"]: r["source"] for r in rows}
+    assert sources == {"An auto fact": "auto", "A user instruction": "user"}
+
+
+async def test_delete_fact_removes_only_that_row(store):
+    keep_id = await store.add_user_fact("dev1", "keep me")
+    drop_id = await store.add_user_fact("dev1", "drop me")
+    assert await store.delete_fact("dev1", drop_id) is True
+    remaining = {r["id"] for r in await store.list_memory("dev1")}
+    assert remaining == {keep_id}
+
+
+async def test_delete_fact_returns_false_for_an_unknown_id(store):
+    assert await store.delete_fact("dev1", 999) is False
+
+
+async def test_delete_fact_is_scoped_per_device(store):
+    other_id = await store.add_user_fact("dev2", "belongs to dev2")
+    assert await store.delete_fact("dev1", other_id) is False
+    assert await store.user_facts("dev2") == ["belongs to dev2"]
+
+
+# ------------------------------------------------------------ embedding backfill
+
+async def test_backfill_embeddings_fills_only_missing_rows(store):
+    await store.add_facts("dev1", ["already embedded"], embeddings=[[1.0, 0.0]])
+    await store.add_facts("dev1", ["needs embedding"])  # embeddings=None
+
+    calls: list[list[str]] = []
+
+    async def embed(texts: list[str]) -> list[list[float]]:
+        calls.append(texts)
+        return [[0.5, 0.5] for _ in texts]
+
+    updated = await store.backfill_embeddings(embed)
+    assert updated == 1
+    assert calls == [["needs embedding"]]
+    # Now retrievable, proving the write actually landed.
+    assert "needs embedding" in await store.relevant_facts("dev1", [0.5, 0.5])
+
+
+async def test_backfill_embeddings_is_idempotent(store):
+    await store.add_facts("dev1", ["needs embedding"])
+
+    async def embed(texts: list[str]) -> list[list[float]]:
+        return [[1.0, 0.0] for _ in texts]
+
+    assert await store.backfill_embeddings(embed) == 1
+    assert await store.backfill_embeddings(embed) == 0

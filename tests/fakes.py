@@ -63,17 +63,59 @@ class FakeTTS:
         return [v for _, v in self.spoken]
 
 
+class FakeEmbedder:
+    """No real embedding math - ranking correctness is tested against Store
+    directly, with literal vectors. This only has to satisfy the interface."""
+
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return [[0.0] for _ in texts]
+
+    async def embed_query(self, text: str) -> list[float]:
+        return [0.0]
+
+
 class FakeStore:
-    def __init__(self, facts: list[str] | None = None) -> None:
+    def __init__(self, facts: list[str] | None = None, standing: list[str] | None = None) -> None:
         self.facts = {"default": list(facts or [])}
+        self.standing = {"default": list(standing or [])}
         self.added: list[tuple[str, list[str]]] = []
         self.usage_logged: list = []
+        self._memory: dict[str, list[dict]] = {}
+        self._next_id = 1
 
     async def recent_facts(self, device_id: str, limit: int = 20) -> list[str]:
         return list(self.facts.get(device_id, []))
 
-    async def add_facts(self, device_id: str, facts: list[str]) -> None:
+    async def relevant_facts(self, device_id: str, query_embedding, limit: int = 6) -> list[str]:
+        # No ranking here: the fake ignores the query and returns whatever
+        # was seeded, so pipeline tests don't need real embedding math.
+        return list(self.facts.get(device_id, []))[:limit]
+
+    async def user_facts(self, device_id: str) -> list[str]:
+        return list(self.standing.get(device_id, []))
+
+    async def add_facts(self, device_id: str, facts: list[str], embeddings=None) -> None:
         self.added.append((device_id, facts))
+
+    async def add_user_fact(self, device_id: str, text: str, embedding=None) -> int:
+        entry = {"id": self._next_id, "text": text, "source": "user", "created_at": None}
+        self._next_id += 1
+        self._memory.setdefault(device_id, []).append(entry)
+        return entry["id"]
+
+    async def list_memory(self, device_id: str) -> list[dict]:
+        return list(self._memory.get(device_id, []))
+
+    async def delete_fact(self, device_id: str, fact_id: int) -> bool:
+        items = self._memory.get(device_id, [])
+        before = len(items)
+        self._memory[device_id] = [i for i in items if i["id"] != fact_id]
+        return len(self._memory[device_id]) != before
+
+    async def forget(self, device_id: str) -> None:
+        self.facts[device_id] = []
+        self.standing[device_id] = []
+        self._memory[device_id] = []
 
     async def log_usage(self, device_id: str, usage) -> None:
         self.usage_logged.append((device_id, usage))

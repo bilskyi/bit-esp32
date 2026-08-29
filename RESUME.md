@@ -393,6 +393,78 @@ the last HTTP request.
 
 ---
 
+## Memory retrieval and customization
+
+Two gaps closed: facts were unranked (`recent_facts`, newest-first, no
+notion of relevance to the current question) and there was no way to see or
+add to what the assistant remembers short of editing `persona.py` and
+redeploying. Both closed in the same schema change: `Fact` gained a
+`source` column. `"auto"` facts (today's end-of-session extraction) are now
+ranked by embedding similarity to the live question, every turn. `"user"`
+facts are standing instructions typed through a new HTTP API and are never
+ranked — a rule like "always answer informally" is not a fact to judge for
+relevance.
+
+**Embeddings are local:** `fastembed` (ONNX Runtime, no PyTorch) — free
+forever, no external account, no per-request cost. `server/memory/store.py`
+still imports nothing from it; embedding happens in `session.py`, Store
+only stores and ranks vectors it is handed, in pure Python (`struct.pack`
+into a `BLOB`, cosine similarity by hand) — a vector database would be
+solving a problem this device's memory will not reach the size of.
+
+**The model name was guessed wrong once, and checked before it shipped.**
+`intfloat/multilingual-e5-small`, the obvious pick from general knowledge of
+what covers uk/ru/en cheaply, is not in this fastembed version's registry —
+`TextEmbedding(...)` raises `ValueError` naming the supported list.
+`multilingual-e5-large` is there but 2.24 GB, too big for Railway's memory
+ceiling. `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` is
+what actually shipped: 0.22 GB quantized, and — per fastembed's own
+registry entry — does not need the query/passage prefix e5 models do, so
+`FastEmbedEmbedder` applies none. `Embedder` still has two methods
+(`embed_documents`/`embed_query`) rather than one, because that split is
+what makes a future asymmetric model a one-file change instead of a
+call-site hunt.
+
+**Verified, real model, not mocked:** loaded once outside the test suite
+and asked to rank two facts against two questions in uk/ru mixed with the
+literal Ukrainian words used elsewhere in this project -
+`Розкажи про мого кота` against "Has a cat named Musya" scored 0.75,
+against "Lives in Kyiv" scored 0.145; `Де я живу?` scored 0.303 against
+the Kyiv fact and 0.057 against the cat fact. Ordering is right both ways
+and the margins are not close.
+
+**Verified since, inside the real app, real Groq keys, two real turns on a
+fresh scratch database.** Turn one, real STT: `Мене звати Соломія, я живу у
+Чернівцях.` Extraction stored three auto facts, each embedded for real -
+confirmed in the database directly, not inferred: `length(embedding)` is
+1536 bytes for all three, exactly 384 floats. A **second, independent**
+connection then asked `У якому месте я живу?` (Whisper's own transcription,
+typo and all) and the real model answered `Ти живеш у Чернівцях.` - correct,
+and only reachable through retrieval, since nothing in that second
+session's history mentioned the city. `EMBEDDING_CACHE_DIR` also checked
+for real: pointed at a scratch directory, the model landed there (240 MB
+including HF's own metadata, not just the 0.22 GB model file), so a second
+boot would not redownload it.
+
+**Deployed and verified against the real Railway volume, 29 Aug.** By the
+time this shipped the volume held seven pre-existing facts, not one - real
+traffic had accumulated overnight (see the live conversations in that day's
+`railway logs`, none of them mine). `backfill_embeddings` ran once at boot
+and gave all seven real embeddings with no error. Asked the live device's
+own endpoint `Чим я цікавлюсь і якою мовою мені відповідати?`, the real
+reply was `Ви цікавитеся програмуванням і любите жарти. Відповідати можна
+українською...` - both halves correct, and both came from facts that
+existed **before this feature did**: `backfill_embeddings` is what made
+them reachable at all.
+
+`healthcheckTimeout` had to move from 30 to 120 first: the model loads
+before `/healthz` can answer, and a cold download measured up to 36 s
+locally. Turned out not to matter on Railway's own network - the deployed
+container fetched all 5 files in 2 s - but 30 s was one slow network away
+from failing the health check and rolling the deploy back, so the bump
+stays. `EMBEDDING_CACHE_DIR=/data/fastembed_cache` is set on Railway now,
+not just proven locally.
+
 ## Agreed next, in order
 
 ### 1. Build-time switch between LAN and cloud — **answered, not dropped**

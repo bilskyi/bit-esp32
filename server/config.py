@@ -93,6 +93,18 @@ class Settings(BaseSettings):
     voice_ru_alt: str = "ru-RU-SvetlanaNeural"
     voice_en_alt: str = "en-US-AvaNeural"
 
+    # Covers uk/ru/en - this project's three languages - as ONNX via
+    # fastembed, so no torch and no paid API. 0.22 GB quantized; the only
+    # multilingual model in fastembed's registry small enough for Railway's
+    # memory ceiling (multilingual-e5-large is 2.24 GB - checked, not guessed).
+    embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    # Empty uses fastembed's own cache location. On Railway, point this at
+    # the same volume the database already uses (e.g. /data/fastembed_cache)
+    # so a redeploy does not re-download the model.
+    embedding_cache_dir: str = ""
+    # How many auto-extracted facts the ranked retrieval hands to the prompt.
+    relevant_facts_limit: int = 6
+
     @property
     def max_utterance_bytes(self) -> int:
         """Hard ceiling on one buffered utterance, in bytes of 16-bit PCM."""

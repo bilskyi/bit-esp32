@@ -4,7 +4,13 @@ builder = "nixpacks"
 [deploy]
 startCommand = "uvicorn server.main:app --host 0.0.0.0 --port $PORT"
 healthcheckPath = "/healthz"
-healthcheckTimeout = 30
+# The embedding model loads before the app accepts any connection, healthz
+# included. Measured locally: a cold download of the ~0.22 GB quantized
+# model took up to 36 s on its own. 30 s was fine before that dependency
+# existed; it is not anymore. EMBEDDING_CACHE_DIR points at the volume, so
+# this cost is paid once, not on every redeploy - but the first boot after
+# this change still pays it.
+healthcheckTimeout = 120
 restartPolicyType = "on_failure"
 
 # SQLite lives on disk. Without a volume mounted at /data the memory database

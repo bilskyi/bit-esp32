@@ -46,7 +46,7 @@ For the real pipeline, put a Groq key in `.env` and drop `PROVIDER_MODE`.
 uv run pytest
 ```
 
-118 tests, no network, no hardware, under a second.
+247 tests, no network, no hardware, under ten seconds.
 
 ## Protocol
 
@@ -86,6 +86,31 @@ the latency budget is won.
 The voice is chosen from the *first* sentence and held for the rest of the
 reply — detecting per sentence would switch voice mid-answer, which is audible.
 
+## Memory and customization
+
+Two kinds of memory, told apart by who put them there:
+
+- **Auto facts** — extracted by the LLM at the end of every session (`memory/summarise.py`), embedded, and ranked against the live question each turn (`Store.relevant_facts`). Real cosine-similarity retrieval, not just "the last 20" — but done in pure Python over a `BLOB` column, not a vector database, because a personal device's memory never reaches the row count where that would pay for itself.
+- **Standing instructions** — typed by the user, e.g. "always answer informally". Never ranked: they apply every turn, in full.
+
+Embeddings are local: `fastembed` (ONNX Runtime, no PyTorch) with
+`paraphrase-multilingual-MiniLM-L12-v2` (~0.22 GB, covers uk/ru/en). No paid
+API, no external account, no per-request cost or rate limit.
+
+An HTTP API manages both, behind the same `DEVICE_TOKEN` bearer scheme as
+`/ws` — one shared secret, not per-device, same as the WebSocket:
+
+| Method | Path | Does |
+|---|---|---|
+| `GET` | `/memory/{device_id}` | list everything remembered, with its source |
+| `POST` | `/memory/{device_id}` | add a standing instruction (`{"text": "..."}`) |
+| `DELETE` | `/memory/{device_id}/{fact_id}` | remove one entry |
+| `DELETE` | `/memory/{device_id}` | wipe a device's memory entirely |
+
+`RELEVANT_FACTS_LIMIT` (default 6) caps how many auto facts reach the prompt
+per turn. `EMBEDDING_CACHE_DIR` should point at the same Railway volume the
+database uses, or every redeploy re-downloads the model.
+
 ## Layout
 
 ```
@@ -100,14 +125,15 @@ server/
   costs.py             per-session usage accounting
   config.py            pydantic-settings
   providers/
-    base.py            STTProvider, TTSProvider, LLMProvider protocols
+    base.py            STTProvider, TTSProvider, LLMProvider, Embedder protocols
     groq_stt.py        whisper-large-v3-turbo
     groq_llm.py        chat completion, streaming
     edge_tts.py        edge-tts + inline decode to PCM
+    embeddings.py      fastembed, local, no torch
     mock.py            offline stand-ins
     _retry.py          shared 429/5xx backoff
   memory/
-    store.py           SQLAlchemy 2.0 async, SQLite
+    store.py           SQLAlchemy 2.0 async, SQLite, cosine similarity in Python
     summarise.py       end-of-session fact extraction
 ```
 
