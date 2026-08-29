@@ -408,3 +408,27 @@ async def test_an_utterance_long_enough_to_be_speech_still_gets_through():
     two_seconds = b"\x00\x00" * (session.settings.sample_rate * 2)
     await session._respond(two_seconds)
     assert stt.received == [len(two_seconds)]
+
+
+async def test_default_style_is_esp32():
+    from server.persona import ESP32
+
+    session, _ = build()
+    assert session.style is ESP32
+
+
+async def test_web_style_reaches_the_system_prompt():
+    from server.persona import WEB
+
+    llm = FakeLLM()
+    session = Session(
+        transport=FakeTransport(),
+        stt=FakeSTT(),
+        llm=llm,
+        tts=FakeTTS(),
+        settings=Settings(_env_file=None),
+        embedder=FakeEmbedder(),
+        style=WEB,
+    )
+    await utter(session)
+    assert "markdown" in llm.prompts[0][0]["content"].lower()

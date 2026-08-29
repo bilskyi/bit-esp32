@@ -17,7 +17,7 @@ from server.codec import AdpcmDecoder, AdpcmEncoder
 from server.emotion import LeadingTag, from_text, strip_tags
 from server.lang import DEFAULT, detect_language, voice_for
 from server.memory.summarise import extract_facts
-from server.persona import build_system_prompt
+from server.persona import ESP32, build_system_prompt
 from server.sentences import SentenceSplitter
 
 log = logging.getLogger(__name__)
@@ -41,7 +41,8 @@ class State(str, Enum):
 
 class Session:
     def __init__(
-        self, transport, stt, llm, tts, settings, store=None, device_id="default", embedder=None
+        self, transport, stt, llm, tts, settings, store=None, device_id="default", embedder=None,
+        style=ESP32,
     ):
         self.transport = transport
         self.stt = stt
@@ -51,6 +52,7 @@ class Session:
         self.store = store
         self.device_id = device_id
         self.embedder = embedder
+        self.style = style
 
         self.state = State.IDLE
         self.history: list[dict] = []
@@ -215,7 +217,7 @@ class Session:
             # persona.py takes one flat list; standing instructions come
             # first so a relevant fact never pushes a user's own rule out of
             # the prompt if both were ever truncated upstream.
-            build_system_prompt(self.standing_instructions + self.facts),
+            build_system_prompt(self.standing_instructions + self.facts, self.style),
             self.history,
             text,
             self.settings.max_context_tokens,
