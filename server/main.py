@@ -6,6 +6,7 @@ messages. See the protocol section of the README.
 
 import json
 import logging
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -74,8 +75,16 @@ def create_app(
     injected = store is not None
     accounts_injected = accounts is not None
 
-    if not settings.session_secret_key:
-        log.warning("SESSION_SECRET_KEY is not set - session cookies are signed with an empty key")
+    # A fixed fallback key would mean anyone who has read this file can forge
+    # a session cookie the moment a real deploy forgets to set the real one.
+    # A random key generated once per process start closes that off entirely
+    # - the cost is every restart invalidates existing logins, which is an
+    # inconvenience, not a vulnerability.
+    session_secret_key = settings.session_secret_key
+    if not session_secret_key:
+        session_secret_key = secrets.token_hex(32)
+        log.warning("SESSION_SECRET_KEY is not set - using a random key for this process; "
+                    "existing sessions will not survive a restart")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -109,11 +118,17 @@ def create_app(
 
     app = FastAPI(title="voice-companion", lifespan=lifespan)
     app.state.settings = settings
-    # https_only=False: Railway terminates TLS at its edge and forwards to
-    # this container over plain HTTP, so the app itself never sees "https".
-    # Setting this True here would make the cookie fail to round-trip in
-    # production, not just in tests. A known simplification, not an oversight.
-    app.add_middleware(SessionMiddleware, secret_key=settings.session_secret_key or "dev-only-insecure-key")
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=session_secret_key,
+        # Railway terminates TLS at its edge and forwards to this container
+        # over plain HTTP, so the app itself never sees "https". Passing
+        # https_only=True here would make the cookie fail to round-trip in
+        # production, not just in tests - explicit False, not relying on
+        # Starlette's own default, so this stays true if that default ever
+        # changes.
+        https_only=False,
+    )
 
     async def require_token(authorization: str = Header(default="")) -> None:
         if not _token_ok(authorization, settings):
