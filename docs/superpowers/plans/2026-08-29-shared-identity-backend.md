@@ -35,8 +35,19 @@ built after this one, since it consumes the endpoints this plan produces.
   remain **byte-identical** to what it is before this plan — it was
   measured, per `RESUME.md`, and no task here may edit that string.
 - `bcrypt` is an approved new dependency (password hashing is a real place
-  to use a vetted library, not roll your own). No other new runtime
-  dependency is expected in this plan.
+  to use a vetted library, not roll your own). **Correction, found during
+  Task 2's review:** `starlette.middleware.sessions.SessionMiddleware`
+  requires `itsdangerous` to sign cookies, and it was not already present —
+  this plan's original claim that session cookies cost "zero new
+  dependencies" was wrong. `itsdangerous` is also an approved dependency;
+  no others are expected.
+- If `SESSION_SECRET_KEY` is unset, the app generates a random key per
+  process start (`secrets.token_hex(32)`) rather than falling back to any
+  fixed value. A fixed fallback — even one only meant for local dev — is a
+  forgeable-session vulnerability the moment it ships in a real deploy that
+  forgot to set the real key, since the fallback string is sitting in the
+  source. A random per-process key means a forgotten env var costs
+  everyone's session on the next restart, not a silent account takeover.
 - Live, real-time cross-surface conversation sync is explicitly out of
   scope here — only long-term facts and per-surface style are shared.
 - Every new endpoint that edits or reads personal data (settings, style)
@@ -351,7 +362,18 @@ Expected: FAIL — `TypeError: create_app() got an unexpected keyword argument '
 
 - [ ] **Step 5: Wire `Accounts`, `SessionMiddleware`, and the login routes into `server/main.py`**
 
-Update the imports at the top of `server/main.py`:
+Add `import secrets` to the existing stdlib import block at the very top of
+`server/main.py` (alongside `import json`, `import logging`):
+
+```python
+import json
+import logging
+import secrets
+from contextlib import asynccontextmanager
+from pathlib import Path
+```
+
+Update the rest of the imports:
 
 ```python
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -385,8 +407,16 @@ def create_app(
     injected = store is not None
     accounts_injected = accounts is not None
 
-    if not settings.session_secret_key:
-        log.warning("SESSION_SECRET_KEY is not set - session cookies are signed with an empty key")
+    # A fixed fallback key would mean anyone who has read this file can forge
+    # a session cookie the moment a real deploy forgets to set the real one.
+    # A random key generated once per process start closes that off entirely
+    # - the cost is every restart invalidates existing logins, which is an
+    # inconvenience, not a vulnerability.
+    session_secret_key = settings.session_secret_key
+    if not session_secret_key:
+        session_secret_key = secrets.token_hex(32)
+        log.warning("SESSION_SECRET_KEY is not set - using a random key for this process; "
+                    "existing sessions will not survive a restart")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -420,11 +450,17 @@ def create_app(
 
     app = FastAPI(title="voice-companion", lifespan=lifespan)
     app.state.settings = settings
-    # https_only=False: Railway terminates TLS at its edge and forwards to
-    # this container over plain HTTP, so the app itself never sees "https".
-    # Setting this True here would make the cookie fail to round-trip in
-    # production, not just in tests. A known simplification, not an oversight.
-    app.add_middleware(SessionMiddleware, secret_key=settings.session_secret_key or "dev-only-insecure-key")
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=session_secret_key,
+        # Railway terminates TLS at its edge and forwards to this container
+        # over plain HTTP, so the app itself never sees "https". Passing
+        # https_only=True here would make the cookie fail to round-trip in
+        # production, not just in tests - explicit False, not relying on
+        # Starlette's own default, so this stays true if that default ever
+        # changes.
+        https_only=False,
+    )
 ```
 
 Add the `require_login` dependency next to `require_token`:
