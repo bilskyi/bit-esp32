@@ -432,3 +432,49 @@ async def test_web_style_reaches_the_system_prompt():
     )
     await utter(session)
     assert "markdown" in llm.prompts[0][0]["content"].lower()
+
+
+# ------------------------------------------------------------ typed questions
+
+async def test_on_text_skips_stt_entirely():
+    stt = FakeSTT()
+    session, _ = build(stt=stt)
+    await session.on_text("Привіт!")
+    await session.wait_for_reply()
+    assert stt.received == []
+
+
+async def test_on_text_produces_a_written_reply_not_audio():
+    session, transport = build(llm=FakeLLM("Добре."))
+    await session.on_text("Привіт!")
+    await session.wait_for_reply()
+    assert transport.binary == []
+    replies = [m["value"] for m in transport.json if m.get("type") == "reply"]
+    assert replies == ["Добре."]
+
+
+async def test_on_text_state_sequence_has_no_listening_phase():
+    session, transport = build()
+    await session.on_text("Привіт!")
+    await session.wait_for_reply()
+    assert transport.states == ["thinking", "speaking", "idle"]
+
+
+async def test_on_text_interrupts_an_in_progress_reply():
+    tts = SlowTTS(chunks=50, delay=0.01)
+    session, _ = build(tts=tts)
+    await session.on_start()
+    await session.on_audio(b"\x00\x01" * 32000)
+    await session.on_end()
+    await asyncio.sleep(0.05)
+
+    await session.on_text("Ще одне питання")
+    assert session.state is State.THINKING
+
+
+async def test_on_text_does_not_count_tts_chars_or_audio_seconds():
+    session, _ = build(llm=FakeLLM("Добре."))
+    await session.on_text("Привіт!")
+    await session.wait_for_reply()
+    assert session.usage.audio_seconds == 0
+    assert session.usage.tts_chars == 0
