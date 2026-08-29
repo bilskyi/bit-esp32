@@ -167,7 +167,12 @@ class Session:
 
     async def on_text(self, text: str) -> None:
         """A typed question. No audio, no STT - it is already text."""
-        if self.state in (State.THINKING, State.SPEAKING):
+        if self.state is State.LISTENING:
+            dropped = len(self._buf)
+            self._cancel_watchdog()
+            self._buf.clear()
+            log.info("text arrived while listening: dropping %d B of audio in progress", dropped)
+        elif self.state in (State.THINKING, State.SPEAKING):
             await self.on_cancel()
         await self._set_state(State.THINKING)
         self._reply = asyncio.create_task(self._run_reply(lambda: self._answer(text, speak=False)))

@@ -499,3 +499,18 @@ async def test_on_text_does_not_count_tts_chars_or_audio_seconds():
     await session.wait_for_reply()
     assert session.usage.audio_seconds == 0
     assert session.usage.tts_chars == 0
+
+
+async def test_on_text_while_listening_discards_the_recording_and_logs_it(caplog):
+    session, transport = build()
+    await session.on_start()
+    await session.on_audio(b"\x00\x01" * 16000)
+    assert len(session._buf) > 0
+
+    with caplog.at_level("INFO"):
+        await session.on_text("typed instead")
+    await session.wait_for_reply()
+
+    assert len(session._buf) == 0
+    assert session._watchdog is None
+    assert any("dropping" in r.message for r in caplog.records)
