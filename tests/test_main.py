@@ -155,3 +155,21 @@ def test_memory_is_scoped_per_device():
         c.post("/memory/dev1", json={"text": "dev1 only"})
         listed = c.get("/memory/dev2").json()
     assert listed == []
+
+
+def test_memory_ui_is_served_with_no_token_needed():
+    """The page itself carries no data; only its own fetch calls are gated."""
+    with client(device_token="s3cret") as c:
+        r = c.get("/memory")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    assert "<html" in r.text.lower()
+
+
+def test_memory_ui_never_builds_fact_text_as_markup():
+    """XSS guard: the page must render fact text with textContent, not
+    innerHTML - a stray fact should never become live markup in a browser."""
+    with client() as c:
+        r = c.get("/memory")
+    assert "textContent = item.text" in r.text
+    assert "innerHTML = item.text" not in r.text

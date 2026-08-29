@@ -7,8 +7,10 @@ messages. See the protocol section of the README.
 import json
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from server.config import Settings
@@ -49,6 +51,10 @@ def _authorised(ws: WebSocket, settings: Settings) -> bool:
 
 class MemoryIn(BaseModel):
     text: str
+
+
+# Read once at import, not per request - it's a static file, not a template.
+_MEMORY_UI_HTML = (Path(__file__).parent / "static" / "memory.html").read_text()
 
 
 def create_app(settings=None, stt=None, llm=None, tts=None, store=None, embedder=None) -> FastAPI:
@@ -92,6 +98,12 @@ def create_app(settings=None, stt=None, llm=None, tts=None, store=None, embedder
     @app.get("/healthz")
     async def healthz() -> dict:
         return {"status": "ok", "auth": settings.auth_required}
+
+    @app.get("/memory", response_class=HTMLResponse)
+    async def memory_ui() -> str:
+        # The page itself carries no data - it only reveals anything once its
+        # own fetch calls hit the endpoints below, which do check the token.
+        return _MEMORY_UI_HTML
 
     @app.get("/memory/{device_id}", dependencies=[Depends(require_token)])
     async def list_memory(device_id: str) -> list[dict]:

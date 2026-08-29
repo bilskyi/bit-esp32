@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voice companion — memory</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f7f7f8;
+    --panel: #ffffff;
+    --text: #1c1c1e;
+    --muted: #6b6b70;
+    --border: #e1e1e4;
+    --accent: #3a63f0;
+    --danger: #c0392b;
+    --auto: #6b6b70;
+    --user: #1f7a3d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121214;
+      --panel: #1c1c1f;
+      --text: #eceded;
+      --muted: #9a9a9f;
+      --border: #303034;
+      --accent: #6d8cff;
+      --danger: #ff6b5e;
+      --auto: #9a9a9f;
+      --user: #52c77f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 1.5rem;
+  }
+  main {
+    max-width: 640px;
+    margin: 0 auto;
+  }
+  h1 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    margin: 0 0 1rem;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+  }
+  label {
+    display: block;
+    font-size: 0.75rem;
+    color: var(--muted);
+    margin-bottom: 0.25rem;
+  }
+  input[type=text], input[type=password] {
+    width: 100%;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text);
+    font-size: 0.9rem;
+  }
+  .row {
+    display: flex;
+    gap: 0.6rem;
+  }
+  .row > div { flex: 1; }
+  button {
+    padding: 0.5rem 0.9rem;
+    border: none;
+    border-radius: 6px;
+    background: var(--accent);
+    color: white;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  button.secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+  button.danger {
+    background: transparent;
+    color: var(--danger);
+    border: 1px solid var(--danger);
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+  .actions {
+    margin-top: 0.75rem;
+    display: flex;
+    gap: 0.5rem;
+  }
+  ul.memory {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+  ul.memory li {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.6rem 0;
+    border-bottom: 1px solid var(--border);
+  }
+  ul.memory li:last-child { border-bottom: none; }
+  .fact-text {
+    font-size: 0.9rem;
+    line-height: 1.35;
+    word-break: break-word;
+  }
+  .meta {
+    font-size: 0.72rem;
+    color: var(--muted);
+    margin-top: 0.15rem;
+  }
+  .badge {
+    display: inline-block;
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding: 0.1rem 0.4rem;
+    border-radius: 999px;
+    margin-right: 0.4rem;
+  }
+  .badge.auto { color: var(--auto); border: 1px solid var(--border); }
+  .badge.user { color: var(--user); border: 1px solid var(--user); }
+  .delete-btn {
+    background: transparent;
+    color: var(--muted);
+    border: none;
+    padding: 0.2rem 0.4rem;
+    font-size: 1rem;
+    line-height: 1;
+    flex-shrink: 0;
+  }
+  .delete-btn:hover { color: var(--danger); }
+  .empty {
+    color: var(--muted);
+    font-size: 0.85rem;
+    padding: 0.5rem 0;
+  }
+  .status {
+    font-size: 0.8rem;
+    margin-top: 0.6rem;
+    min-height: 1.1em;
+  }
+  .status.error { color: var(--danger); }
+  .status.ok { color: var(--user); }
+  form.add-form {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+  }
+  form.add-form input { flex: 1; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Voice companion — memory</h1>
+
+  <div class="panel">
+    <div class="row">
+      <div>
+        <label for="device-id">Device</label>
+        <input type="text" id="device-id" value="default">
+      </div>
+      <div>
+        <label for="token">Device token</label>
+        <input type="password" id="token" placeholder="leave blank if auth is off">
+      </div>
+    </div>
+    <div class="actions">
+      <button id="load-btn">Load</button>
+      <button id="clear-btn" class="danger">Clear all</button>
+    </div>
+    <div id="top-status" class="status"></div>
+  </div>
+
+  <div class="panel">
+    <ul class="memory" id="memory-list"></ul>
+    <div class="empty" id="empty-msg" hidden>Nothing remembered yet.</div>
+    <form class="add-form" id="add-form">
+      <input type="text" id="add-text" placeholder="Add a standing instruction, e.g. always answer informally" required>
+      <button type="submit">Add</button>
+    </form>
+    <div id="add-status" class="status"></div>
+  </div>
+</main>
+
+<script>
+(function () {
+  "use strict";
+
+  const deviceInput = document.getElementById("device-id");
+  const tokenInput = document.getElementById("token");
+  const loadBtn = document.getElementById("load-btn");
+  const clearBtn = document.getElementById("clear-btn");
+  const topStatus = document.getElementById("top-status");
+  const list = document.getElementById("memory-list");
+  const emptyMsg = document.getElementById("empty-msg");
+  const addForm = document.getElementById("add-form");
+  const addText = document.getElementById("add-text");
+  const addStatus = document.getElementById("add-status");
+
+  // Same-origin only: this page is served by the server whose memory it
+  // manages, so there is never a different host to point it at, and never a
+  // CORS request to configure.
+  const apiBase = "/memory";
+
+  deviceInput.value = localStorage.getItem("memoryUiDevice") || "default";
+  tokenInput.value = localStorage.getItem("memoryUiToken") || "";
+
+  function setStatus(el, text, kind) {
+    el.textContent = text || "";
+    el.className = "status" + (kind ? " " + kind : "");
+  }
+
+  function headers(extra) {
+    const h = Object.assign({}, extra || {});
+    const token = tokenInput.value.trim();
+    if (token) h["Authorization"] = "Bearer " + token;
+    return h;
+  }
+
+  function deviceId() {
+    return encodeURIComponent(deviceInput.value.trim() || "default");
+  }
+
+  async function request(path, options) {
+    const res = await fetch(path, options);
+    if (res.status === 401) {
+      throw new Error("Rejected: wrong or missing device token.");
+    }
+    if (!res.ok && res.status !== 404) {
+      throw new Error("Server error (" + res.status + ")");
+    }
+    return res;
+  }
+
+  function renderRow(item) {
+    const li = document.createElement("li");
+
+    const left = document.createElement("div");
+
+    const badge = document.createElement("span");
+    badge.className = "badge " + (item.source === "user" ? "user" : "auto");
+    badge.textContent = item.source === "user" ? "instruction" : "auto";
+
+    const text = document.createElement("span");
+    text.className = "fact-text";
+    text.textContent = item.text; // textContent, never innerHTML: fact text
+                                   // comes from the LLM or the user and is
+                                   // never trusted as markup.
+
+    left.appendChild(badge);
+    left.appendChild(text);
+
+    if (item.created_at) {
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      meta.textContent = new Date(item.created_at).toLocaleString();
+      left.appendChild(meta);
+    }
+
+    const del = document.createElement("button");
+    del.className = "delete-btn";
+    del.title = "Remove";
+    del.textContent = "✕";
+    del.addEventListener("click", () => deleteOne(item.id));
+
+    li.appendChild(left);
+    li.appendChild(del);
+    return li;
+  }
+
+  async function load() {
+    setStatus(topStatus, "Loading…");
+    loadBtn.disabled = true;
+    try {
+      const res = await request(apiBase + "/" + deviceId(), { headers: headers() });
+      const items = await res.json();
+      list.innerHTML = "";
+      items.forEach((item) => list.appendChild(renderRow(item)));
+      emptyMsg.hidden = items.length > 0;
+      setStatus(topStatus, items.length + " remembered.", "ok");
+      localStorage.setItem("memoryUiDevice", deviceInput.value.trim() || "default");
+      localStorage.setItem("memoryUiToken", tokenInput.value.trim());
+    } catch (err) {
+      setStatus(topStatus, err.message, "error");
+    } finally {
+      loadBtn.disabled = false;
+    }
+  }
+
+  async function deleteOne(id) {
+    try {
+      await request(apiBase + "/" + deviceId() + "/" + id, {
+        method: "DELETE",
+        headers: headers(),
+      });
+      await load();
+    } catch (err) {
+      setStatus(topStatus, err.message, "error");
+    }
+  }
+
+  async function clearAll() {
+    if (!confirm("Remove everything remembered for this device? This cannot be undone.")) {
+      return;
+    }
+    try {
+      await request(apiBase + "/" + deviceId(), { method: "DELETE", headers: headers() });
+      await load();
+    } catch (err) {
+      setStatus(topStatus, err.message, "error");
+    }
+  }
+
+  async function addInstruction(ev) {
+    ev.preventDefault();
+    const text = addText.value.trim();
+    if (!text) return;
+    setStatus(addStatus, "Adding…");
+    try {
+      await request(apiBase + "/" + deviceId(), {
+        method: "POST",
+        headers: headers({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ text }),
+      });
+      addText.value = "";
+      setStatus(addStatus, "", null);
+      await load();
+    } catch (err) {
+      setStatus(addStatus, err.message, "error");
+    }
+  }
+
+  loadBtn.addEventListener("click", load);
+  clearBtn.addEventListener("click", clearAll);
+  addForm.addEventListener("submit", addInstruction);
+
+  load();
+})();
+</script>
+</body>
+</html>
