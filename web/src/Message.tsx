@@ -1,5 +1,6 @@
 import type { Turn } from './useTurn.ts'
 import Inspector from './Inspector.tsx'
+import { traceMissingReason } from './traceStatus.ts'
 
 interface MessageProps {
   turn: Turn
@@ -28,18 +29,19 @@ interface MessageProps {
  *
  * The inspector renders once the turn is done, whether it was answered or
  * interrupted. server/session.py's _trace() runs right before every natural
- * `done` (see its own comment), so a finished turn with no trace can only
- * mean it was cancelled - that is `interrupted` below, and it is what
- * Inspector needs to pick between its two "no trace" sentences. Sentence
- * count is not that signal: a spoken turn (`turn.spoken`) never gets `reply`
- * frames at all - its answer goes out as audio instead, see useTurn.ts's
- * `Turn.spoken` - so "no sentences" is the normal, successful outcome for
- * one of those, not evidence of anything going wrong. While a turn is still
- * in flight there is nothing to show yet - the trace frame is the last thing
- * the server sends for it. */
+ * `done` (see its own comment), so a finished turn with no trace means
+ * either it was cancelled, or the connection itself never gets traced at
+ * all (no session cookie) - see traceStatus.ts's traceMissingReason, which
+ * is what Inspector needs to pick between its two "no trace" sentences.
+ * Below, only the 'interrupted' case is ever relevant: `sentences.length >
+ * 0` is already handled by the branch above it, so a spoken turn's normal
+ * "no sentences, but it has a trace" outcome (its answer goes out as audio
+ * instead - see useTurn.ts's `Turn.spoken`) never reaches this ternary at
+ * all. While a turn is still in flight there is nothing to show yet - the
+ * trace frame is the last thing the server sends for it. */
 function Message({ turn, inspectorOpen, onToggleInspector }: MessageProps) {
   const roleName = turn.trace?.role ?? 'assistant'
-  const interrupted = turn.done && turn.trace === null
+  const reason = traceMissingReason(turn)
 
   return (
     <div className="message">
@@ -54,7 +56,7 @@ function Message({ turn, inspectorOpen, onToggleInspector }: MessageProps) {
           <p className="prose message-reply">{turn.sentences.join(' ')}</p>
         ) : !turn.done ? (
           <p className="message-thinking">thinking…</p>
-        ) : interrupted ? (
+        ) : reason === 'interrupted' ? (
           <p className="message-thinking">interrupted</p>
         ) : (
           // A spoken turn that finished normally: the trace frame arrived,
@@ -68,7 +70,7 @@ function Message({ turn, inspectorOpen, onToggleInspector }: MessageProps) {
       {turn.done && (
         <Inspector
           trace={turn.trace}
-          interrupted={interrupted}
+          sentences={turn.sentences}
           open={inspectorOpen}
           onToggle={onToggleInspector}
         />

@@ -1,19 +1,19 @@
 import { useId } from 'react'
 import type { Trace } from './useTurn.ts'
+import { traceMissingReason } from './traceStatus.ts'
 
 interface InspectorProps {
-  /** null has two real causes and they need different sentences. An
-   * esp32-labelled connection (no session cookie, so session.py never calls
-   * _trace at all) versus a turn cancelled before the reply - and therefore
-   * before the trace send - ever ran. `interrupted` is what tells them
-   * apart. */
+  /** null has two real causes and they need different sentences - see
+   * traceStatus.ts's traceMissingReason, which this component calls with
+   * `trace` and `sentences` together to tell them apart: an esp32-labelled
+   * connection (no session cookie, so session.py never calls _trace at all)
+   * versus a turn cancelled before the reply - and therefore before the
+   * trace send - ever ran. */
   trace: Trace | null
-  /** True when this finished turn has no trace, which on a
-   * cookie-authorised connection can only mean it was cancelled: the server
-   * sends _trace before every natural `done` (see Message.tsx, which
-   * computes this from `turn.trace`, not from sentence count - a spoken
-   * turn's successful reply never has `reply` sentences either). */
-  interrupted: boolean
+  /** Needed only to classify a missing trace - see traceMissingReason.
+   * Never rendered directly here; Message.tsx already renders these as the
+   * reply body when there are any. */
+  sentences: string[]
   open: boolean
   onToggle: () => void
 }
@@ -36,7 +36,7 @@ function ms(value: number): string {
  * `open`/`onToggle` are controlled from Chat.tsx rather than owned here,
  * because "exactly one inspector open at a time" is a fact about the whole
  * turn list, not about any single message. */
-function Inspector({ trace, interrupted, open, onToggle }: InspectorProps) {
+function Inspector({ trace, sentences, open, onToggle }: InspectorProps) {
   const panelId = useId()
 
   if (!trace) {
@@ -45,10 +45,12 @@ function Inspector({ trace, interrupted, open, onToggle }: InspectorProps) {
     // on a cookie-authorised connection, so for a signed-in person a missing
     // trace means they cancelled - telling them to sign in would be simply
     // untrue. A turn cut off after some sentences had already streamed is
-    // still ambiguous from here and falls through to the second line.
+    // still ambiguous from here and falls through to the second line - see
+    // traceMissingReason's own comment on that boundary.
+    const reason = traceMissingReason({ trace, sentences })
     return (
       <p className="inspector-missing">
-        {interrupted
+        {reason === 'interrupted'
           ? 'Interrupted before this turn finished — no trace was recorded.'
           : 'No trace for this turn. Sign in over a session cookie to see it.'}
       </p>
