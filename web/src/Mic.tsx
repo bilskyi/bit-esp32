@@ -37,6 +37,11 @@ function Mic({ turn }: MicProps) {
   // one.
   const playerRef = useRef<Player | null>(null)
   const errorId = useId()
+  // True from pointer/key down until the matching up (or cancel) - see
+  // beginRecording's own comment for why this, rather than the `recording`
+  // state, is what has to answer "is the button still held" once
+  // startCapture() resolves.
+  const heldRef = useRef(false)
 
   useEffect(() => {
     const unregister = onVoiceReply({
@@ -105,6 +110,22 @@ function Mic({ turn }: MicProps) {
           stopRecording()
         },
       })
+      if (!heldRef.current) {
+        // The button was already released by the time getUserMedia() and
+        // addModule() finished - tens to hundreds of milliseconds, and the
+        // very first press ever always shows a permission dialog that
+        // takes far longer. handlePointerUp/handleKeyUp ran already and saw
+        // `recording` still false, so they had nothing to stop. Capture is
+        // live now, so finish what they could not: stop it and end the
+        // turn cleanly (server/session.py's on_end with zero bytes still
+        // emits exactly one "done") rather than leaving the microphone
+        // open and streaming, stuck on "Recording - release to send" until
+        // a second press-and-release discovers the problem - or, left
+        // alone, the server's watchdog answering a full minute of room
+        // audio out loud.
+        stopRecording()
+        return
+      }
       setRecording(true)
     } catch (err) {
       setMicError(describeMicError(err))
@@ -129,9 +150,11 @@ function Mic({ turn }: MicProps) {
     // end the recording without ever seeing a pointerup.
     event.preventDefault()
     event.currentTarget.setPointerCapture(event.pointerId)
+    heldRef.current = true
     void beginRecording()
   }
   const handlePointerUp = () => {
+    heldRef.current = false
     if (recording) stopRecording()
   }
   const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
@@ -139,11 +162,15 @@ function Mic({ turn }: MicProps) {
     event.preventDefault()
     // A held key repeats keydown continuously - only the first should start
     // a recording, or every repeat would try to start a new one.
-    if (!event.repeat) void beginRecording()
+    if (!event.repeat) {
+      heldRef.current = true
+      void beginRecording()
+    }
   }
   const handleKeyUp = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key !== ' ' && event.key !== 'Spacebar') return
     event.preventDefault()
+    heldRef.current = false
     if (recording) stopRecording()
   }
 
