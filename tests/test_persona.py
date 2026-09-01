@@ -65,3 +65,39 @@ def test_puts_the_tag_rule_before_everything_else():
 def test_says_the_tag_is_not_to_be_spoken():
     prompt = build_system_prompt([]).lower()
     assert "never spoken" in prompt
+
+
+def test_default_style_is_esp32_and_matches_existing_wording():
+    from server.persona import ESP32, build_system_prompt
+
+    assert build_system_prompt([]) == build_system_prompt([], ESP32)
+
+
+def test_web_style_allows_markdown():
+    from server.persona import WEB, build_system_prompt
+
+    prompt = build_system_prompt([], WEB).lower()
+    assert "markdown, lists and headings are fine" in prompt
+
+
+def test_esp32_style_still_forbids_markdown():
+    from server.persona import ESP32, build_system_prompt
+
+    prompt = build_system_prompt([], ESP32).lower()
+    assert "no lists, no headings, no markdown" in prompt
+
+
+def test_web_style_sentence_count_is_configurable():
+    from server.persona import Style, build_system_prompt
+
+    custom = Style(max_sentences=4, markdown_allowed=True)
+    assert "up to 4 sentences" in build_system_prompt([], custom)
+
+
+def test_web_style_still_asks_for_every_emotion():
+    from server.emotion import EMOTIONS
+    from server.persona import WEB, build_system_prompt
+
+    prompt = build_system_prompt([], WEB)
+    for name in EMOTIONS:
+        assert f"[{name}]" in prompt, name

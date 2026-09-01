@@ -68,6 +68,21 @@ class Settings(BaseSettings):
     # disables the check, which is only appropriate on a laptop.
     device_token: str = ""
 
+    # Signs the web login's session cookie. Must be set on Railway before
+    # this deploys, same category as DEVICE_TOKEN and GROQ_API_KEY. Left
+    # empty, the app signs with a random key generated once per process
+    # start (see main.py) rather than a fixed fallback - fine for local dev
+    # and tests, but existing sessions won't survive a restart.
+    session_secret_key: str = ""
+
+    # Whether the session cookie requires HTTPS. True is correct in
+    # production (Railway's edge terminates real HTTPS; this is what makes
+    # the cookie Secure). Local dev over plain http://localhost and
+    # Starlette's TestClient both need this False, since neither is HTTPS -
+    # that is the actual constraint, not anything about how Railway proxies
+    # requests internally.
+    session_cookie_secure: bool = True
+
     sample_rate: int = 16000
     db_path: str = "voice.db"
 

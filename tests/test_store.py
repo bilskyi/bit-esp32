@@ -167,3 +167,25 @@ async def test_backfill_embeddings_is_idempotent(store):
 
     assert await store.backfill_embeddings(embed) == 1
     assert await store.backfill_embeddings(embed) == 0
+
+
+# --------------------------------------------------------- style overrides
+
+async def test_get_style_override_is_none_by_default(store):
+    assert await store.get_style_override("web") is None
+
+
+async def test_set_style_override_roundtrips(store):
+    await store.set_style_override("web", max_sentences=4, markdown_allowed=True)
+    assert await store.get_style_override("web") == {"max_sentences": 4, "markdown_allowed": True}
+
+
+async def test_set_style_override_twice_replaces_it(store):
+    await store.set_style_override("web", max_sentences=4, markdown_allowed=True)
+    await store.set_style_override("web", max_sentences=2, markdown_allowed=False)
+    assert await store.get_style_override("web") == {"max_sentences": 2, "markdown_allowed": False}
+
+
+async def test_style_overrides_are_independent_per_surface(store):
+    await store.set_style_override("web", max_sentences=4, markdown_allowed=True)
+    assert await store.get_style_override("esp32") is None

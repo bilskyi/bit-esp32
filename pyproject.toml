@@ -13,6 +13,8 @@ dependencies = [
     "aiosqlite>=0.20",
     "av>=18.1.0",
     "fastembed>=0.5",
+    "bcrypt>=4.0",
+    "itsdangerous>=2.2.0",
 ]
 
 [dependency-groups]

@@ -17,7 +17,7 @@ from server.codec import AdpcmDecoder, AdpcmEncoder
 from server.emotion import LeadingTag, from_text, strip_tags
 from server.lang import DEFAULT, detect_language, voice_for
 from server.memory.summarise import extract_facts
-from server.persona import build_system_prompt
+from server.persona import ESP32, build_system_prompt
 from server.sentences import SentenceSplitter
 
 log = logging.getLogger(__name__)
@@ -41,7 +41,8 @@ class State(str, Enum):
 
 class Session:
     def __init__(
-        self, transport, stt, llm, tts, settings, store=None, device_id="default", embedder=None
+        self, transport, stt, llm, tts, settings, store=None, device_id="default", embedder=None,
+        style=ESP32,
     ):
         self.transport = transport
         self.stt = stt
@@ -51,6 +52,7 @@ class Session:
         self.store = store
         self.device_id = device_id
         self.embedder = embedder
+        self.style = style
 
         self.state = State.IDLE
         self.history: list[dict] = []
@@ -138,11 +140,11 @@ class Session:
         # meant nothing else could be read for the several seconds a reply
         # takes - including the request to stop talking. Detaching it keeps the
         # loop free to hear "cancel" while the reply is still being spoken.
-        self._reply = asyncio.create_task(self._run_reply(pcm))
+        self._reply = asyncio.create_task(self._run_reply(lambda: self._respond(pcm)))
 
-    async def _run_reply(self, pcm: bytes) -> None:
+    async def _run_reply(self, coro_fn) -> None:
         try:
-            await self._respond(pcm)
+            await coro_fn()
         except asyncio.CancelledError:
             log.info("reply cancelled by the device")
             raise
@@ -175,6 +177,18 @@ class Session:
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await task
+
+    async def on_text(self, text: str) -> None:
+        """A typed question. No audio, no STT - it is already text."""
+        if self.state is State.LISTENING:
+            dropped = len(self._buf)
+            self._cancel_watchdog()
+            self._buf.clear()
+            log.info("text arrived while listening: dropping %d B of audio in progress", dropped)
+        elif self.state in (State.THINKING, State.SPEAKING):
+            await self.on_cancel()
+        await self._set_state(State.THINKING)
+        self._reply = asyncio.create_task(self._run_reply(lambda: self._answer(text, speak=False)))
 
     async def finish(self) -> None:
         """Close out the session: extract durable facts, then log usage."""
@@ -218,6 +232,9 @@ class Session:
             return
         log.info("stt %.0f ms: %s", (time.perf_counter() - started) * 1000, text)
 
+        await self._answer(text, speak=True, audio_seconds=transcript.seconds)
+
+    async def _answer(self, text: str, *, speak: bool = True, audio_seconds: float = 0.0) -> None:
         if self.store is not None:
             query_vector = await self.embedder.embed_query(text)
             self.facts = await self.store.relevant_facts(
@@ -228,7 +245,7 @@ class Session:
             # persona.py takes one flat list; standing instructions come
             # first so a relevant fact never pushes a user's own rule out of
             # the prompt if both were ever truncated upstream.
-            build_system_prompt(self.standing_instructions + self.facts),
+            build_system_prompt(self.standing_instructions + self.facts, self.style),
             self.history,
             text,
             self.settings.max_context_tokens,
@@ -282,6 +299,12 @@ class Session:
                          "tagged" if tag.emotion else "guessed")
                 await self._set_state(State.SPEAKING)
             spoken.append(sentence)
+
+            if not speak:
+                # Typed in, so written back - no TTS call spent on something
+                # that is already being read.
+                await self.transport.send_json({"type": "reply", "value": sentence})
+                return
 
             async def render(with_voice: str) -> None:
                 nonlocal sent_bytes
@@ -366,10 +389,10 @@ class Session:
         self.history.append({"role": "user", "content": text})
         self.history.append({"role": "assistant", "content": reply})
         self.usage.add_turn(
-            audio_seconds=transcript.seconds,
+            audio_seconds=audio_seconds,
             prompt_tokens=prompt_tokens,
             completion_tokens=estimate_tokens(reply),
-            tts_chars=sum(len(s) for s in spoken),
+            tts_chars=sum(len(s) for s in spoken) if speak else 0,
         )
 
     # -- helpers -----------------------------------------------------------

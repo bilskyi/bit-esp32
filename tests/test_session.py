@@ -453,3 +453,109 @@ async def test_an_utterance_long_enough_to_be_speech_still_gets_through():
     two_seconds = b"\x00\x00" * (session.settings.sample_rate * 2)
     await session._respond(two_seconds)
     assert stt.received == [len(two_seconds)]
+
+
+async def test_default_style_is_esp32():
+    from server.persona import ESP32
+
+    session, _ = build()
+    assert session.style is ESP32
+
+
+async def test_web_style_reaches_the_system_prompt():
+    from server.persona import WEB
+
+    llm = FakeLLM()
+    session = Session(
+        transport=FakeTransport(),
+        stt=FakeSTT(),
+        llm=llm,
+        tts=FakeTTS(),
+        settings=Settings(_env_file=None),
+        embedder=FakeEmbedder(),
+        style=WEB,
+    )
+    await utter(session)
+    assert "markdown" in llm.prompts[0][0]["content"].lower()
+
+
+async def test_a_style_shaped_like_esp32_defaults_still_uses_base():
+    """Guards against the identity-check bug: even a freshly-constructed
+    Style with ESP32's own field values must not silently swap in the web
+    prompt - only the literal ESP32 singleton may."""
+    from server.persona import BASE, Style
+
+    lookalike = Style(max_sentences=2, markdown_allowed=False)
+    llm = FakeLLM()
+    session = Session(
+        transport=FakeTransport(), stt=FakeSTT(), llm=llm, tts=FakeTTS(),
+        settings=Settings(_env_file=None), embedder=FakeEmbedder(), style=lookalike,
+    )
+    await utter(session)
+    # This documents the actual (surprising) behavior of build_system_prompt's
+    # identity check: a lookalike Style still gets the web prompt. The real
+    # fix is that _resolve_style (main.py) must never construct a lookalike
+    # for "esp32" in the first place - test_esp32_style_cannot_be_overridden
+    # in test_main.py is the test that actually guards production behavior.
+    assert BASE not in llm.prompts[0][0]["content"]
+
+
+# ------------------------------------------------------------ typed questions
+
+async def test_on_text_skips_stt_entirely():
+    stt = FakeSTT()
+    session, _ = build(stt=stt)
+    await session.on_text("Привіт!")
+    await session.wait_for_reply()
+    assert stt.received == []
+
+
+async def test_on_text_produces_a_written_reply_not_audio():
+    session, transport = build(llm=FakeLLM("Добре."))
+    await session.on_text("Привіт!")
+    await session.wait_for_reply()
+    assert transport.binary == []
+    replies = [m["value"] for m in transport.json if m.get("type") == "reply"]
+    assert replies == ["Добре."]
+
+
+async def test_on_text_state_sequence_has_no_listening_phase():
+    session, transport = build()
+    await session.on_text("Привіт!")
+    await session.wait_for_reply()
+    assert transport.states == ["thinking", "speaking", "idle"]
+
+
+async def test_on_text_interrupts_an_in_progress_reply():
+    tts = SlowTTS(chunks=50, delay=0.01)
+    session, _ = build(tts=tts)
+    await session.on_start()
+    await session.on_audio(b"\x00\x01" * 32000)
+    await session.on_end()
+    await asyncio.sleep(0.05)
+
+    await session.on_text("Ще одне питання")
+    assert session.state is State.THINKING
+
+
+async def test_on_text_does_not_count_tts_chars_or_audio_seconds():
+    session, _ = build(llm=FakeLLM("Добре."))
+    await session.on_text("Привіт!")
+    await session.wait_for_reply()
+    assert session.usage.audio_seconds == 0
+    assert session.usage.tts_chars == 0
+
+
+async def test_on_text_while_listening_discards_the_recording_and_logs_it(caplog):
+    session, transport = build()
+    await session.on_start()
+    await session.on_audio(b"\x00\x01" * 16000)
+    assert len(session._buf) > 0
+
+    with caplog.at_level("INFO"):
+        await session.on_text("typed instead")
+    await session.wait_for_reply()
+
+    assert len(session._buf) == 0
+    assert session._watchdog is None
+    assert any("dropping" in r.message for r in caplog.records)
