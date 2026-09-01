@@ -8,7 +8,15 @@
 // Nothing here draws anything. face-frames.json's frames come from
 // firmware/host/face_export.c, which drives the real firmware/main/face.c -
 // see that file's header for why this is not reimplemented in JavaScript.
-import faceFrames from './face-frames.json'
+//
+// The file is fetched at runtime from web/public/face-frames.json (served
+// at /face-frames.json), not imported: it is a 921KB raw framebuffer
+// payload (1.2MB as committed base64/JSON), and a static import would have
+// Vite inline all of it into the main JS chunk - the bundle every visitor
+// downloads and parses before the chat UI is interactive. loadFaceFrames()
+// fetches it exactly once per page load and caches the settled promise
+// (success or failure), so remounting Face never re-fetches and a broken
+// deployment never gets hammered with retries.
 import type { ConversationState } from './useTurn.ts'
 
 export interface FaceFramesFile {
@@ -18,14 +26,31 @@ export interface FaceFramesFile {
   loops: Record<string, string[]>
 }
 
-// The single cast site for the generated file's shape. If face_export.c's
-// output shape ever changes, this is where it breaks loudly instead of
-// wherever FRAMES happens to get indexed next.
-const FRAMES = faceFrames as FaceFramesFile
+const FACE_FRAMES_URL = '/face-frames.json'
 
-export const FACE_W = FRAMES.w
-export const FACE_H = FRAMES.h
-export const FACE_FPS = FRAMES.fps
+let framesPromise: Promise<FaceFramesFile> | null = null
+let loggedFetchError = false
+
+/** Fetches and parses face-frames.json exactly once per page load. Face.tsx
+ * calls this from an effect and shows a blank --glass panel until it
+ * resolves, or a quiet --ink-3 line if it never does - see that file. */
+export function loadFaceFrames(): Promise<FaceFramesFile> {
+  if (!framesPromise) {
+    framesPromise = fetch(FACE_FRAMES_URL)
+      .then((res) => {
+        if (!res.ok) throw new Error(`face-frames.json: HTTP ${res.status}`)
+        return res.json() as Promise<FaceFramesFile>
+      })
+      .catch((err: unknown) => {
+        if (!loggedFetchError) {
+          loggedFetchError = true
+          console.error('Face: could not load face-frames.json', err)
+        }
+        throw err
+      })
+  }
+  return framesPromise
+}
 
 export interface Rgb {
   r: number
@@ -79,9 +104,10 @@ let warnedUnknownEmotion = false
 const warnedMissingLoop = new Set<string>()
 
 /** The loop key to animate for a given state/emotion pair - always a key
- * that actually exists in FRAMES.loops, falling back to "neutral" for an
- * emotion this build of face-frames.json does not have (logged once, not
- * per frame, so a stuck connection does not spam the console). */
+ * that should exist in the loaded file's loops (resolveLoop falls back to
+ * "idle:neutral" if it does not), falling back to "neutral" for an emotion
+ * this build of face-frames.json does not have (logged once, not per frame,
+ * so a stuck connection does not spam the console). */
 export function loopKey(state: ConversationState, emotion: string | null): string {
   if (emotion !== null && !KNOWN_EMOTIONS.has(emotion)) {
     if (!warnedUnknownEmotion) {
@@ -93,14 +119,14 @@ export function loopKey(state: ConversationState, emotion: string | null): strin
   return `${state}:${emotion ?? 'neutral'}`
 }
 
-function resolveLoop(key: string): string[] {
-  const loop = FRAMES.loops[key]
+function resolveLoop(frames: FaceFramesFile, key: string): string[] {
+  const loop = frames.loops[key]
   if (loop && loop.length > 0) return loop
   if (!warnedMissingLoop.has(key)) {
     warnedMissingLoop.add(key)
     console.warn(`Face: no frames for "${key}" in face-frames.json, falling back to idle:neutral`)
   }
-  return FRAMES.loops['idle:neutral'] ?? []
+  return frames.loops['idle:neutral'] ?? []
 }
 
 /** Base64 -> raw framebuffer bytes, one FACE_W*FACE_H/8 buffer per frame. */
@@ -149,10 +175,14 @@ export function unpackFrame(
 /** Decodes a loop's frames once and remembers them in `cache` (keyed by
  * loop key), so switching back to a state:emotion pair already visited this
  * session never re-runs atob on the same 30-ish base64 strings. */
-export function getDecodedLoop(cache: Map<string, Uint8Array[]>, key: string): Uint8Array[] {
+export function getDecodedLoop(
+  cache: Map<string, Uint8Array[]>,
+  frames: FaceFramesFile,
+  key: string,
+): Uint8Array[] {
   let decoded = cache.get(key)
   if (!decoded) {
-    decoded = resolveLoop(key).map(base64ToBytes)
+    decoded = resolveLoop(frames, key).map(base64ToBytes)
     cache.set(key, decoded)
   }
   return decoded

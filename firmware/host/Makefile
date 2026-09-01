@@ -77,10 +77,16 @@ preview: $(BUILD)/face_preview preview-template.html
 
 # Not part of `all`: the frames only change when face.c does, and a frontend
 # build must not require a C compiler. Run this by hand and commit the
-# result - see web/src/face-frames.json's own size for the cost of that.
+# result - see web/public/face-frames.json's own size for the cost of that.
+#
+# Lands in web/public/, not web/src/: Vite copies public/ verbatim to the
+# root of dist/ instead of pulling it into the JS bundle, so the frontend
+# fetches this at runtime (see web/src/faceFrames.ts) rather than importing
+# it - a 921KB framebuffer payload has no business in the chunk a phone must
+# download and parse before the chat UI is interactive.
 face-data: $(BUILD)/face_export
-	@./$(BUILD)/face_export > ../../web/src/face-frames.json
-	@echo "wrote web/src/face-frames.json"
+	@./$(BUILD)/face_export > ../../web/public/face-frames.json
+	@echo "wrote web/public/face-frames.json"
 
 clean:
 	rm -rf $(BUILD) $(ASAN_BUILD)

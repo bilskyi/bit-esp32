@@ -4,22 +4,20 @@
 // why: reimplementing the eyes in JavaScript drifts from firmware/main/face.c
 // within a day. Instead it plays frames firmware/host/face_export.c rendered
 // from that exact C, one short loop per state:emotion pair, committed as
-// web/src/face-frames.json. This file's only job is picking the right loop
-// for the live state/emotion and unpacking its frames onto a canvas -
+// web/public/face-frames.json. This file's only job is picking the right
+// loop for the live state/emotion and unpacking its frames onto a canvas -
 // nothing here decides what an emotion looks like. Loop selection and frame
 // decoding live in faceFrames.ts, not here, so this file exports only the
 // component (see that file's header for why).
+//
+// face-frames.json is fetched at runtime (see loadFaceFrames), not
+// imported, so the canvas only mounts once it has arrived - until then, and
+// if it never does, the panel is just its own --glass background (see
+// .face-stage in app.css) with the readout line below it, not a broken
+// component.
 import { useCallback, useEffect, useRef, useState } from 'react'
-import {
-  FACE_FPS,
-  FACE_H,
-  FACE_W,
-  getDecodedLoop,
-  loopKey,
-  parseHexColor,
-  unpackFrame,
-} from './faceFrames.ts'
-import type { Rgb } from './faceFrames.ts'
+import { getDecodedLoop, loadFaceFrames, loopKey, parseHexColor, unpackFrame } from './faceFrames.ts'
+import type { FaceFramesFile, Rgb } from './faceFrames.ts'
 import type { ConversationState } from './useTurn.ts'
 
 function useReducedMotion(): boolean {
@@ -67,6 +65,28 @@ function Face({ state, emotion, online }: FaceProps) {
 
   const reducedMotion = useReducedMotion()
 
+  // null until loadFaceFrames() resolves; stays null forever if it rejects.
+  // Either way the canvas below only mounts once this is set, so there is
+  // nothing to paint in the meantime - the panel is just .face-stage's own
+  // --glass background.
+  const [frames, setFrames] = useState<FaceFramesFile | null>(null)
+  const [loadFailed, setLoadFailed] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    loadFaceFrames().then(
+      (loaded) => {
+        if (!cancelled) setFrames(loaded)
+      },
+      () => {
+        if (!cancelled) setLoadFailed(true)
+      },
+    )
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   // The socket being down always shows the idle loop, not whatever the last
   // known state happened to be - a stale "listening" or "thinking" reads as
   // "still working on it" when the truth is "not talking to anything".
@@ -77,28 +97,32 @@ function Face({ state, emotion, online }: FaceProps) {
   }, [desiredKey])
 
   useEffect(() => {
+    if (!frames) return
     const canvas = canvasRef.current
     if (!canvas) return
     const ctx = canvas.getContext('2d')
     if (!ctx) return
-    imageDataRef.current = ctx.createImageData(FACE_W, FACE_H)
+    imageDataRef.current = ctx.createImageData(frames.w, frames.h)
     colorRef.current = parseHexColor(
       getComputedStyle(document.documentElement).getPropertyValue('--emit') || '#cfeaff',
     )
-  }, [])
+  }, [frames])
 
-  const paint = useCallback((key: string, frameIndex: number) => {
-    const canvas = canvasRef.current
-    const imageData = imageDataRef.current
-    const color = colorRef.current
-    if (!canvas || !imageData || !color) return
-    const ctx = canvas.getContext('2d')
-    if (!ctx) return
-    const frames = getDecodedLoop(decodedRef.current, key)
-    if (frames.length === 0) return
-    unpackFrame(frames[frameIndex % frames.length], FACE_W, FACE_H, color, imageData.data)
-    ctx.putImageData(imageData, 0, 0)
-  }, [])
+  const paint = useCallback(
+    (key: string, frameIndex: number) => {
+      const canvas = canvasRef.current
+      const imageData = imageDataRef.current
+      const color = colorRef.current
+      if (!canvas || !imageData || !color || !frames) return
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+      const loopFrames = getDecodedLoop(decodedRef.current, frames, key)
+      if (loopFrames.length === 0) return
+      unpackFrame(loopFrames[frameIndex % loopFrames.length], frames.w, frames.h, color, imageData.data)
+      ctx.putImageData(imageData, 0, 0)
+    },
+    [frames],
+  )
 
   // prefers-reduced-motion: paint whichever loop is current, but only its
   // first frame, and never start the animation effect below.
@@ -107,14 +131,14 @@ function Face({ state, emotion, online }: FaceProps) {
   }, [reducedMotion, desiredKey, paint])
 
   useEffect(() => {
-    if (reducedMotion) return
+    if (reducedMotion || !frames) return
 
     let raf = 0
     let last = performance.now()
     let acc = 0
     let activeKey = desiredKeyRef.current
     let frameIndex = 0
-    const frameDuration = 1000 / FACE_FPS
+    const frameDuration = 1000 / frames.fps
 
     paint(activeKey, frameIndex)
 
@@ -132,8 +156,8 @@ function Face({ state, emotion, online }: FaceProps) {
           activeKey = desired
           frameIndex = 0
         } else {
-          const frames = getDecodedLoop(decodedRef.current, activeKey)
-          frameIndex = frames.length > 0 ? (frameIndex + 1) % frames.length : 0
+          const loopFrames = getDecodedLoop(decodedRef.current, frames, activeKey)
+          frameIndex = loopFrames.length > 0 ? (frameIndex + 1) % loopFrames.length : 0
         }
       }
       paint(activeKey, frameIndex)
@@ -141,23 +165,28 @@ function Face({ state, emotion, online }: FaceProps) {
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [reducedMotion, paint])
+  }, [reducedMotion, frames, paint])
 
   // The raw value from the wire, not the sanitised one loopKey() falls back
   // to - if the two ever disagree, that mismatch is exactly what someone
   // debugging this panel needs to see, not something to paper over here too.
-  const label = online ? (emotion ? `${state} · ${emotion}` : state) : 'offline'
+  // A failed fetch overrides all of that with one quiet line instead: there
+  // is no state or emotion worth reporting for a panel that has nothing to
+  // draw.
+  const label = loadFailed ? 'face unavailable' : online ? (emotion ? `${state} · ${emotion}` : state) : 'offline'
 
   return (
     <div className="face">
       <div className="face-stage">
-        <canvas
-          ref={canvasRef}
-          className="face-canvas"
-          width={FACE_W}
-          height={FACE_H}
-          aria-hidden="true"
-        />
+        {frames && (
+          <canvas
+            ref={canvasRef}
+            className="face-canvas"
+            width={frames.w}
+            height={frames.h}
+            aria-hidden="true"
+          />
+        )}
       </div>
       <p className="face-readout">{label}</p>
     </div>
