@@ -48,26 +48,89 @@ function int16LEToFloat(chunk: ArrayBuffer) {
   return out
 }
 
-/** Resamples by averaging whole groups of source samples into one output
- * sample, never by picking every Nth one - that aliases audibly (see the
- * task brief). `inputRate` is whatever the AudioContext actually granted -
- * Chrome commonly refuses a 16000 Hz request and hands back 48000 - and
- * `outputRate` is always SAMPLE_RATE. A no-op, returning `input` itself
- * unchanged, when the rates already match, which is what happens on any
- * browser that does honour the request. */
-export function downsample(input: Float32Array, inputRate: number, outputRate: number): Float32Array {
-  if (inputRate === outputRate) return input
+export interface Resampler {
+  /** Feeds one chunk of samples - in practice, one AudioWorkletProcessor
+   * `process()` callback, a fixed 128-frame render quantum - and returns
+   * however many resampled output samples are ready so far. Can return
+   * fewer samples than a naive `chunkLength / ratio` would suggest, even an
+   * empty array, when the leftover from the last call is not yet enough to
+   * complete the next output group; those samples are carried forward into
+   * the next push() rather than dropped or forced into a short group. */
+  push: (input: Float32Array) => Float32Array
+}
+
+/** Builds a resampler that averages whole groups of source samples into one
+ * output sample, never by picking every Nth one - that aliases audibly (see
+ * the task brief). `inputRate` is whatever the AudioContext actually
+ * granted - Chrome commonly refuses a 16000 Hz request and hands back
+ * 48000 - and `outputRate` is always SAMPLE_RATE.
+ *
+ * One instance is created per capture session (see startCapture) and its
+ * push() is called once per `process()` callback for the life of that
+ * session, never a fresh instance per call - that statefulness is the fix
+ * for a real bug. An earlier version recomputed
+ * `Math.round(chunkLength / ratio)` independently on every call, exact only
+ * when the chunk length happens to divide evenly by the ratio. 128, the
+ * render quantum the Web Audio API always hands a worklet, is not divisible
+ * by 44100/16000 = 2.75625 (it is by 48000/16000 = 3, which is why that
+ * ratio happened to look fine) - and the rounding bias that leaves behind
+ * has the same sign every single callback, so it does not average out over
+ * a recording, it accumulates. Measured over 5 s of 128-sample chunks, the
+ * old per-call version came out +0.78% fast at 48 kHz -> 16 kHz and -0.95%
+ * slow at 44.1 kHz -> 16 kHz: Whisper receives audio at a rate that quietly
+ * does not match what the protocol declares, and a long utterance drifts
+ * audibly.
+ *
+ * Carrying the fractional read position (`produced`/`consumed` below) and
+ * any partial averaging group (`pending`) across calls fixes that: each
+ * output sample's group boundary is `Math.floor(n * ratio)` counted from
+ * the start of the *session*, never reset per call, so the total output
+ * length after any number of push() calls converges on
+ * `totalInputSamples / ratio` rather than accumulating a per-call rounding
+ * bias - see audio.test.tsx's property test, which pins exactly that for
+ * both ratios above. A no-op, returning each chunk unchanged, when the
+ * rates already match, which is what happens on any browser that does
+ * honour the 16000 Hz request. */
+export function createResampler(inputRate: number, outputRate: number): Resampler {
+  if (inputRate === outputRate) return { push: (input) => input }
+
   const ratio = inputRate / outputRate
-  const outLength = Math.max(1, Math.round(input.length / ratio))
-  const output = new Float32Array(outLength)
-  for (let i = 0; i < outLength; i++) {
-    const start = Math.floor(i * ratio)
-    const end = Math.max(start + 1, Math.min(input.length, Math.floor((i + 1) * ratio)))
-    let sum = 0
-    for (let j = start; j < end; j++) sum += input[j]
-    output[i] = sum / (end - start)
+  // Samples seen but not yet folded into a completed output group. A plain
+  // number[], not a Float32Array, since it is resliced every push() and
+  // never holds more than a couple of samples' worth of leftover.
+  let pending: number[] = []
+  // Total input samples folded into a completed group so far, and total
+  // output samples produced so far - both counted from the start of the
+  // session, never reset per call. Invariant: consumed === the group
+  // boundary for `produced`, i.e. Math.floor(produced * ratio); `pending`
+  // holds exactly the samples pushed since then.
+  let consumed = 0
+  let produced = 0
+
+  return {
+    push(input: Float32Array): Float32Array {
+      for (let i = 0; i < input.length; i++) pending.push(input[i])
+
+      const out: number[] = []
+      for (;;) {
+        // The next group's end, counted from the session's running input
+        // total - never per call, which is exactly what stops the rounding
+        // here from accumulating the way the old per-call
+        // Math.round(chunkLength / ratio) did.
+        const groupEnd = Math.max(consumed + 1, Math.floor((produced + 1) * ratio))
+        const groupLength = groupEnd - consumed
+        if (pending.length < groupLength) break // not enough samples yet for a full group
+
+        let sum = 0
+        for (let j = 0; j < groupLength; j++) sum += pending[j]
+        out.push(sum / groupLength)
+        pending = pending.slice(groupLength)
+        consumed = groupEnd
+        produced += 1
+      }
+      return Float32Array.from(out)
+    },
   }
-  return output
 }
 
 // ------------------------------------------------------------------- errors
@@ -179,7 +242,7 @@ export async function startCapture({ onChunk, onError }: CaptureCallbacks): Prom
   let source: MediaStreamAudioSourceNode
   let node: AudioWorkletNode
   try {
-    // A request, not a guarantee - see downsample() above for why every
+    // A request, not a guarantee - see createResampler() above for why every
     // chunk is resampled against whatever the browser actually granted
     // rather than trusted to already be 16000.
     context = new AudioContext({ sampleRate: SAMPLE_RATE })
@@ -192,10 +255,17 @@ export async function startCapture({ onChunk, onError }: CaptureCallbacks): Prom
   }
 
   const actualRate = context.sampleRate
+  // One resampler for the life of this capture session, never a fresh one
+  // per callback - see createResampler's own comment for why that
+  // statefulness is the entire fix.
+  const resampler = createResampler(actualRate, SAMPLE_RATE)
 
   node.port.onmessage = (event: MessageEvent<Float32Array>) => {
     try {
-      onChunk(floatTo16LE(downsample(event.data, actualRate, SAMPLE_RATE)))
+      const resampled = resampler.push(event.data)
+      // Can be empty - see Resampler.push's comment - when this callback's
+      // samples were not yet enough to complete the next output group.
+      if (resampled.length > 0) onChunk(floatTo16LE(resampled))
     } catch {
       onError('The microphone stopped unexpectedly. Try again.')
     }

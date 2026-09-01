@@ -258,8 +258,9 @@ export function useTurn(): TurnValue {
       let openedThisAttempt = false
       const url = `${location.origin.replace(/^http/, 'ws')}/ws?device=default`
       const ws = new WebSocket(url)
-      // Plain Blob otherwise - audio.ts's Player and downsample() both work
-      // on ArrayBuffer, and there is no other consumer of a binary frame.
+      // Plain Blob otherwise - audio.ts's Player and createResampler() both
+      // work on typed arrays over ArrayBuffer, and there is no other
+      // consumer of a binary frame.
       ws.binaryType = 'arraybuffer'
       socketRef.current = ws
 
