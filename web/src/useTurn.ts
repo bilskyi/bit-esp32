@@ -110,22 +110,14 @@ export interface TurnValue {
   sendVoiceChunk: (chunk: ArrayBuffer) => void
   /** Sends `{"type":"end"}` - the button was released. */
   endVoiceTurn: () => void
-  /** Marks the last turn done locally without expecting any server
-   * acknowledgement and without touching pendingCancelsRef - see Mic.tsx's
-   * beginRecording(), the only caller. That is deliberately different from
-   * cancelCurrentTurn (ask()/interrupt()/startVoiceTurn()'s shared path),
-   * which always counts one stray "done" it expects the server to send for
-   * whatever it cancels. That assumption holds for a turn that reached
-   * THINKING or SPEAKING (on_cancel there really does cancel a running reply
-   * task, whose `finally` sends "done"), but not for a voice turn where
-   * "start" was sent and startCapture() then threw before any audio, let
-   * alone "end", ever followed: server/session.py never created a reply task
-   * for it, so nothing is left to cancel, so a retry's "start" hits on_start's
-   * "start while already listening" branch, which drops it silently and
-   * owes no "done" at all (see that branch's own comment). Counting one
-   * there anyway is exactly the bug this fixes: it left pendingCancelsRef
-   * permanently off by one, silently swallowing the *next* turn's genuine
-   * "done" and stranding it on "thinking…" forever. */
+  /** Marks the last turn done locally, without sending anything to the
+   * socket - see Mic.tsx's beginRecording(), the only caller: "start" was
+   * sent and startCapture() then threw before any audio, let alone "end",
+   * ever followed, so there is nothing to tell the server. A thin wrapper
+   * around cancelCurrentTurn (see that function's comment): whether this
+   * owes a stray "done" now falls out of the same server-state gate every
+   * other caller uses, rather than a hand-rolled "never" that used to be
+   * this function's whole reason to exist. */
   abandonVoiceTurn: () => void
   /** Registers the one live handler for binary reply frames and the
    * completion/interrupt signals around them - see VoiceReplyHandlers.
@@ -168,13 +160,40 @@ export function useTurn(): TurnValue {
   // The last `prev` array cancelCurrentTurn has already accounted for -
   // see that function's comment for what this guards against.
   const lastCancelCheckRef = useRef<Turn[] | null>(null)
+  // The value of the server's own last `state` frame - kept in a ref, not
+  // just the reactive `state` above, so cancelCurrentTurn (a stable
+  // useCallback with no dependency on render) can read it synchronously at
+  // the moment it decides whether a cancel is owed a "done". Reset to
+  // 'idle' on every fresh connection (ws.onopen) for the same reason a
+  // fresh Session starts in State.IDLE server-side - see that reset's own
+  // comment for why guessing otherwise across a reconnect is wrong.
+  const lastServerStateRef = useRef<ConversationState>('idle')
 
   /** The single place a turn gets cancelled locally, from every caller that
-   * can preempt one: ask(), interrupt(), startVoiceTurn(). Marks the last
-   * turn done immediately rather than waiting on the server, and tracks how
-   * many stray "done" frames are still owed for it - see the giant comment
-   * on the `case 'done':` branch below for what that count is and why it
-   * exists at all.
+   * can preempt one: ask(), interrupt(), startVoiceTurn(), abandonVoiceTurn().
+   * Marks the last turn done immediately rather than waiting on the server,
+   * and - only when the server itself was last known to be THINKING or
+   * SPEAKING - counts one stray "done" still owed for it. See the giant
+   * comment on the `case 'done':` branch below for what that count is and
+   * why it exists at all, and lastServerStateRef's own comment for why the
+   * state check has to come from the server rather than being assumed.
+   *
+   * The state check exists because "a live turn is being cancelled" and
+   * "the server owes a stray done for it" are not the same fact.
+   * Session.on_cancel (server/session.py) only ever produces a "done" by
+   * cancelling a running reply task, and a task exists only once the
+   * server has moved past LISTENING into THINKING - never while it is still
+   * LISTENING (audio still arriving, "end" not sent yet) or IDLE. Two real
+   * paths cancel a turn precisely in that gap and owe nothing:
+   * server/session.py's on_text, when a typed question arrives while the
+   * server is still LISTENING to a voice turn, clears the audio buffer and
+   * starts its own reply without ever calling on_cancel (finding C3(b));
+   * and a voice turn where startCapture() threw right after "start" was
+   * sent, before "end" ever followed, so no reply task was ever created for
+   * it to begin with (abandonVoiceTurn's whole reason to call this at all).
+   * Counting a stray "done" in either case used to be unconditional, and
+   * permanently swallowed the *next* turn's genuine "done" instead - see
+   * useTurn.test.tsx's tests for both.
    *
    * Must be called only from inside a setTurns() updater, and only ever
    * with the `prev` that updater receives - never a value read from the
@@ -207,13 +226,16 @@ export function useTurn(): TurnValue {
     if (prev.length === 0 || prev[prev.length - 1].done) return prev
     if (lastCancelCheckRef.current !== prev) {
       lastCancelCheckRef.current = prev
-      pendingCancelsRef.current += 1
+      if (lastServerStateRef.current === 'thinking' || lastServerStateRef.current === 'speaking') {
+        pendingCancelsRef.current += 1
+      }
       // A new question, typed or spoken, always means whatever was still
       // sounding from the last one should stop now, not fade out - the
       // same thing a mic press interrupting a reply needs. Routed through
       // here rather than called separately by each of ask()/interrupt()/
       // startVoiceTurn() so it shares this function's exactly-once
-      // guarantee instead of needing its own.
+      // guarantee instead of needing its own. Harmless (Player.stop() on
+      // nothing playing) when the state gate above found nothing to count.
       voiceHandlersRef.current?.onInterrupt()
     }
     return updateLastTurn(prev, (turn) => ({ ...turn, done: true }))
@@ -290,6 +312,28 @@ export function useTurn(): TurnValue {
         // worth trying again - stale wording from the last drop would just
         // confuse someone who has since reconnected.
         setSendError(null)
+
+        // Every reconnect gets a brand-new server-side Session
+        // (server/main.py's ws_endpoint constructs one per socket), which
+        // starts in State.IDLE and owes nothing at all for whatever the
+        // *previous* socket left in flight (finding C3(a)). Reset the
+        // accounting to match, exactly as if this were the first connection
+        // ever made:
+        pendingCancelsRef.current = 0
+        lastCancelCheckRef.current = null
+        lastServerStateRef.current = 'idle'
+        // ...and reset the reactive `state` the same way (finding I5): the
+        // server only ever sends a `state` frame on a transition, never one
+        // just for connecting, so without this a socket that dropped while
+        // SPEAKING would reconnect with the face still animating "thinking
+        // · curious" and the mic still labelled "Hold to interrupt", neither
+        // of which the new session knows anything about.
+        setState('idle')
+        // A turn the previous socket left open (done: false) is never going
+        // to hear from this new session either - finalise it locally rather
+        // than let it strand the inspector (Message.tsx gates it on
+        // `turn.done`) until the person reloads the page.
+        setTurns((prev) => updateLastTurn(prev, (turn) => (turn.done ? turn : { ...turn, done: true })))
       }
 
       ws.onmessage = (event) => {
@@ -320,6 +364,10 @@ export function useTurn(): TurnValue {
         switch (frame.type) {
           case 'state':
             setState(frame.value as ConversationState)
+            // See lastServerStateRef's own comment - cancelCurrentTurn reads
+            // this synchronously, so it has to be updated here too, not just
+            // the reactive `state` above.
+            lastServerStateRef.current = frame.value as ConversationState
             break
           case 'emotion':
             setTurns((prev) =>
@@ -489,15 +537,21 @@ export function useTurn(): TurnValue {
   }, [])
 
   const abandonVoiceTurn = useCallback(() => {
-    // Finalises the turn locally, exactly like cancelCurrentTurn's own
-    // `{ ...turn, done: true }` - but with no pendingCancelsRef bump and no
-    // onInterrupt() call, since nothing was ever sent for this turn beyond
-    // "start" and nothing is currently sounding to interrupt. Guarding on
-    // `turn.done` (rather than assuming the last turn is always the one to
-    // abandon) keeps a stray or repeated call harmless, the same tolerance
-    // cancelCurrentTurn has for a `prev` whose last turn is already done.
-    setTurns((prev) => updateLastTurn(prev, (turn) => (turn.done ? turn : { ...turn, done: true })))
-  }, [])
+    // Delegates to the shared cancelCurrentTurn rather than hand-rolling its
+    // own "finalise but never count" logic. That used to be necessary: the
+    // old cancelCurrentTurn bumped pendingCancelsRef unconditionally, which
+    // was wrong here (no reply task was ever created for a turn that never
+    // got past "start"), so this function existed purely to route around
+    // that bug. Now that cancelCurrentTurn only counts a stray "done" when
+    // the server was last known to be THINKING or SPEAKING - never true at
+    // this point, since startCapture() throwing happens before "end" is
+    // ever sent - calling it directly here already produces the same
+    // "finalise, don't count" result, so there is nothing left for a
+    // separate implementation to get right on its own. It still sends
+    // nothing to the socket, same as before: cancelCurrentTurn itself never
+    // touches the socket, only the callers around it do.
+    setTurns((prev) => cancelCurrentTurn(prev))
+  }, [cancelCurrentTurn])
 
   const onVoiceReply = useCallback((handlers: VoiceReplyHandlers): (() => void) => {
     voiceHandlersRef.current = handlers

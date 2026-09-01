@@ -118,6 +118,12 @@ describe('useTurn', () => {
       result.current.ask('first question')
     })
     act(() => ws.frame({ type: 'reply', value: 'Partial answer.' }))
+    // The turn being cancelled below has actually reached the server state
+    // (SPEAKING) where a reply task exists and a cancel really does owe a
+    // stray "done" - see cancelCurrentTurn's state gate in useTurn.ts. Without
+    // this frame the swallow this test checks for would not happen at all,
+    // and the test would pass for the wrong reason.
+    act(() => ws.frame({ type: 'state', value: 'speaking' }))
 
     // Interrupts the still-streaming first turn - the exact moment the
     // pre-fix code double-counted the pending cancel.
@@ -160,6 +166,9 @@ describe('useTurn', () => {
       result.current.ask('first question')
     })
     act(() => ws.frame({ type: 'reply', value: 'Partial answer.' }))
+    // As above: the state gate needs the server to actually be THINKING or
+    // SPEAKING for a cancel to owe a stray "done" at all.
+    act(() => ws.frame({ type: 'state', value: 'thinking' }))
 
     // Two real interrupts in one tick - both actually reach the socket, but
     // only the first is a real cancellation server-side.
@@ -289,5 +298,120 @@ describe('useTurn', () => {
 
     expect(result.current.turns[0].sentences).toEqual(['One.', 'Two.', 'Three.'])
     expect(result.current.turns[0].done).toBe(true)
+  })
+
+  it('finalises an orphaned turn and drops stale accounting when the socket reconnects mid-turn', () => {
+    // Finding C3(a): server/main.py hands a fresh socket a brand-new
+    // Session, which owes nothing for a turn the *previous* socket never
+    // finished. The pre-fix code left that turn `done: false` forever and
+    // still bumped pendingCancelsRef on the next ask(), expecting a stray
+    // "done" the new Session was never going to send - which then ate that
+    // next turn's genuine "done" instead. ws.onopen now resets the
+    // accounting and finalises the dangling turn itself.
+    vi.useFakeTimers()
+    try {
+      const { result } = renderHook(() => useTurn(), { wrapper })
+      const ws1 = lastSocket()
+      act(() => ws1.open())
+
+      act(() => {
+        result.current.ask('first question')
+      })
+      act(() => ws1.frame({ type: 'state', value: 'thinking' }))
+      act(() => ws1.frame({ type: 'reply', value: 'Partial answer.' }))
+
+      // The socket drops mid-reply - no "end", no "done" ever follows for
+      // this turn on this socket.
+      act(() => ws1.close())
+
+      // RECONNECT_DELAYS_MS[0] is 1000ms.
+      act(() => {
+        vi.advanceTimersByTime(1000)
+      })
+      const ws2 = lastSocket()
+      expect(ws2).not.toBe(ws1)
+      act(() => ws2.open())
+
+      // The fix lands entirely in ws.onopen, before any frame from the new
+      // session has arrived: the orphaned turn is finalised locally (so it
+      // stops looking cancellable) and the stale "thinking" state does not
+      // survive the reconnect (I5) - the face/mic must not keep announcing
+      // a reply that the new session knows nothing about.
+      expect(result.current.turns[0].done).toBe(true)
+      expect(result.current.state).toBe('idle')
+      expect(result.current.connection.status).toBe('open')
+
+      act(() => {
+        result.current.ask('second question')
+      })
+      act(() => ws2.frame({ type: 'state', value: 'thinking' }))
+      act(() => ws2.frame({ type: 'reply', value: 'Second answer.' }))
+      act(() => ws2.frame({ type: 'done' }))
+
+      // Pre-fix, this "done" was swallowed by a pendingCancelsRef the
+      // reconnect never should have left non-zero - stranding this turn on
+      // "thinking..." forever, and with it the inspector, which
+      // Message.tsx gates on `turn.done`.
+      expect(result.current.turns).toHaveLength(2)
+      expect(result.current.turns[1].sentences).toEqual(['Second answer.'])
+      expect(result.current.turns[1].done).toBe(true)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not swallow a typed question\'s "done" when it interrupts a turn still LISTENING', () => {
+    // Finding C3(b): server/session.py's on_text, when the server is still
+    // LISTENING (a voice turn in progress, no "end" sent yet), just clears
+    // the audio buffer and starts a reply - it never calls on_cancel,
+    // because no reply task exists yet to cancel. So exactly one "done"
+    // comes back for the typed turn, not two. The frame sequence below is
+    // exactly what the reviewer observed against a live mock server for
+    // start-then-text. The pre-fix code bumped pendingCancelsRef whenever
+    // it cancelled *any* live turn, regardless of server state, and ate
+    // that one "done" - stranding the typed turn on "thinking..." forever.
+    const { result } = renderHook(() => useTurn(), { wrapper })
+    const ws = lastSocket()
+    act(() => ws.open())
+
+    act(() => {
+      result.current.startVoiceTurn()
+    })
+    act(() => ws.frame({ type: 'state', value: 'listening' }))
+
+    act(() => {
+      result.current.ask('typed while listening')
+    })
+    act(() => ws.frame({ type: 'state', value: 'thinking' }))
+    act(() => ws.frame({ type: 'emotion', value: 'curious' }))
+    act(() => ws.frame({ type: 'state', value: 'speaking' }))
+    act(() => ws.frame({ type: 'reply', value: 'One.' }))
+    act(() => ws.frame({ type: 'reply', value: 'Two.' }))
+    act(() =>
+      ws.frame({
+        type: 'trace',
+        value: {
+          role: 'r', surface: 'web', facts: [], prompt: '', prompt_tokens: 0,
+          completion_tokens: 0, emotion: 'curious', spoken: false, stt_ms: 0, reply_ms: 0,
+        },
+      }),
+    )
+    act(() => ws.frame({ type: 'done' }))
+
+    expect(result.current.turns).toHaveLength(2)
+    expect(result.current.turns[0].done).toBe(true)
+    expect(result.current.turns[1].sentences).toEqual(['One.', 'Two.'])
+    expect(result.current.turns[1].done).toBe(true)
+
+    // A further question must not inherit any leftover miscount either.
+    act(() => {
+      result.current.ask('third question')
+    })
+    act(() => ws.frame({ type: 'state', value: 'thinking' }))
+    act(() => ws.frame({ type: 'reply', value: 'Third answer.' }))
+    act(() => ws.frame({ type: 'done' }))
+
+    expect(result.current.turns).toHaveLength(3)
+    expect(result.current.turns[2].done).toBe(true)
   })
 })
