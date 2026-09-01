@@ -12,6 +12,22 @@ async def store(tmp_path):
     await s.close()
 
 
+async def test_wal_and_a_busy_timeout_are_set_on_every_connection(store):
+    """Store, Accounts and Roles each open their own engine on the same
+    SQLite file, and a turn now costs writes across all three (a settings
+    read, a role read, two message rows) where it used to cost one write per
+    session. Without WAL a writer can lock out a reader; without a busy
+    timeout a second writer gets "database is locked" immediately instead of
+    waiting for the first to finish."""
+    from sqlalchemy import text
+
+    async with store._engine.connect() as conn:
+        mode = (await conn.execute(text("PRAGMA journal_mode"))).scalar()
+        timeout = (await conn.execute(text("PRAGMA busy_timeout"))).scalar()
+    assert mode == "wal"
+    assert timeout == 5000
+
+
 async def test_recent_facts_is_empty_for_an_unknown_device(store):
     assert await store.recent_facts("nobody") == []
 

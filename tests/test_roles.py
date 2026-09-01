@@ -12,6 +12,16 @@ async def roles(tmp_path):
     await r.close()
 
 
+async def test_wal_and_a_busy_timeout_are_set_on_every_connection(roles):
+    from sqlalchemy import text
+
+    async with roles._engine.connect() as conn:
+        mode = (await conn.execute(text("PRAGMA journal_mode"))).scalar()
+        timeout = (await conn.execute(text("PRAGMA busy_timeout"))).scalar()
+    assert mode == "wal"
+    assert timeout == 5000
+
+
 async def test_ensure_defaults_creates_one_role_per_surface(roles):
     names = sorted(role.name for role in await roles.all())
     assert names == ["Device default", "Web default"]

@@ -21,11 +21,49 @@ import struct
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable
 
-from sqlalchemy import Integer, Float, LargeBinary, String, DateTime, Text, select, delete
+from sqlalchemy import Integer, Float, LargeBinary, String, DateTime, Text, event, select, delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from server.costs import Usage
+
+
+def _set_sqlite_pragmas(engine) -> None:
+    """WAL plus a 5 s busy timeout on every new connection.
+
+    Store, Accounts (server/accounts.py) and Roles (server/roles.py) each
+    open their own engine on the same SQLite file, and a turn now costs
+    writes across all three - a settings read, a role read, and two
+    `messages` rows - where it used to cost one write per session. Without
+    WAL a writer can lock a reader out; without a busy timeout a second
+    writer gets "database is locked" immediately instead of waiting the 5 s
+    it usually takes the first one to finish, and that would surface as a
+    lost recording (caught and logged) or a failed role write (a 500).
+
+    synchronous=NORMAL is SQLite's own documented pairing for WAL: WAL
+    already makes a transaction durable against an application crash once
+    it is in the WAL file, so NORMAL's one dropped guarantee - surviving an
+    OS crash or power loss between that write and the next checkpoint - is
+    not a real loss for what is stored here, and it is what keeps a commit a
+    single fsync of the WAL file instead of two. Left at the default FULL,
+    every commit down all three engines syncs twice; that difference is
+    invisible on Railway's disk but shows up as this project's SQLite tests
+    going from single-digit seconds to a minute or more of pure I/O wait
+    under this sandbox's syscall interception.
+
+    Duplicated verbatim in accounts.py and roles.py: those two modules are
+    deliberately independent of this one and of each other (see their own
+    module docstrings), so a shared module was rejected in favour of three
+    copies that stay in sync by inspection rather than one that would make
+    them import each other.
+    """
+    @event.listens_for(engine.sync_engine, "connect")
+    def _pragmas(dbapi_connection, connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.close()
 
 
 def _now() -> datetime:
@@ -130,6 +168,7 @@ class AppSetting(Base):
 class Store:
     def __init__(self, url: str) -> None:
         self._engine = create_async_engine(url, future=True)
+        _set_sqlite_pragmas(self._engine)
         self._session: async_sessionmaker[AsyncSession] = async_sessionmaker(
             self._engine, expire_on_commit=False
         )

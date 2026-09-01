@@ -9,9 +9,37 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 
 import bcrypt
-from sqlalchemy import Integer, String, select
+from sqlalchemy import Integer, String, event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+
+def _set_sqlite_pragmas(engine) -> None:
+    """WAL plus a 5 s busy timeout on every new connection.
+
+    synchronous=NORMAL is SQLite's own documented pairing for WAL: WAL
+    already makes a transaction durable against an application crash once
+    it is in the WAL file, so NORMAL's one dropped guarantee - surviving an
+    OS crash or power loss between that write and the next checkpoint - is
+    not a real loss for what is stored here, and it is what keeps a commit a
+    single fsync of the WAL file instead of two. Left at the default FULL,
+    every commit down all three engines syncs twice; that difference is
+    invisible on Railway's disk but shows up as this project's SQLite tests
+    going from single-digit seconds to a minute or more of pure I/O wait
+    under this sandbox's syscall interception.
+
+    Duplicated verbatim in server/memory/store.py (see its docstring for the
+    full reasoning) and server/roles.py: Accounts is deliberately independent
+    of both, so a shared module was rejected in favour of three copies kept
+    in sync by inspection.
+    """
+    @event.listens_for(engine.sync_engine, "connect")
+    def _pragmas(dbapi_connection, connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.close()
 
 
 _BCRYPT_MAX_BYTES = 72
@@ -58,6 +86,7 @@ class User(Base):
 class Accounts:
     def __init__(self, url: str) -> None:
         self._engine = create_async_engine(url, future=True)
+        _set_sqlite_pragmas(self._engine)
         self._session: async_sessionmaker[AsyncSession] = async_sessionmaker(
             self._engine, expire_on_commit=False
         )

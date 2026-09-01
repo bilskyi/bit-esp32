@@ -13,6 +13,16 @@ async def accounts(tmp_path):
     await a.close()
 
 
+async def test_wal_and_a_busy_timeout_are_set_on_every_connection(accounts):
+    from sqlalchemy import text
+
+    async with accounts._engine.connect() as conn:
+        mode = (await conn.execute(text("PRAGMA journal_mode"))).scalar()
+        timeout = (await conn.execute(text("PRAGMA busy_timeout"))).scalar()
+    assert mode == "wal"
+    assert timeout == 5000
+
+
 async def test_verify_password_is_false_for_an_unknown_user(accounts):
     assert await accounts.verify_password("nobody", "whatever") is False
 
