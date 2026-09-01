@@ -382,6 +382,30 @@ def test_an_unknown_api_path_stays_a_json_404():
     assert "text/html" not in r.headers.get("content-type", "")
 
 
+def test_a_large_response_is_compressed(tmp_path):
+    """Starlette's FileResponse and StaticFiles never compress on their own.
+
+    Without middleware the face frames went over the wire as 1.2 MB of
+    base64 - which voided the reason base64 was kept ("gzipped they are
+    42 KB"). That was only true if something actually gzipped them.
+    """
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "index.html").write_text("<!doctype html><title>app</title>")
+    (tmp_path / "big.json").write_text('{"padding":"' + "x" * 4000 + '"}')
+    with client(web_dist=str(tmp_path)) as c:
+        r = c.get("/big.json", headers={"Accept-Encoding": "gzip"})
+    assert r.status_code == 200
+    assert r.headers.get("content-encoding") == "gzip"
+
+
+def test_a_small_response_is_not_compressed():
+    """Below the threshold, compression costs more than it saves."""
+    with client() as c:
+        r = c.get("/healthz", headers={"Accept-Encoding": "gzip"})
+    assert r.status_code == 200
+    assert "content-encoding" not in r.headers
+
+
 def test_a_missing_bundle_does_not_break_the_api():
     """web/dist is git-ignored, so a fresh clone has no bundle. The API must
     still answer rather than failing at import.

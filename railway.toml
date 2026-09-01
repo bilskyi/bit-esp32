@@ -1,16 +1,26 @@
 [build]
+# No builder key: the two-stage Dockerfile is used, because this repo now has
+# a package.json and nixpacks has to be coaxed into a dual-runtime build.
 
 [deploy]
-startCommand = "uvicorn server.main:app --host 0.0.0.0 --port $PORT"
+# Deliberately NO startCommand. Under a Dockerfile build Railway runs an
+# overriding start command in exec form, which does not expand variables - so
+# "--port $PORT" would reach uvicorn literally, it would exit, restartPolicy
+# would restart it, and the healthcheck would fail 120 s later with the device
+# already pointed at a dead service. The image's own CMD does the expansion
+# through sh and is the only thing that should start this app.
 healthcheckPath = "/healthz"
 # The embedding model loads before the app accepts any connection, healthz
-# included. Measured locally: a cold download of the ~0.22 GB quantized
-# model took up to 36 s on its own. 30 s was fine before that dependency
-# existed; it is not anymore. EMBEDDING_CACHE_DIR points at the volume, so
-# this cost is paid once, not on every redeploy - but the first boot after
-# this change still pays it.
-healthcheckTimeout = 120
+# included. Measured locally: a cold download of the ~0.22 GB quantized model
+# took up to 36 s on its own, and the first boot after a change also pays
+# backfill_embeddings over every existing fact, serialised in the lifespan
+# before the port is bound. Railway's own default is 300 s; 120 was tighter
+# than the default on precisely the boot that needs the most room.
+healthcheckTimeout = 300
 restartPolicyType = "on_failure"
 
 # SQLite lives on disk. Without a volume mounted at /data the memory database
-# is wiped on every redeploy — attach one and set DB_PATH=/data/voice.db.
+# is wiped on every redeploy - attach one and set DB_PATH=/data/voice.db.
+# DB_PATH defaults to a relative voice.db, which lands inside the container and
+# boots perfectly healthy while showing none of the real facts, so this is not
+# optional.

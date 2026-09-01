@@ -1,7 +1,10 @@
 """One-time (or repeatable) tool to set the web login password.
 
 There is exactly one account. Run locally against DB_PATH, or against
-Railway's volume: `railway run python scripts/create_account.py --username you --password ...`
+Railway's volume - and note which is which, because getting it wrong is
+silent: `railway run` executes on your laptop with Railway's variables
+injected, so it writes to a local file, not to /data. Inside the container:
+`railway ssh -- python scripts/create_account.py --username you --password ...`
 """
 
 import argparse

@@ -350,7 +350,7 @@ things to get right:
 Before the web login can be used, set the one account's password once:
 `uv run python scripts/create_account.py --username <you> --password <...>`.
 Against the production volume, run it via
-`railway run python scripts/create_account.py --username <you> --password <...>`.
+`railway ssh -- python scripts/create_account.py --username <you> --password <...>`.
 
 ## Deliberately out of scope
 

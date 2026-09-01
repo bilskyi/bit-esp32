@@ -14,6 +14,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket,
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 from server.accounts import Accounts
@@ -201,6 +202,12 @@ def create_app(
 
     app = FastAPI(title="voice-companion", lifespan=lifespan)
     app.state.settings = settings
+    # Nothing was compressed before this. Starlette's FileResponse and
+    # StaticFiles never compress, so the face frames went over the wire as
+    # 1.2 MB of base64 - which quietly voided the reason base64 was kept in
+    # the first place ("gzipped they are 42 KB, and the wire cost is what
+    # matters"). It was only true if something actually gzipped them.
+    app.add_middleware(GZipMiddleware, minimum_size=1000)
     app.add_middleware(
         SessionMiddleware,
         secret_key=session_secret_key,
