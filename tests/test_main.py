@@ -674,6 +674,27 @@ def test_a_bearer_socket_never_receives_a_trace_frame():
     assert "trace" not in seen
 
 
+# --------------------------------------------------- conversations API
+
+def test_deleting_conversations_requires_login():
+    with client() as c:
+        assert c.delete("/conversations/default").status_code == 401
+
+
+def test_deleting_conversations_deletes_and_leaves_facts_intact():
+    from tests.fakes import FakeStore
+
+    store = FakeStore()
+    with client(store=store) as c:
+        _login(c)
+        c.post("/memory/default", json={"text": "keep me"})
+        r = c.delete("/conversations/default")
+        assert r.status_code == 200 and r.json() == {"status": "ok"}
+        listed = c.get("/memory/default").json()
+    assert any(item["text"] == "keep me" for item in listed)
+    assert store.deleted_conversations_for == ["default"]
+
+
 def test_app_settings_require_login():
     with client() as c:
         assert c.get("/settings/app").status_code == 401

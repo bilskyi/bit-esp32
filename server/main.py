@@ -263,6 +263,11 @@ def create_app(
         await app.state.store.forget(device_id)
         return {"status": "ok"}
 
+    @app.delete("/conversations/{device_id}", dependencies=[Depends(require_login)])
+    async def clear_conversations(device_id: str) -> dict:
+        await app.state.store.delete_conversations(device_id)
+        return {"status": "ok"}
+
     @app.get("/roles", dependencies=[Depends(require_login)])
     async def list_roles() -> list[dict]:
         return [_role_json(r) for r in await app.state.roles.all()]

@@ -309,10 +309,40 @@ class Store:
             await s.commit()
             return len(rows)
 
+    async def delete_conversations(self, device_id: str) -> None:
+        """Delete a device's recorded conversations and their messages,
+        without touching its facts.
+
+        Its own method, not folded silently into forget(): the new
+        DELETE /conversations endpoint exists precisely so transcripts can
+        be dropped independently of the facts extracted from them.
+        """
+        async with self._session() as s:
+            conversation_ids = list(
+                await s.scalars(
+                    select(Conversation.id).where(Conversation.device_id == device_id)
+                )
+            )
+            for start in range(0, len(conversation_ids), self._PURGE_BATCH_SIZE):
+                batch = conversation_ids[start : start + self._PURGE_BATCH_SIZE]
+                await s.execute(delete(Message).where(Message.conversation_id.in_(batch)))
+            await s.execute(delete(Conversation).where(Conversation.device_id == device_id))
+            await s.commit()
+
     async def forget(self, device_id: str) -> None:
+        """Forget a device entirely: its facts, and every transcript of it.
+
+        Before this deleted only Fact rows, so a verbatim record of every
+        conversation survived a "wipe this device's memory" call - the
+        person doing the wiping would believe the data was gone while it
+        stayed on the volume. `forget` is documented (README) as the whole
+        wipe; delete_conversations is what to call instead when only the
+        transcripts, not the facts, should go.
+        """
         async with self._session() as s:
             await s.execute(delete(Fact).where(Fact.device_id == device_id))
             await s.commit()
+        await self.delete_conversations(device_id)
 
     async def log_usage(self, device_id: str, usage: Usage) -> None:
         async with self._session() as s:

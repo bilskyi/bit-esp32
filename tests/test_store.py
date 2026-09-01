@@ -235,6 +235,65 @@ async def test_ending_a_conversation_stamps_it(store):
     assert (await store.conversation_rows("dev1"))[0]["ended_at"] is not None
 
 
+# ------------------------------------------------------ deleting transcripts
+
+async def test_delete_conversations_removes_everything_for_that_device(store):
+    cid = await store.start_conversation("dev1", "web", "Web default")
+    await store.record_turn(cid, question="q", reply="r", emotion=None,
+                            prompt_tokens=1, completion_tokens=1, latency_ms=1.0)
+    await store.delete_conversations("dev1")
+    assert await store.conversation_rows("dev1") == []
+
+
+async def test_delete_conversations_leaves_another_devices_alone(store):
+    cid1 = await store.start_conversation("dev1", "web", "Web default")
+    await store.record_turn(cid1, question="q", reply="r", emotion=None,
+                            prompt_tokens=1, completion_tokens=1, latency_ms=1.0)
+    cid2 = await store.start_conversation("dev2", "web", "Web default")
+    await store.record_turn(cid2, question="q2", reply="r2", emotion=None,
+                            prompt_tokens=1, completion_tokens=1, latency_ms=1.0)
+    await store.delete_conversations("dev1")
+    assert await store.conversation_rows("dev1") == []
+    assert len(await store.conversation_rows("dev2")) == 1
+
+
+async def test_delete_conversations_leaves_facts_intact(store):
+    """DELETE /conversations/{device_id} exists precisely so transcripts can
+    be dropped without dropping the facts extracted from them."""
+    cid = await store.start_conversation("dev1", "web", "Web default")
+    await store.record_turn(cid, question="q", reply="r", emotion=None,
+                            prompt_tokens=1, completion_tokens=1, latency_ms=1.0)
+    await store.add_facts("dev1", ["a fact"])
+    await store.delete_conversations("dev1")
+    assert await store.recent_facts("dev1") == ["a fact"]
+
+
+async def test_forget_deletes_conversations_and_messages_too(store):
+    """Store.forget is documented (README) as forgetting a device entirely.
+    Before this fix it deleted only Fact rows, so a verbatim transcript of
+    every conversation survived a 'wipe this device's memory' call - the
+    owner would believe the data was gone when it was still on the volume."""
+    cid = await store.start_conversation("dev1", "web", "Web default")
+    await store.record_turn(cid, question="q", reply="r", emotion=None,
+                            prompt_tokens=1, completion_tokens=1, latency_ms=1.0)
+    await store.add_facts("dev1", ["a fact"])
+    await store.forget("dev1")
+    assert await store.conversation_rows("dev1") == []
+    assert await store.recent_facts("dev1") == []
+
+
+async def test_forget_leaves_another_devices_conversations_alone(store):
+    cid1 = await store.start_conversation("dev1", "web", "Web default")
+    await store.record_turn(cid1, question="q", reply="r", emotion=None,
+                            prompt_tokens=1, completion_tokens=1, latency_ms=1.0)
+    cid2 = await store.start_conversation("dev2", "web", "Web default")
+    await store.record_turn(cid2, question="q2", reply="r2", emotion=None,
+                            prompt_tokens=1, completion_tokens=1, latency_ms=1.0)
+    await store.forget("dev1")
+    assert await store.conversation_rows("dev1") == []
+    assert len(await store.conversation_rows("dev2")) == 1
+
+
 async def test_purge_removes_conversations_past_retention(store):
     from datetime import datetime, timedelta, timezone
 

@@ -97,6 +97,7 @@ class FakeStore:
         self.turns: list[tuple[str, str, str | None]] = []
         self.started: list[int] = []
         self.ended: list[int] = []
+        self.deleted_conversations_for: list[str] = []
         self._store_conversations = store_conversations
 
     async def app_settings(self) -> dict:
@@ -159,10 +160,14 @@ class FakeStore:
         self._memory[device_id] = [i for i in items if i["id"] != fact_id]
         return len(self._memory[device_id]) != before
 
+    async def delete_conversations(self, device_id: str) -> None:
+        self.deleted_conversations_for.append(device_id)
+
     async def forget(self, device_id: str) -> None:
         self.facts[device_id] = []
         self.standing[device_id] = []
         self._memory[device_id] = []
+        await self.delete_conversations(device_id)
 
     async def log_usage(self, device_id: str, usage) -> None:
         self.usage_logged.append((device_id, usage))
