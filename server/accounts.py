@@ -6,6 +6,7 @@ SQLite file, same Store.__init__(url) pattern, its own table.
 """
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 import bcrypt
 from sqlalchemy import Integer, String, select
@@ -14,6 +15,23 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 _BCRYPT_MAX_BYTES = 72
+
+# bcrypt gets its own single-thread executor instead of asyncio.to_thread,
+# which would share the loop's default thread-pool executor with
+# server/providers/embeddings.py's embed_query() - and embed_query runs on
+# *every* device turn, before the prompt is assembled. /login is
+# unauthenticated, has no rate limit, and deliberately pays a full
+# gensalt()+hashpw even for an unknown username (see verify_password below),
+# so a handful of requests per second would otherwise queue bcrypt work
+# behind - or in front of - the retrieval step the device's
+# latency-to-first-audio budget depends on. Do not "simplify" this back to
+# asyncio.to_thread; that is exactly the contention this avoids.
+_BCRYPT_EXECUTOR = ThreadPoolExecutor(max_workers=1)
+
+
+async def _run_bcrypt(fn):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_BCRYPT_EXECUTOR, fn)
 
 
 def _bcrypt_bytes(password: str) -> bytes:
@@ -53,7 +71,7 @@ class Accounts:
 
     async def create_user(self, username: str, password: str) -> None:
         """Create the account, or replace the password if it already exists."""
-        password_hash = await asyncio.to_thread(
+        password_hash = await _run_bcrypt(
             lambda: bcrypt.hashpw(_bcrypt_bytes(password), bcrypt.gensalt()).decode("ascii")
         )
         async with self._session() as s:
@@ -70,8 +88,8 @@ class Accounts:
             if user is None:
                 # Hash something anyway - a real username and an unknown one
                 # should not be distinguishable by response time.
-                await asyncio.to_thread(lambda: bcrypt.hashpw(_bcrypt_bytes(password), bcrypt.gensalt()))
+                await _run_bcrypt(lambda: bcrypt.hashpw(_bcrypt_bytes(password), bcrypt.gensalt()))
                 return False
-            return await asyncio.to_thread(
+            return await _run_bcrypt(
                 lambda: bcrypt.checkpw(_bcrypt_bytes(password), user.password_hash.encode("ascii"))
             )
