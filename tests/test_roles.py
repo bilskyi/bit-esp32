@@ -1,6 +1,6 @@
 import pytest
 
-from server.roles import DEVICE_DEFAULT, WEB_DEFAULT, NameTaken, Role, Roles
+from server.roles import DEVICE_DEFAULT, WEB_DEFAULT, NameTaken, Roles
 
 
 @pytest.fixture

@@ -199,7 +199,7 @@ Create `tests/test_roles.py`:
 ```python
 import pytest
 
-from server.roles import DEVICE_DEFAULT, WEB_DEFAULT, Role, Roles
+from server.roles import DEVICE_DEFAULT, WEB_DEFAULT, Roles
 
 
 @pytest.fixture
