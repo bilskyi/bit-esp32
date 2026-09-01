@@ -771,7 +771,9 @@ def test_no_pinned_mood_adds_no_mood_rule():
     from server.persona import BASE, build_system_prompt
     from server.roles import DEVICE_DEFAULT
 
-    assert "you feel" not in build_system_prompt([], DEVICE_DEFAULT, spoken=True).lower()
+    # "you feel" alone would be unsatisfiable: BASE's own tag rule says "how
+    # you feel about it". The pinned-mood rule is what must be absent.
+    assert "right now you feel" not in build_system_prompt([], DEVICE_DEFAULT, spoken=True).lower()
     assert build_system_prompt([], DEVICE_DEFAULT, spoken=True) == BASE
 
 
