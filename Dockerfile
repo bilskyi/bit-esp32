@@ -11,6 +11,11 @@ RUN pip install --no-cache-dir uv
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 COPY server/ ./server/
+# scripts/ has to be in the image, not just in the repo: create_account.py is
+# the only way to set the web login's password, and it has to run against the
+# volume's database. Without it the deployed app has no account and none of
+# the login-gated UI is reachable.
+COPY scripts/ ./scripts/
 COPY --from=web /web/dist ./web/dist
 ENV PATH="/app/.venv/bin:$PATH"
 CMD ["sh", "-c", "uvicorn server.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

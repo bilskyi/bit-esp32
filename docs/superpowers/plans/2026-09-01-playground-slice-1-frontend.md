@@ -928,6 +928,18 @@ before the reply is finished is the entire latency argument of this project."
 **Files:**
 - Modify: `README.md`, `RESUME.md`
 
+**The Dockerfile has never been built.** No Docker daemon was available in
+this environment or in any implementer's, so the image is validated by reading
+only. What *was* checked statically: `uv lock --check` passes so `--frozen`
+will resolve; test dependencies live in a `dev` group so `--no-dev` genuinely
+excludes them; `main.py` resolves `web/dist` to `/app/web/dist`, which is
+where the build stage copies it; `web/public` is not in `.dockerignore`, so
+the face frames reach `dist/`. One real gap was found and fixed this way —
+`scripts/` was not copied, so `create_account.py` would not have existed in
+the container and the deployed app could never have had a login account.
+**Build the image locally before deploying**, not on Railway: a failure there
+is slower to read and happens with the old version already replaced.
+
 - [ ] **Step 1: Pre-flight, in this order**
 
 1. `SESSION_SECRET_KEY` set in Railway variables. Empty means a random key per
