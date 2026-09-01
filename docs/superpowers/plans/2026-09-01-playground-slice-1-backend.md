@@ -1575,11 +1575,26 @@ In `tests/test_store.py`, rewrite the five `relevant_facts` tests:
 
 ```python
 async def test_relevant_facts_ranks_by_similarity_not_recency(store):
-    await store.add_facts("dev1", ["Has a cat named Musya", "Lives in Kyiv"],
-                          [[1.0, 0.0], [0.0, 1.0]])
+    """Three facts, deliberately inserted so that the correct answer matches
+    neither insertion order nor its reverse.
+
+    With two facts, any ordering the sort produces is also produced by some
+    trivial ORDER BY, so the test passed even with the sort removed. The
+    middle fact is what makes the assertion about similarity rather than
+    about rowid.
+    """
+    await store.add_facts(
+        "dev1",
+        ["Lives in Kyiv", "Has a cat named Musya", "Likes short answers"],
+        [[0.0, 1.0], [1.0, 0.0], [0.7, 0.7]],
+    )
     ranked = await store.relevant_facts("dev1", [1.0, 0.0])
-    assert [text for text, _ in ranked] == ["Has a cat named Musya", "Lives in Kyiv"]
-    assert ranked[0][1] > ranked[1][1]
+    assert [text for text, _ in ranked] == [
+        "Has a cat named Musya",
+        "Likes short answers",
+        "Lives in Kyiv",
+    ]
+    assert ranked[0][1] > ranked[1][1] > ranked[2][1]
     assert ranked[0][1] == pytest.approx(1.0)
 
 
