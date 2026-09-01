@@ -18,12 +18,12 @@ from starlette.middleware.sessions import SessionMiddleware
 from server.accounts import Accounts
 from server.config import Settings
 from server.memory.store import Store
-from server.persona import ESP32, WEB, Style
 from server.providers.edge_tts import EdgeTTS
 from server.providers.embeddings import FastEmbedEmbedder
 from server.providers.groq_llm import GroqLLM
 from server.providers.groq_stt import GroqSTT
 from server.providers.mock import MockEmbedder, MockLLM, MockSTT
+from server.roles import SPEAKABLE_LANGUAGES, Roles
 from server.session import Session
 
 log = logging.getLogger(__name__)
@@ -68,40 +68,62 @@ def _authorise_connection(ws: WebSocket, settings: Settings) -> str | None:
     return None
 
 
-async def _resolve_style(store, surface: str) -> Style:
-    if surface == "esp32":
-        # The ESP32's prompt is BASE, measured and protected (see RESUME.md) -
-        # never overridable, and never even looked up, so a stray override
-        # row (however it got there) can never affect it either.
-        return ESP32
-    if store is None:
-        return WEB
-    override = await store.get_style_override(surface)
-    if override is None:
-        return WEB
-    return Style(max_sentences=override["max_sentences"], markdown_allowed=override["markdown_allowed"])
-
-
 class LoginIn(BaseModel):
     username: str
     password: str
-
-
-class StyleIn(BaseModel):
-    max_sentences: int
-    markdown_allowed: bool
 
 
 class MemoryIn(BaseModel):
     text: str
 
 
+class RoleIn(BaseModel):
+    name: str
+    prompt: str | None = None
+    max_sentences: int = 2
+    markdown_allowed: bool = False
+    languages: list[str] = list(SPEAKABLE_LANGUAGES)
+    pinned_mood: str | None = None
+
+
+class RolePatch(BaseModel):
+    """Every field optional, and `prompt: null` means "revert to built-in".
+
+    model_fields_set is what separates "not sent" from "sent as null", which
+    is the whole reason this is a second model rather than RoleIn with
+    defaults.
+    """
+    name: str | None = None
+    prompt: str | None = None
+    max_sentences: int | None = None
+    markdown_allowed: bool | None = None
+    languages: list[str] | None = None
+    pinned_mood: str | None = None
+
+
+class ActiveRoleIn(BaseModel):
+    role_id: int
+
+
 # Read once at import, not per request - it's a static file, not a template.
 _MEMORY_UI_HTML = (Path(__file__).parent / "static" / "memory.html").read_text()
 
 
+def _role_json(role) -> dict:
+    return {
+        "id": role.id,
+        "name": role.name,
+        "prompt": role.prompt,
+        "max_sentences": role.max_sentences,
+        "markdown_allowed": role.markdown_allowed,
+        "languages": list(role.languages),
+        "pinned_mood": role.pinned_mood,
+    }
+
+
 def create_app(
-    settings=None, stt=None, llm=None, tts=None, store=None, embedder=None, accounts=None
+    settings=None, stt=None, llm=None, tts=None, store=None, embedder=None, accounts=None,
+    roles=None,
 ) -> FastAPI:
     """Build the app. Providers are injectable so tests need no network."""
     settings = settings or Settings()
@@ -109,6 +131,7 @@ def create_app(
 
     injected = store is not None
     accounts_injected = accounts is not None
+    roles_injected = roles is not None
 
     # A fixed fallback key would mean anyone who has read this file can forge
     # a session cookie the moment a real deploy forgets to set the real one.
@@ -131,6 +154,11 @@ def create_app(
         if not accounts_injected:
             app.state.accounts = Accounts(f"sqlite+aiosqlite:///{settings.db_path}")
             await app.state.accounts.init()
+        app.state.roles = roles
+        if not roles_injected:
+            app.state.roles = Roles(f"sqlite+aiosqlite:///{settings.db_path}")
+        await app.state.roles.init()
+        await app.state.roles.ensure_defaults()
         if settings.provider_mode == "mock":
             log.warning("PROVIDER_MODE=mock: speech is not actually transcribed")
             app.state.stt = stt or MockSTT()
@@ -150,6 +178,8 @@ def create_app(
             await app.state.store.close()
         if not accounts_injected and app.state.accounts is not None:
             await app.state.accounts.close()
+        if not roles_injected and app.state.roles is not None:
+            await app.state.roles.close()
 
     app = FastAPI(title="voice-companion", lifespan=lifespan)
     app.state.settings = settings
@@ -218,16 +248,61 @@ def create_app(
         await app.state.store.forget(device_id)
         return {"status": "ok"}
 
-    @app.get("/settings/style/{surface}", dependencies=[Depends(require_login)])
-    async def get_style(surface: str) -> dict:
-        style = await _resolve_style(app.state.store, surface)
-        return {"surface": surface, "max_sentences": style.max_sentences, "markdown_allowed": style.markdown_allowed}
+    @app.get("/roles", dependencies=[Depends(require_login)])
+    async def list_roles() -> list[dict]:
+        return [_role_json(r) for r in await app.state.roles.all()]
 
-    @app.put("/settings/style/{surface}", dependencies=[Depends(require_login)])
-    async def put_style(surface: str, body: StyleIn) -> dict:
-        if surface == "esp32":
-            raise HTTPException(status_code=400, detail="esp32's prompt is fixed and cannot be overridden")
-        await app.state.store.set_style_override(surface, body.max_sentences, body.markdown_allowed)
+    @app.post("/roles", dependencies=[Depends(require_login)])
+    async def create_role(body: RoleIn) -> dict:
+        try:
+            role = await app.state.roles.create(
+                name=body.name, prompt=body.prompt, max_sentences=body.max_sentences,
+                markdown_allowed=body.markdown_allowed,
+                languages=tuple(body.languages), pinned_mood=body.pinned_mood,
+            )
+        except ValueError as exc:
+            # A taken name is a conflict; a language with no voice or a mood
+            # that is not a face is an unprocessable value.
+            raise HTTPException(status_code=409 if "taken" in str(exc) else 422,
+                                detail=str(exc)) from exc
+        return {"id": role.id}
+
+    @app.put("/roles/{role_id}", dependencies=[Depends(require_login)])
+    async def update_role(role_id: int, body: RolePatch) -> dict:
+        fields = {}
+        for name in body.model_fields_set:
+            value = getattr(body, name)
+            fields[name] = tuple(value) if name == "languages" and value is not None else value
+        try:
+            role = await app.state.roles.update(role_id, **fields)
+        except ValueError as exc:
+            raise HTTPException(status_code=409 if "taken" in str(exc) else 422,
+                                detail=str(exc)) from exc
+        if role is None:
+            raise HTTPException(status_code=404, detail="not found")
+        return {"status": "ok"}
+
+    @app.delete("/roles/{role_id}", dependencies=[Depends(require_login)])
+    async def delete_role(role_id: int) -> dict:
+        try:
+            deleted = await app.state.roles.delete(role_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        if not deleted:
+            raise HTTPException(status_code=404, detail="not found")
+        return {"status": "ok"}
+
+    @app.get("/settings/surfaces", dependencies=[Depends(require_login)])
+    async def get_surfaces() -> dict:
+        return {
+            surface: _role_json(await app.state.roles.active_for(surface))
+            for surface in ("esp32", "web")
+        }
+
+    @app.put("/settings/surfaces/{surface}", dependencies=[Depends(require_login)])
+    async def set_surface_role(surface: str, body: ActiveRoleIn) -> dict:
+        if not await app.state.roles.set_active(surface, body.role_id):
+            raise HTTPException(status_code=404, detail="not found")
         return {"status": "ok"}
 
     @app.websocket("/ws")
@@ -240,7 +315,7 @@ def create_app(
         await websocket.accept()
 
         device_id = websocket.query_params.get("device", "default")
-        style = await _resolve_style(app.state.store, surface)
+        role = await app.state.roles.active_for(surface)
         session = Session(
             transport=WebSocketTransport(websocket),
             stt=app.state.stt,
@@ -250,7 +325,8 @@ def create_app(
             store=app.state.store,
             device_id=device_id,
             embedder=app.state.embedder,
-            style=style,
+            role=role,
+            surface=surface,
         )
         await session.load_memory()
 

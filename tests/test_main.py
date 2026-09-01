@@ -7,13 +7,19 @@ from starlette.websockets import WebSocketDisconnect
 
 from server.config import Settings
 from server.main import create_app
-from server.persona import BASE
 from tests.fakes import FakeAccounts, FakeEmbedder, FakeLLM, FakeSTT, FakeStore, FakeTTS, SlowTTS
 
 
 @contextmanager
-def client(stt=None, tts=None, store=None, accounts=None, **kw):
+def client(stt=None, tts=None, store=None, accounts=None, roles=None, **kw):
     kw.setdefault("session_cookie_secure", False)
+    import tempfile
+    from server.roles import Roles
+
+    tmp = tempfile.TemporaryDirectory()
+    real_roles = roles
+    if real_roles is None:
+        real_roles = Roles(f"sqlite+aiosqlite:///{tmp.name}/roles.db")
     app = create_app(
         settings=Settings(_env_file=None, **kw),
         stt=stt or FakeSTT(),
@@ -22,9 +28,13 @@ def client(stt=None, tts=None, store=None, accounts=None, **kw):
         store=store or FakeStore(),
         embedder=FakeEmbedder(),
         accounts=accounts or FakeAccounts(),
+        roles=real_roles,
     )
-    with TestClient(app) as c:
-        yield c
+    try:
+        with TestClient(app) as c:
+            yield c
+    finally:
+        tmp.cleanup()
 
 
 def test_healthz_reports_ok():
@@ -333,75 +343,145 @@ def test_websocket_still_rejects_a_bad_bearer_with_no_session():
             ws.receive_text()
 
 
-# -------------------------------------------------------- style settings API
+# ---------------------------------------------------------------- roles API
 
-def test_style_settings_requires_login():
+def _login(c):
+    r = c.post("/login", json={"username": "test", "password": "test123"})
+    assert r.status_code == 200
+    return c
+
+
+def test_roles_require_login():
     with client() as c:
-        r = c.get("/settings/style/web")
-    assert r.status_code == 401
+        assert c.get("/roles").status_code == 401
+        assert c.post("/roles", json={"name": "x"}).status_code == 401
+        assert c.put("/roles/1", json={"max_sentences": 2}).status_code == 401
+        assert c.delete("/roles/1").status_code == 401
+        assert c.get("/settings/surfaces").status_code == 401
+        assert c.put("/settings/surfaces/web", json={"role_id": 1}).status_code == 401
 
 
-def test_style_settings_roundtrips_after_login():
+def test_roles_lists_the_two_defaults_once_logged_in():
     with client() as c:
-        c.post("/login", json={"username": "test", "password": "test123"})
-        put = c.put("/settings/style/web", json={"max_sentences": 4, "markdown_allowed": True})
-        assert put.status_code == 200
-        got = c.get("/settings/style/web").json()
-    assert got == {"surface": "web", "max_sentences": 4, "markdown_allowed": True}
+        names = [r["name"] for r in _login(c).get("/roles").json()]
+    assert sorted(names) == ["Device default", "Web default"]
 
 
-def test_style_settings_default_before_any_override():
+def test_creating_a_role_then_listing_it():
     with client() as c:
-        c.post("/login", json={"username": "test", "password": "test123"})
-        got = c.get("/settings/style/esp32").json()
-    assert got == {"surface": "esp32", "max_sentences": 2, "markdown_allowed": False}
+        _login(c)
+        created = c.post("/roles", json={
+            "name": "Coach", "prompt": "You are a blunt coach.", "max_sentences": 3,
+            "markdown_allowed": False, "languages": ["uk", "en"], "pinned_mood": "excited",
+        })
+        assert created.status_code == 200
+        role = next(r for r in c.get("/roles").json() if r["name"] == "Coach")
+    assert role["id"] == created.json()["id"]
+    assert role["languages"] == ["uk", "en"]
+    assert role["pinned_mood"] == "excited"
 
 
-def test_a_web_style_override_does_not_affect_esp32():
+def test_a_duplicate_role_name_is_a_conflict():
     with client() as c:
-        c.post("/login", json={"username": "test", "password": "test123"})
-        c.put("/settings/style/web", json={"max_sentences": 4, "markdown_allowed": True})
-        got = c.get("/settings/style/esp32").json()
-    assert got == {"surface": "esp32", "max_sentences": 2, "markdown_allowed": False}
+        _login(c)
+        body = {"name": "Coach", "prompt": None, "max_sentences": 2,
+                "markdown_allowed": False, "languages": ["uk"], "pinned_mood": None}
+        assert c.post("/roles", json=body).status_code == 200
+        assert c.post("/roles", json=body).status_code == 409
 
 
-def test_esp32_style_cannot_be_overridden():
+def test_a_language_with_no_voice_is_rejected():
     with client() as c:
-        c.post("/login", json={"username": "test", "password": "test123"})
-        r = c.put("/settings/style/esp32", json={"max_sentences": 6, "markdown_allowed": True})
-        assert r.status_code == 400
-        got = c.get("/settings/style/esp32").json()
-    assert got == {"surface": "esp32", "max_sentences": 2, "markdown_allowed": False}
+        _login(c)
+        r = c.post("/roles", json={"name": "DE", "prompt": None, "max_sentences": 2,
+                                   "markdown_allowed": False, "languages": ["de"],
+                                   "pinned_mood": None})
+    assert r.status_code == 422
 
 
-def test_esp32_style_ignores_a_directly_seeded_override_row():
-    """Guards the actual Critical bug: even if an esp32 override row exists
-    in the database - however it got there, not just via the now-blocked
-    API write - it must never reach the device's prompt."""
-    store = FakeStore()
-    store._styles["esp32"] = {"max_sentences": 6, "markdown_allowed": True}
-    with client(store=store) as c:
-        c.post("/login", json={"username": "test", "password": "test123"})
-        got = c.get("/settings/style/esp32").json()
-    assert got == {"surface": "esp32", "max_sentences": 2, "markdown_allowed": False}
+def test_a_mood_that_is_not_a_face_is_rejected():
+    with client() as c:
+        _login(c)
+        r = c.post("/roles", json={"name": "Smug", "prompt": None, "max_sentences": 2,
+                                   "markdown_allowed": False, "languages": ["uk"],
+                                   "pinned_mood": "smug"})
+    assert r.status_code == 422
 
 
-def test_esp32_system_prompt_stays_base_despite_a_seeded_override():
-    """Same guard as above, but checked against what a real Session actually
-    sends the LLM, not just what the settings API reports."""
-    store = FakeStore()
-    store._styles["esp32"] = {"max_sentences": 6, "markdown_allowed": True}
-    with client(store=store) as c, c.websocket_connect("/ws") as ws:
-        ws.send_text(json.dumps({"type": "start"}))
-        assert json.loads(ws.receive_text())["value"] == "listening"
-        ws.send_bytes(b"\x00\x01" * 32000)
-        ws.send_text(json.dumps({"type": "end"}))
-        for _ in range(20):
-            message = ws.receive()
-            if "bytes" in message and message["bytes"] is not None:
-                continue
-            payload = json.loads(message["text"])
-            if payload.get("type") == "state" and payload["value"] == "idle":
-                break
-        llm = c.app.state.llm
-    assert llm.prompts[0][0] == {"role": "system", "content": BASE}
+def test_updating_a_role_changes_only_what_was_sent():
+    with client() as c:
+        _login(c)
+        role_id = c.post("/roles", json={"name": "Coach", "prompt": "Blunt.",
+                                         "max_sentences": 3, "markdown_allowed": False,
+                                         "languages": ["uk"], "pinned_mood": None}).json()["id"]
+        assert c.put(f"/roles/{role_id}", json={"max_sentences": 5}).status_code == 200
+        role = next(r for r in c.get("/roles").json() if r["id"] == role_id)
+    assert role["max_sentences"] == 5 and role["prompt"] == "Blunt."
+
+
+def test_clearing_a_prompt_reverts_to_the_built_in_wording():
+    """prompt: null is a real value, not an omission - it is the revert."""
+    with client() as c:
+        _login(c)
+        device = next(r for r in c.get("/roles").json() if r["name"] == "Device default")
+        c.put(f"/roles/{device['id']}", json={"prompt": "You are a pirate."})
+        assert next(r for r in c.get("/roles").json()
+                    if r["id"] == device["id"])["prompt"] == "You are a pirate."
+        c.put(f"/roles/{device['id']}", json={"prompt": None})
+        assert next(r for r in c.get("/roles").json()
+                    if r["id"] == device["id"])["prompt"] is None
+
+
+def test_updating_an_unknown_role_is_404():
+    with client() as c:
+        assert _login(c).put("/roles/999", json={"max_sentences": 2}).status_code == 404
+
+
+def test_an_explicit_null_language_list_is_a_422_not_a_500():
+    """Regression: Roles.update used to reach ",".join(None) for an explicit
+    languages: null, raising an unhandled TypeError (500) instead of the
+    ValueError the endpoint turns into a 422."""
+    with client() as c:
+        _login(c)
+        role_id = c.post("/roles", json={"name": "Coach", "prompt": None, "max_sentences": 2,
+                                         "markdown_allowed": False, "languages": ["uk"],
+                                         "pinned_mood": None}).json()["id"]
+        r = c.put(f"/roles/{role_id}", json={"languages": None})
+    assert r.status_code == 422
+
+
+def test_a_built_in_role_cannot_be_deleted():
+    with client() as c:
+        _login(c)
+        device = next(r for r in c.get("/roles").json() if r["name"] == "Device default")
+        assert c.delete(f"/roles/{device['id']}").status_code == 409
+
+
+def test_switching_the_active_role_for_a_surface():
+    with client() as c:
+        _login(c)
+        role_id = c.post("/roles", json={"name": "Terse", "prompt": None, "max_sentences": 1,
+                                         "markdown_allowed": False, "languages": ["uk"],
+                                         "pinned_mood": None}).json()["id"]
+        assert c.put("/settings/surfaces/esp32", json={"role_id": role_id}).status_code == 200
+        surfaces = c.get("/settings/surfaces").json()
+    assert surfaces["esp32"]["name"] == "Terse"
+    assert surfaces["web"]["name"] == "Web default"
+
+
+def test_switching_to_an_unknown_role_is_404():
+    with client() as c:
+        assert _login(c).put("/settings/surfaces/web",
+                             json={"role_id": 999}).status_code == 404
+
+
+def test_deleting_the_active_role_returns_the_surface_to_its_default():
+    with client() as c:
+        _login(c)
+        role_id = c.post("/roles", json={"name": "Terse", "prompt": None, "max_sentences": 1,
+                                         "markdown_allowed": False, "languages": ["uk"],
+                                         "pinned_mood": None}).json()["id"]
+        c.put("/settings/surfaces/esp32", json={"role_id": role_id})
+        assert c.delete(f"/roles/{role_id}").status_code == 200
+        surfaces = c.get("/settings/surfaces").json()
+    assert surfaces["esp32"]["name"] == "Device default"

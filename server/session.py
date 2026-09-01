@@ -17,7 +17,8 @@ from server.codec import AdpcmDecoder, AdpcmEncoder
 from server.emotion import LeadingTag, from_text, strip_tags
 from server.lang import DEFAULT, detect_language, voice_for
 from server.memory.summarise import extract_facts
-from server.persona import ESP32, build_system_prompt
+from server.persona import build_system_prompt
+from server.roles import DEVICE_DEFAULT
 from server.sentences import SentenceSplitter
 
 log = logging.getLogger(__name__)
@@ -42,7 +43,7 @@ class State(str, Enum):
 class Session:
     def __init__(
         self, transport, stt, llm, tts, settings, store=None, device_id="default", embedder=None,
-        style=ESP32,
+        style=DEVICE_DEFAULT,
     ):
         self.transport = transport
         self.stt = stt

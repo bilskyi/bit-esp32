@@ -99,6 +99,17 @@ async def test_update_validates_languages_too(roles):
         await roles.update(created.id, languages=("fr",))
 
 
+async def test_update_rejects_an_explicit_null_language_list(roles):
+    """Unlike prompt=None (a revert) and pinned_mood=None (an unpin),
+    languages=None is not a legitimate value - a role always needs at least
+    one language. Absent this guard, `",".join(None)` raises TypeError
+    instead of the ValueError the endpoint turns into a 422."""
+    created = await roles.create(name="Coach", prompt=None, max_sentences=3,
+                                 markdown_allowed=False, languages=("uk",), pinned_mood=None)
+    with pytest.raises(ValueError, match="language"):
+        await roles.update(created.id, languages=None)
+
+
 async def test_update_of_an_unknown_role_is_none(roles):
     assert await roles.update(999, max_sentences=2) is None
 

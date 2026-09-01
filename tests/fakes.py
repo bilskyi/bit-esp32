@@ -91,7 +91,6 @@ class FakeStore:
         self.usage_logged: list = []
         self._memory: dict[str, list[dict]] = {}
         self._next_id = 1
-        self._styles: dict[str, dict] = {}
 
     async def recent_facts(self, device_id: str, limit: int = 20) -> list[str]:
         return list(self.facts.get(device_id, []))
@@ -129,12 +128,6 @@ class FakeStore:
 
     async def log_usage(self, device_id: str, usage) -> None:
         self.usage_logged.append((device_id, usage))
-
-    async def get_style_override(self, surface: str) -> dict | None:
-        return self._styles.get(surface)
-
-    async def set_style_override(self, surface: str, max_sentences: int, markdown_allowed: bool) -> None:
-        self._styles[surface] = {"max_sentences": max_sentences, "markdown_allowed": markdown_allowed}
 
 
 class SlowTTS:

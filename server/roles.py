@@ -188,8 +188,14 @@ class Roles:
     async def update(self, role_id: int, **fields) -> Role | None:
         """Change only the fields named. `prompt=None` is a real value here -
         it is how a customised device role is reverted to the measured
-        wording - so absence, not None, means "leave alone".
+        wording - so absence, not None, means "leave alone". `pinned_mood=None`
+        is likewise real: it unpins the mood. `languages=None`, however, is
+        not a legitimate value for any caller - a role must always have at
+        least one language - so it is rejected the same way an empty tuple
+        is, rather than reaching `",".join(None)` as a TypeError.
         """
+        if "languages" in fields and fields["languages"] is None:
+            raise ValueError("a role needs at least one language")
         _validate(fields.get("languages"), fields.get("pinned_mood"))
         async with self._session() as s:
             row = await s.get(RoleRow, role_id)
