@@ -453,13 +453,16 @@ def create_app(
     app.add_middleware(
         SessionMiddleware,
         secret_key=session_secret_key,
-        # Railway terminates TLS at its edge and forwards to this container
-        # over plain HTTP, so the app itself never sees "https". Passing
-        # https_only=True here would make the cookie fail to round-trip in
-        # production, not just in tests - explicit False, not relying on
-        # Starlette's own default, so this stays true if that default ever
-        # changes.
-        https_only=False,
+        # Corrected after this plan was written, and left corrected here so
+        # the plan cannot teach the insecure default it originally argued
+        # for. The premise was wrong: https_only governs the Secure flag the
+        # *browser* enforces over the connection the browser made, which is
+        # real HTTPS at Railway's edge - not the plain HTTP hop inside the
+        # container. What actually needs it off is local dev over
+        # http://localhost and Starlette's TestClient, neither of which is
+        # HTTPS. Hence a setting that defaults to True, not a hardcoded False.
+        https_only=settings.session_cookie_secure,
+        same_site="lax",
     )
 ```
 
