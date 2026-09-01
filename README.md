@@ -46,7 +46,18 @@ For the real pipeline, put a Groq key in `.env` and drop `PROVIDER_MODE`.
 uv run pytest
 ```
 
-394 tests, no network, no hardware, under ten seconds.
+398 tests, no network, no hardware, under ten seconds.
+
+The web app has its own, deliberately narrow suite — 31 tests for logic a
+browser check cannot falsify (the socket hook's cancel accounting, the audio
+resampler, the role patch payload, the face's bit unpacking):
+
+```bash
+npm --prefix web test
+```
+
+Everything visual is checked by a person in a browser. That is thinner than
+the Python side and the frontend plan says so.
 
 ## Protocol
 
@@ -135,6 +146,46 @@ either door:
 `RELEVANT_FACTS_LIMIT` (default 6) caps how many auto facts reach the prompt
 per turn. `EMBEDDING_CACHE_DIR` should point at the same Railway volume the
 database uses, or every redeploy re-downloads the model.
+
+## Running the web app
+
+Two processes in development, so the frontend hot-reloads:
+
+```bash
+PROVIDER_MODE=mock SESSION_COOKIE_SECURE=False uv run uvicorn server.main:app --port 8000
+npm --prefix web dev          # Vite, proxying the API and /ws to :8000
+```
+
+`SESSION_COOKIE_SECURE=False` is not optional over plain `http://` — the
+browser silently discards a Secure cookie, so `/login` returns 200 and every
+call after it returns 401. Same when testing from a phone on your LAN. Note
+browsers also require HTTPS or `localhost` for microphone access, so voice
+needs `localhost` or a tunnel.
+
+Create the login before you try to sign in:
+
+```bash
+uv run python scripts/create_account.py --username you --password <something>
+```
+
+To serve the built app from FastAPI itself, as production does:
+
+```bash
+npm --prefix web run build     # writes web/dist, which FastAPI mounts at /
+```
+
+The device's eyes in the browser are **generated from the firmware**, not
+reimplemented — `firmware/host/face_preview.c` records why: a JavaScript copy
+of `face.c` drifts from the original within a day. Regenerate them only when
+`face.c` changes:
+
+```bash
+make -C firmware/host face-data   # writes web/public/face-frames.json
+```
+
+Deployment is a two-stage `Dockerfile` (Node builds the bundle, Python runs
+the server) rather than nixpacks, which has to be coaxed into a dual-runtime
+build.
 
 ## Roles: the personality, as rows
 
@@ -239,6 +290,19 @@ server/
   memory/
     store.py           facts, usage, conversations, app settings; cosine similarity in Python
     summarise.py       end-of-session fact extraction
+web/src/
+  api.ts               fetch wrapper, session state, 401 handling
+  useTurn.ts           the WebSocket, one turn at a time
+  Chat.tsx             transcript and composer
+  Inspector.tsx        what the turn actually did
+  Settings.tsx         roles, surfaces, recording
+  RoleEditor.tsx       one role's persona and knobs
+  Memory.tsx           remembered facts, and deleting them
+  Face.tsx             the device's eyes, played from face.c's own frames
+  audio.ts             16 kHz capture, resampling, PCM playback
+  traceStatus.ts       why a turn has no trace
+firmware/host/
+  face_export.c        writes web/public/face-frames.json from face.c
 ```
 
 `context.py`, `sentences.py`, `lang.py`, `audio.py` and `_retry.py` are not in
