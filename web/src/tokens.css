@@ -1,0 +1,49 @@
+/* Palette taken from the hardware: an SSD1306 is near-black glass emitting a
+   cool white, so the neutrals carry a blue bias and the only warm thing on
+   the page is the amber that means "running". Copied verbatim from
+   firmware/host/preview-template.html - do not hand-tune these. */
+:root {
+  --bg: #eceff4;
+  --surface: #ffffff;
+  --sunk: #e2e7ee;
+  --ink: #0f141b;
+  --ink-2: #525d6b;
+  --ink-3: #8a94a2;
+  --rule: #d3dae3;
+  --rule-soft: #e4e9f0;
+  --live: #9a5605;
+  --live-mark: #e8912a;
+  --glass: #05080c;
+  --grid: rgba(190, 225, 255, 0.055);
+  --emit: #cfeaff;
+  --shadow: 0 1px 2px rgba(15, 20, 27, .05), 0 8px 24px -12px rgba(15, 20, 27, .18);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1116;
+    --surface: #151b22;
+    --sunk: #101519;
+    --ink: #e7edf4;
+    --ink-2: #97a3b2;
+    --ink-3: #6a7684;
+    --rule: #242d37;
+    --rule-soft: #1c242c;
+    --live: #f0a63f;
+    --live-mark: #e8912a;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 10px 30px -14px rgba(0, 0, 0, .7);
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: ui-monospace, "SF Mono", Menlo, Monaco, monospace;
+}
+
+.prose {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
+}

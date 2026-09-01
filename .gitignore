@@ -19,3 +19,7 @@ firmware/managed_components/
 firmware/host/build/
 firmware/host/build-asan/
 firmware/.cache/
+
+# Frontend
+web/node_modules/
+web/dist/

@@ -1,0 +1,9 @@
+.git
+web/node_modules
+web/dist
+.venv
+firmware
+docs
+.superpowers
+*.db
+__pycache__

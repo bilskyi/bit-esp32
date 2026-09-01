@@ -11,7 +11,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -120,10 +121,6 @@ class ActiveRoleIn(BaseModel):
 # for the rest, and importing a private mapping just to get its keys would
 # be more coupling than the two literals are worth.
 _SURFACES = ("esp32", "web")
-
-
-# Read once at import, not per request - it's a static file, not a template.
-_MEMORY_UI_HTML = (Path(__file__).parent / "static" / "memory.html").read_text()
 
 
 def _role_json(role) -> dict:
@@ -242,11 +239,12 @@ def create_app(
         request.session.clear()
         return {"status": "ok"}
 
-    @app.get("/memory", response_class=HTMLResponse)
-    async def memory_ui() -> str:
-        # The page itself carries no data - it only reveals anything once its
-        # own fetch calls hit the endpoints below, which do check the token.
-        return _MEMORY_UI_HTML
+    @app.get("/me")
+    async def me(request: Request) -> dict:
+        user = request.session.get("user")
+        if not user:
+            raise HTTPException(status_code=401, detail="unauthorized")
+        return {"username": user}
 
     @app.get("/memory/{device_id}", dependencies=[Depends(require_token_or_login)])
     async def list_memory(device_id: str) -> list[dict]:
@@ -412,6 +410,27 @@ def create_app(
                 await session.finish()
             except Exception:
                 log.exception("session teardown failed")
+
+    # Registered last, so every API route above wins. The catch-all only
+    # answers GETs that look like navigation: anything else, and anything
+    # under a known API prefix, must keep returning a JSON 404 rather than
+    # an HTML page a fetch() would try to parse.
+    _DIST = Path(__file__).parent.parent / "web" / "dist"
+    _API_PREFIXES = (
+        "login", "logout", "me", "roles", "settings", "memory",
+        "conversations", "healthz", "ws",
+    )
+    if _DIST.is_dir():
+        app.mount("/assets", StaticFiles(directory=_DIST / "assets"), name="assets")
+
+        @app.get("/{path:path}", include_in_schema=False)
+        async def spa(path: str):
+            if path.split("/", 1)[0] in _API_PREFIXES:
+                raise HTTPException(status_code=404, detail="not found")
+            return FileResponse(_DIST / "index.html")
+    else:
+        log.warning("web/dist is missing - the API is up but there is no app to serve; "
+                    "run `npm --prefix web run build`")
 
     return app
 

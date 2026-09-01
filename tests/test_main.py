@@ -335,24 +335,6 @@ def test_memory_rejects_neither_credential():
     assert r.status_code == 401
 
 
-def test_memory_ui_is_served_with_no_token_needed():
-    """The page itself carries no data; only its own fetch calls are gated."""
-    with client(device_token="s3cret") as c:
-        r = c.get("/memory")
-    assert r.status_code == 200
-    assert r.headers["content-type"].startswith("text/html")
-    assert "<html" in r.text.lower()
-
-
-def test_memory_ui_never_builds_fact_text_as_markup():
-    """XSS guard: the page must render fact text with textContent, not
-    innerHTML - a stray fact should never become live markup in a browser."""
-    with client() as c:
-        r = c.get("/memory")
-    assert "textContent = item.text" in r.text
-    assert "innerHTML = item.text" not in r.text
-
-
 def test_login_with_the_right_password_sets_a_session_cookie():
     with client() as c:
         r = c.post("/login", json={"username": "test", "password": "test123"})
@@ -378,6 +360,33 @@ def test_logout_clears_the_session():
         r = c.post("/logout")
         assert r.status_code == 200
         assert "session" not in r.cookies or r.cookies.get("session") == ""
+
+
+def test_me_requires_a_login():
+    with client() as c:
+        assert c.get("/me").status_code == 401
+
+
+def test_me_names_the_logged_in_user():
+    with client() as c:
+        _login(c)
+        assert c.get("/me").json()["username"] == "test"
+
+
+def test_an_unknown_api_path_stays_a_json_404():
+    """The SPA fallback must not turn a mistyped API call into an HTML page:
+    a fetch() would parse it as JSON and fail somewhere far away."""
+    with client() as c:
+        r = c.get("/roles/nope/deeper")
+    assert r.status_code == 404
+    assert "text/html" not in r.headers.get("content-type", "")
+
+
+def test_a_missing_bundle_does_not_break_the_api():
+    """web/dist is git-ignored, so a fresh clone has no bundle. The API must
+    still answer rather than failing at import."""
+    with client() as c:
+        assert c.get("/healthz").status_code == 200
 
 
 def test_websocket_accepts_a_valid_session_cookie_with_no_bearer_token():
