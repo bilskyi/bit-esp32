@@ -77,23 +77,37 @@ function updateLastTurn(turns: Turn[], update: (turn: Turn) => Turn): Turn[] {
   return next
 }
 
-/** Called from ask() and interrupt(): the turn in flight, if any, is about
- * to be cancelled. Mark it done right away rather than waiting on the
- * server, and remember that one extra "done" is coming for it.
+/** Read from ask()/interrupt() before calling setTurns - never from inside
+ * a setState updater. It decides whether pendingCancelsRef gets bumped, and
+ * that has to happen exactly once per real call: React 19 StrictMode
+ * invokes a functional setState updater twice (with the same previous
+ * state) specifically to catch impure updaters, and a ref mutation living
+ * in that updater used to get double-counted there, which is Finding 1 -
+ * see markCurrentCancelled below for what that count is for. */
+function hasCancellableTurn(turns: Turn[]): boolean {
+  if (turns.length === 0) return false
+  return !turns[turns.length - 1].done
+}
+
+/** Called from the setTurns updaters in ask() and interrupt(): the turn in
+ * flight, if any, is about to be cancelled, so mark it done right away
+ * rather than waiting on the server. Pure - checks turn.done itself before
+ * doing anything, so calling it twice with the same turns array (exactly
+ * what StrictMode's double-invoke does) is harmless.
  *
- * That extra frame matters because the wire protocol carries no turn id.
- * When a question arrives mid-reply, session.on_text() cancels the running
- * task and *that* task's own finally block still sends "done" for itself
- * before the new turn produces anything - but by the time it reaches the
- * client, the new turn is already the current one. Left unhandled, that
- * stray "done" would close the new turn before a single sentence arrived.
- * pendingCancels is how many such stray frames are still owed; the "done"
- * handler below swallows exactly that many before applying one for real. */
-function cancelCurrentTurn(turns: Turn[], pendingCancels: { current: number }): Turn[] {
+ * Marking it done locally isn't the whole story, though: the wire protocol
+ * carries no turn id. When a question arrives mid-reply, session.on_text()
+ * cancels the running task and *that* task's own finally block still sends
+ * "done" for itself before the new turn produces anything - but by the time
+ * it reaches the client, the new turn is already the current one. Left
+ * unhandled, that stray "done" would close the new turn before a single
+ * sentence arrived. pendingCancelsRef is how many such stray frames are
+ * still owed; the "done" handler below swallows exactly that many before
+ * applying one for real - see hasCancellableTurn above for where the count
+ * itself gets incremented. */
+function markCurrentCancelled(turns: Turn[]): Turn[] {
   if (turns.length === 0) return turns
-  const current = turns[turns.length - 1]
-  if (current.done) return turns
-  pendingCancels.current += 1
+  if (turns[turns.length - 1].done) return turns
   return updateLastTurn(turns, (turn) => ({ ...turn, done: true }))
 }
 
@@ -282,19 +296,24 @@ export function useTurn(): TurnValue {
     }
   }, [notifyUnauthorized])
 
-  const ask = useCallback((text: string) => {
-    setTurns((prev) => {
-      const withoutStale = cancelCurrentTurn(prev, pendingCancelsRef)
+  const ask = useCallback(
+    (text: string) => {
+      if (hasCancellableTurn(turns)) pendingCancelsRef.current += 1
       const id = nextIdRef.current++
-      return [...withoutStale, { id, question: text, sentences: [], emotion: null, trace: null, done: false }]
-    })
-    socketRef.current?.send(JSON.stringify({ type: 'text', value: text }))
-  }, [])
+      setTurns((prev) => [
+        ...markCurrentCancelled(prev),
+        { id, question: text, sentences: [], emotion: null, trace: null, done: false },
+      ])
+      socketRef.current?.send(JSON.stringify({ type: 'text', value: text }))
+    },
+    [turns],
+  )
 
   const interrupt = useCallback(() => {
-    setTurns((prev) => cancelCurrentTurn(prev, pendingCancelsRef))
+    if (hasCancellableTurn(turns)) pendingCancelsRef.current += 1
+    setTurns((prev) => markCurrentCancelled(prev))
     socketRef.current?.send(JSON.stringify({ type: 'cancel' }))
-  }, [])
+  }, [turns])
 
   return useMemo(
     () => ({ connection, state, turns, ask, interrupt }),
