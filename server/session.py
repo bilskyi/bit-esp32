@@ -43,7 +43,7 @@ class State(str, Enum):
 class Session:
     def __init__(
         self, transport, stt, llm, tts, settings, store=None, device_id="default", embedder=None,
-        role=DEVICE_DEFAULT, surface="esp32",
+        role=DEVICE_DEFAULT, surface="esp32", roles=None,
     ):
         self.transport = transport
         self.stt = stt
@@ -55,6 +55,12 @@ class Session:
         self.embedder = embedder
         self.role = role
         self.surface = surface
+        # Optional: when given, self.role is re-resolved every turn (see
+        # _answer) instead of staying frozen at handshake time. Kept optional
+        # so Session stays constructible without a database - every test in
+        # tests/test_session.py that does not care about live role switching
+        # relies on exactly that.
+        self._roles = roles
 
         self.state = State.IDLE
         self.history: list[dict] = []
@@ -257,6 +263,17 @@ class Session:
         self, text: str, *, speak: bool = True, audio_seconds: float = 0.0,
         stt_ms: float = 0.0,
     ) -> None:
+        if self._roles is not None:
+            # Read per turn, not once at the handshake, for the same reason
+            # the recording setting below is read per turn: the ESP32 holds
+            # one long-lived socket, so switching a surface's active role -
+            # or pinning a mood - must take effect on the next question
+            # rather than requiring a reconnect. This has to run before
+            # build_system_prompt below: the prompt, and the pinned mood
+            # `say()` reads from self.role.pinned_mood, must both come from
+            # this same resolution, not a stale one from a previous turn.
+            self.role = await self._roles.active_for(self.surface)
+
         if self.store is not None:
             query_vector = await self.embedder.embed_query(text)
             self.retrieved = await self.store.relevant_facts(

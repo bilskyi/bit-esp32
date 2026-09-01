@@ -369,6 +369,7 @@ def create_app(
             embedder=app.state.embedder,
             role=role,
             surface=surface,
+            roles=app.state.roles,
         )
         await session.load_memory()
 

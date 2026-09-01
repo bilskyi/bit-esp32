@@ -688,6 +688,43 @@ def test_deleting_the_active_role_returns_the_surface_to_its_default():
     assert surfaces["esp32"]["name"] == "Device default"
 
 
+def test_switching_the_active_role_changes_the_next_turns_prompt_without_reconnecting():
+    """The ESP32 holds one long-lived socket; role= used to be frozen at the
+    handshake, so switching the active role did nothing until the device
+    reconnected. It must now reach the very next question on an already-open
+    connection."""
+    with client(device_token="s3cret") as c:
+        _login(c)
+        role_a = c.post("/roles", json={
+            "name": "Role A", "prompt": "You are Role A.", "max_sentences": 2,
+            "markdown_allowed": False, "languages": ["uk", "ru", "en"], "pinned_mood": None,
+        }).json()["id"]
+        role_b = c.post("/roles", json={
+            "name": "Role B", "prompt": "You are Role B.", "max_sentences": 2,
+            "markdown_allowed": False, "languages": ["uk", "ru", "en"], "pinned_mood": None,
+        }).json()["id"]
+        assert c.put("/settings/surfaces/esp32", json={"role_id": role_a}).status_code == 200
+
+        with c.websocket_connect("/ws", headers={"Authorization": "Bearer s3cret"}) as ws:
+            ws.send_text(json.dumps({"type": "start"}))
+            assert json.loads(ws.receive_text())["value"] == "listening"
+            ws.send_bytes(b"\x00\x01" * 32000)
+            ws.send_text(json.dumps({"type": "end"}))
+            controls(ws, answered())
+
+            assert c.put("/settings/surfaces/esp32", json={"role_id": role_b}).status_code == 200
+
+            ws.send_text(json.dumps({"type": "start"}))
+            assert json.loads(ws.receive_text())["value"] == "listening"
+            ws.send_bytes(b"\x00\x01" * 32000)
+            ws.send_text(json.dumps({"type": "end"}))
+            controls(ws, answered())
+
+        prompts = c.app.state.llm.prompts
+    assert prompts[0][0]["content"].startswith("You are Role A.")
+    assert prompts[1][0]["content"].startswith("You are Role B.")
+
+
 def test_a_bearer_socket_never_receives_a_trace_frame():
     with client(device_token="s3cret") as c:
         with c.websocket_connect("/ws", headers={"Authorization": "Bearer s3cret"}) as ws:

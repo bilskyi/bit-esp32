@@ -586,6 +586,78 @@ async def test_no_pinned_mood_leaves_the_models_tag_alone():
     assert emotions == ["happy"]
 
 
+async def test_switching_the_active_role_reaches_an_already_open_connection():
+    """The ESP32 holds one long-lived socket. role= is resolved once at the
+    handshake, but if that were the only resolution, switching a surface's
+    active role would do nothing until the device reconnects - which
+    contradicts hearing what a new role does on the very next question."""
+    from server.roles import Role, SPEAKABLE_LANGUAGES
+    from tests.fakes import FakeRoles
+
+    original = Role(id=1, name="Original", prompt="You are Role Original.",
+                    max_sentences=2, markdown_allowed=False,
+                    languages=SPEAKABLE_LANGUAGES, pinned_mood=None)
+    replacement = Role(id=2, name="Replacement", prompt="You are Role Replacement.",
+                       max_sentences=2, markdown_allowed=False,
+                       languages=SPEAKABLE_LANGUAGES, pinned_mood=None)
+    roles = FakeRoles(original)
+    llm = FakeLLM()
+    session = Session(
+        transport=FakeTransport(), stt=FakeSTT(), llm=llm, tts=FakeTTS(),
+        settings=Settings(_env_file=None), embedder=FakeEmbedder(),
+        role=original, roles=roles,
+    )
+    await utter(session)
+    assert llm.prompts[0][0]["content"].startswith("You are Role Original.")
+
+    roles.switch_to(replacement)
+    await utter(session)
+    assert llm.prompts[1][0]["content"].startswith("You are Role Replacement.")
+
+
+async def test_a_pinned_mood_set_mid_connection_reaches_the_next_turns_emotion_frame():
+    from server.roles import Role, SPEAKABLE_LANGUAGES
+    from tests.fakes import FakeRoles
+
+    unpinned = Role(id=1, name="R", prompt=None, max_sentences=2,
+                    markdown_allowed=False, languages=SPEAKABLE_LANGUAGES,
+                    pinned_mood=None)
+    pinned = Role(id=1, name="R", prompt=None, max_sentences=2,
+                 markdown_allowed=False, languages=SPEAKABLE_LANGUAGES,
+                 pinned_mood="sleepy")
+    roles = FakeRoles(unpinned)
+    session = Session(
+        transport=(transport := FakeTransport()), stt=FakeSTT(),
+        llm=FakeLLM("[happy] Все добре."), tts=FakeTTS(),
+        settings=Settings(_env_file=None), embedder=FakeEmbedder(),
+        role=unpinned, roles=roles,
+    )
+    await utter(session)
+    roles.switch_to(pinned)
+    await utter(session)
+
+    emotions = [f["value"] for f in transport.json if f.get("type") == "emotion"]
+    assert emotions == ["happy", "sleepy"]
+
+
+async def test_a_session_built_without_roles_keeps_the_constructor_role():
+    """roles= is optional so Session stays constructible without a database -
+    every other test in this file relies on exactly that."""
+    from server.roles import Role, SPEAKABLE_LANGUAGES
+
+    role = Role(id=1, name="R", prompt="You are Role R.", max_sentences=2,
+               markdown_allowed=False, languages=SPEAKABLE_LANGUAGES, pinned_mood=None)
+    llm = FakeLLM()
+    session = Session(
+        transport=FakeTransport(), stt=FakeSTT(), llm=llm, tts=FakeTTS(),
+        settings=Settings(_env_file=None), embedder=FakeEmbedder(), role=role,
+    )
+    await utter(session)
+    await utter(session)
+    assert session.role is role
+    assert all(p[0]["content"].startswith("You are Role R.") for p in llm.prompts)
+
+
 # ------------------------------------------------------------ typed questions
 
 async def test_on_text_skips_stt_entirely():

@@ -74,6 +74,20 @@ class FakeEmbedder:
         return [0.0]
 
 
+class FakeRoles:
+    """Lets a test change a surface's active role mid-connection, the way a
+    real Roles.set_active() would, without a database."""
+
+    def __init__(self, role) -> None:
+        self._role = role
+
+    async def active_for(self, surface: str):
+        return self._role
+
+    def switch_to(self, role) -> None:
+        self._role = role
+
+
 class FakeAccounts:
     def __init__(self, username: str = "test", password: str = "test123") -> None:
         self._username = username
