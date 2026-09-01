@@ -631,6 +631,33 @@ def test_a_built_in_role_cannot_be_deleted():
         assert c.delete(f"/roles/{device['id']}").status_code == 409
 
 
+def test_built_in_flag_appears_in_the_roles_list():
+    with client() as c:
+        by_name = {r["name"]: r["built_in"] for r in _login(c).get("/roles").json()}
+    assert by_name == {"Device default": True, "Web default": True}
+
+
+def test_a_created_role_is_not_built_in():
+    with client() as c:
+        _login(c)
+        role_id = c.post("/roles", json={"name": "Coach", "prompt": None, "max_sentences": 2,
+                                         "markdown_allowed": False, "languages": ["uk"],
+                                         "pinned_mood": None}).json()["id"]
+        role = next(r for r in c.get("/roles").json() if r["id"] == role_id)
+    assert role["built_in"] is False
+
+
+def test_renaming_a_built_in_role_via_the_api_is_refused_and_delete_stays_refused():
+    """The reviewer's exact repro: update(name=...) then delete() used to
+    turn the 409 into a 200 and a built-in role would be gone."""
+    with client() as c:
+        _login(c)
+        device = next(r for r in c.get("/roles").json() if r["name"] == "Device default")
+        r = c.put(f"/roles/{device['id']}", json={"name": "Foo"})
+        assert r.status_code == 422
+        assert c.delete(f"/roles/{device['id']}").status_code == 409
+
+
 def test_switching_the_active_role_for_a_surface():
     with client() as c:
         _login(c)

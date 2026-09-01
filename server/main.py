@@ -130,6 +130,7 @@ def _role_json(role) -> dict:
         "markdown_allowed": role.markdown_allowed,
         "languages": list(role.languages),
         "pinned_mood": role.pinned_mood,
+        "built_in": role.built_in,
     }
 
 

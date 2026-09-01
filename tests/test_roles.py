@@ -201,3 +201,90 @@ async def test_reverting_the_device_role_restores_the_measured_prompt(roles):
     assert (await roles.active_for("esp32")).prompt == "You are a pirate."
     await roles.update(device.id, prompt=None)
     assert (await roles.active_for("esp32")).prompt is None
+
+
+# ------------------------------------------------------------- built_in
+
+async def test_seeded_defaults_are_marked_built_in(roles):
+    for role in await roles.all():
+        assert role.built_in is True
+
+
+async def test_a_created_role_is_not_built_in(roles):
+    created = await roles.create(name="Coach", prompt=None, max_sentences=2,
+                                 markdown_allowed=False, languages=("uk",), pinned_mood=None)
+    assert created.built_in is False
+
+
+async def test_renaming_a_built_in_role_is_refused(roles):
+    """name is client-editable through PUT /roles/{id}, and Roles.delete only
+    refuses a built-in by matching its current *name* - so update(name=...)
+    then delete() used to turn the 409 into a 200 and a built-in role would
+    be gone. Blocking the rename closes that off at the source."""
+    device = next(r for r in await roles.all() if r.name == "Device default")
+    with pytest.raises(ValueError, match="built-in"):
+        await roles.update(device.id, name="Foo")
+    assert (await roles.get(device.id)).name == "Device default"
+
+
+async def test_deleting_a_built_in_role_is_still_refused_after_a_rename_attempt(roles):
+    device = next(r for r in await roles.all() if r.name == "Device default")
+    with pytest.raises(ValueError, match="built-in"):
+        await roles.update(device.id, name="Foo")
+    with pytest.raises(ValueError, match="built-in"):
+        await roles.delete(device.id)
+
+
+async def test_ensure_defaults_after_a_refused_rename_does_not_create_a_third_role(roles):
+    """The other half of the same bug: ensure_defaults() used to look a
+    default up *by name*, so a role renamed away from it (even attempted and
+    refused, in a version without that refusal) left ensure_defaults() blind
+    to the row it already seeded and it would insert a spurious third role
+    while the surface pointer kept aiming at the renamed one."""
+    device = next(r for r in await roles.all() if r.name == "Device default")
+    with pytest.raises(ValueError, match="built-in"):
+        await roles.update(device.id, name="Foo")
+    await roles.ensure_defaults()
+    names = sorted(r.name for r in await roles.all())
+    assert names == ["Device default", "Web default"]
+
+
+async def test_a_non_built_in_role_can_still_be_renamed_and_deleted(roles):
+    created = await roles.create(name="Coach", prompt=None, max_sentences=2,
+                                 markdown_allowed=False, languages=("uk",), pinned_mood=None)
+    renamed = await roles.update(created.id, name="Coach2")
+    assert renamed.name == "Coach2"
+    assert await roles.delete(created.id) is True
+
+
+async def test_init_backfills_built_in_on_a_database_from_before_the_column_existed(tmp_path):
+    """A roles table created before `built_in` existed has the seeded
+    'Device default' row with no way to mark it protected. Without a
+    backfill, ensure_defaults()'s (name, built_in) lookup would treat it as
+    a stranger and try to insert a second row under the same (unique) name -
+    crashing on the constraint instead of recognising the row it already
+    seeded."""
+    import sqlite3
+
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "CREATE TABLE roles (id INTEGER PRIMARY KEY, name VARCHAR(64) UNIQUE, "
+        "prompt VARCHAR(4000), max_sentences INTEGER, markdown_allowed BOOLEAN, "
+        "languages VARCHAR(32), pinned_mood VARCHAR(16), created_at DATETIME)"
+    )
+    conn.execute(
+        "INSERT INTO roles (name, prompt, max_sentences, markdown_allowed, languages, pinned_mood) "
+        "VALUES ('Device default', NULL, 2, 0, 'uk,ru,en', NULL)"
+    )
+    conn.commit()
+    conn.close()
+
+    r = Roles(f"sqlite+aiosqlite:///{db_path}")
+    await r.init()
+    await r.ensure_defaults()
+    names = [role.name for role in await r.all()]
+    assert names.count("Device default") == 1
+    device = next(role for role in await r.all() if role.name == "Device default")
+    assert device.built_in is True
+    await r.close()

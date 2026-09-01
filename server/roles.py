@@ -57,15 +57,22 @@ class Role:
     markdown_allowed: bool
     languages: tuple[str, ...]
     pinned_mood: str | None
+    # True only for the two rows ensure_defaults() seeds. A default here
+    # (rather than a required field) keeps every Role(...) built by hand in
+    # tests/test_persona.py and tests/test_session.py - none of which is a
+    # protected default - from needing to pass it.
+    built_in: bool = False
 
 
 DEVICE_DEFAULT = Role(
     id=None, name=DEVICE_DEFAULT_NAME, prompt=None, max_sentences=2,
     markdown_allowed=False, languages=SPEAKABLE_LANGUAGES, pinned_mood=None,
+    built_in=True,
 )
 WEB_DEFAULT = Role(
     id=None, name=WEB_DEFAULT_NAME, prompt=None, max_sentences=6,
     markdown_allowed=True, languages=SPEAKABLE_LANGUAGES, pinned_mood=None,
+    built_in=True,
 )
 _SURFACE_DEFAULTS = {"esp32": DEVICE_DEFAULT, "web": WEB_DEFAULT}
 
@@ -94,6 +101,12 @@ class RoleRow(Base):
     languages: Mapped[str] = mapped_column(String(32), default="uk,ru,en")
     pinned_mood: Mapped[str | None] = mapped_column(String(16), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # A property of the row, not of its current name: `name` is
+    # client-editable through PUT /roles/{id}, and keying "is this one of
+    # the seeded defaults" off a mutable field is exactly what let a rename
+    # turn Roles.delete's built-in check into a no-op. Never set true except
+    # by ensure_defaults() at seed time.
+    built_in: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class SurfaceRoleRow(Base):
@@ -124,6 +137,7 @@ def _to_role(row: RoleRow) -> Role:
         markdown_allowed=row.markdown_allowed,
         languages=tuple(c for c in row.languages.split(",") if c),
         pinned_mood=row.pinned_mood,
+        built_in=bool(row.built_in),
     )
 
 
@@ -137,6 +151,29 @@ class Roles:
     async def init(self) -> None:
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            # SQLite has no "ADD COLUMN IF NOT EXISTS"; a roles table from
+            # before `built_in` existed needs it added once. Broad except is
+            # deliberate: the only failure mode on a second run is
+            # "duplicate column", and SQLite's wording for that is not worth
+            # pattern-matching for a one-statement migration (see
+            # Store.init(), which does the same thing for `facts`).
+            try:
+                await conn.exec_driver_sql(
+                    "ALTER TABLE roles ADD COLUMN built_in BOOLEAN DEFAULT 0"
+                )
+            except Exception:
+                pass
+            # A row seeded before the column existed is a genuine built-in
+            # default that the ALTER TABLE's own DEFAULT just marked
+            # built_in=0 - without this, ensure_defaults() would treat it as
+            # a stranger and try to insert a second row under the same
+            # (unique) name, crashing on the constraint instead of
+            # recognising the row it already seeded. Always safe to re-run:
+            # it only ever sets true on rows already named for a default.
+            await conn.exec_driver_sql(
+                "UPDATE roles SET built_in = 1 WHERE name IN (?, ?)",
+                (DEVICE_DEFAULT_NAME, WEB_DEFAULT_NAME),
+            )
 
     async def close(self) -> None:
         await self._engine.dispose()
@@ -144,14 +181,27 @@ class Roles:
     async def ensure_defaults(self) -> None:
         """Seed one role per surface, and point each surface at its own.
 
-        Idempotent by name, so it is safe on every boot - which is where it
-        is called from, because a database that predates roles must not need
-        a migration step a person has to remember.
+        Idempotent by (name, built_in) - not name alone. A role renamed away
+        from "Device default" used to make this blind to the row it already
+        seeded: it would insert a fresh one under the old name while the
+        surface's pointer kept aiming at the renamed row, leaving a spurious
+        third role nobody created. Renaming a built-in is refused now
+        (Roles.update), so the name should never actually drift, but
+        checking built_in too means this does not depend on that guard
+        alone to stay correct.
+
+        Only the lookup is by name; a surface's existing pointer, once set,
+        is never touched here, however it is aimed - that is what lets a
+        surface stay on a role someone chose deliberately.
         """
         async with self._session() as s:
             for surface, default in _SURFACE_DEFAULTS.items():
                 row = (
-                    await s.scalars(select(RoleRow).where(RoleRow.name == default.name))
+                    await s.scalars(
+                        select(RoleRow).where(
+                            RoleRow.name == default.name, RoleRow.built_in.is_(True)
+                        )
+                    )
                 ).first()
                 if row is None:
                     row = RoleRow(
@@ -161,6 +211,7 @@ class Roles:
                         markdown_allowed=default.markdown_allowed,
                         languages=",".join(default.languages),
                         pinned_mood=default.pinned_mood,
+                        built_in=True,
                     )
                     s.add(row)
                     await s.flush()
@@ -221,6 +272,12 @@ class Roles:
             row = await s.get(RoleRow, role_id)
             if row is None:
                 return None
+            if "name" in fields and row.built_in:
+                # This is the guard the whole column exists for: without it,
+                # update(name=...) then delete() turns Roles.delete's 409
+                # into a 200, and ensure_defaults() stops recognising the
+                # row on the next boot (see its docstring).
+                raise ValueError(f"{row.name!r} is built-in and its name cannot be changed")
             if "name" in fields:
                 clash = (
                     await s.scalars(
