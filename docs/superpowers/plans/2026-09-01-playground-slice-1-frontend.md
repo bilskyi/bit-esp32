@@ -436,6 +436,19 @@ beneath it.
 `<Shell>` wrapping the active tab. Chat and Settings are placeholders this task;
 Tasks 3 and 5 fill them.
 
+**Tab state lives in React, not in the URL, and that is a constraint rather
+than laziness.** Task 1's SPA fallback refuses any path whose first segment is
+an API prefix — `login`, `logout`, `me`, `roles`, `settings`, `memory`,
+`conversations`, `healthz`, `ws` — so that a mistyped `fetch()` gets a JSON 404
+instead of HTML. Verified: `GET /settings` returns a JSON 404 today. So a
+client-side route named `/settings` or `/roles` would 404 on reload, which is
+the worst kind of bug: it works until someone refreshes.
+
+Do not add a router in this task. When one is eventually wanted, take one of
+these and say which: put client routes under a segment the API does not use
+(`/app/settings`), or use a hash router (`#/settings`). Never add a client
+route whose first segment appears in `_API_PREFIXES`.
+
 **Verify in a browser:**
 1. Create an account — it takes flags, not prompts:
    `uv run python scripts/create_account.py --username you --password <something>`
