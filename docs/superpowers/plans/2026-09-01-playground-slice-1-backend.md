@@ -797,11 +797,17 @@ argument 'spoken'`, and `ImportError` for `SPEAKABLE_LANGUAGES` only if Task
 
 Keep the module docstring and `BASE` **exactly as they are**. Delete the
 `from dataclasses import dataclass` import, the `Style` dataclass, `ESP32`,
-`WEB`, `_web_base` and the old `build_system_prompt`. Append:
+`WEB`, `_web_base` and the old `build_system_prompt`. Put the new import at
+the **top** of the file, directly after the module docstring — ruff enforces
+E402 in this project, and an import placed below `BASE` fails the lint:
 
 ```python
 from server.roles import DEVICE_DEFAULT, Role
+```
 
+Then append, below `BASE`:
+
+```python
 PERSONA_SPOKEN = "You are a warm, direct voice companion. Your replies are spoken aloud."
 PERSONA_SCREEN = (
     "You are a warm, direct assistant. Your replies are read on screen, not spoken aloud."

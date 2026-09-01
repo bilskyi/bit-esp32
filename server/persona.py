@@ -16,6 +16,8 @@ worse on three independent runs of scripts/emotion_survey.py, and was reverted.
 See RESUME.md for the figures before repeating it.
 """
 
+from server.roles import DEVICE_DEFAULT, Role
+
 BASE = """You are a warm, direct voice companion. Your replies are spoken aloud.
 
 Rules:
@@ -35,7 +37,6 @@ that you did not catch it.
 - Speak plainly, as in conversation. No preamble, no restating the question.
 - If you do not know something, say so in one sentence."""
 
-from server.roles import DEVICE_DEFAULT, Role
 
 PERSONA_SPOKEN = "You are a warm, direct voice companion. Your replies are spoken aloud."
 PERSONA_SCREEN = (
