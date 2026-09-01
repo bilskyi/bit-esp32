@@ -616,9 +616,6 @@ class Roles:
             return True
 ```
 
-Note: `replace` is imported for later tasks' use in tests; if your linter
-objects, drop it from the import line.
-
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `uv run pytest tests/test_roles.py -q`

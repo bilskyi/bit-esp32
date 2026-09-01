@@ -11,7 +11,7 @@ this module importing persona back, and it is what makes the prompt
 assembly testable without a database.
 """
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from sqlalchemy import Boolean, DateTime, Integer, String, delete, select
