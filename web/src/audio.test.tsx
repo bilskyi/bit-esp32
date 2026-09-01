@@ -1,13 +1,16 @@
 // Narrow on purpose, same reasoning as faceFrames.test.tsx: this covers only
 // the pure, DOM-free math in audio.ts - float<->PCM16LE conversion and the
-// resampling arithmetic. There is no browser and no microphone in this
-// harness, so startCapture()'s AudioWorklet plumbing and createPlayer()'s
-// AudioContext scheduling are exercised by hand in a real browser instead
-// (see the task's report for exactly what to check). This file has no JSX
-// because none is needed, but the extension has to match `*.test.tsx` (see
-// vitest.config.ts) to run at all.
-import { describe, expect, it } from 'vitest'
-import { createResampler, describeMicError, floatTo16LE } from './audio.ts'
+// resampling arithmetic - plus, in the last describe block below, the one
+// bit of startCapture()'s AudioContext handling simple enough to fake
+// safely (state/resume(), the same shape createPlayer already gets tested
+// by inspection). The rest of the AudioWorklet plumbing and createPlayer's
+// scheduling are still exercised by hand in a real browser instead (see the
+// task's report for exactly what to check) - faking the worklet's own
+// message port and the real-time scheduling it drives would test the fake,
+// not the code. This file has no JSX because none is needed, but the
+// extension has to match `*.test.tsx` (see vitest.config.ts) to run at all.
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createResampler, describeMicError, floatTo16LE, startCapture } from './audio.ts'
 
 describe('floatTo16LE', () => {
   it('converts known float samples to the expected little-endian bytes', () => {
@@ -107,5 +110,82 @@ describe('describeMicError', () => {
   it('falls back to a generic message for an error it does not recognise', () => {
     const message = describeMicError(new Error('boom'))
     expect(message.length).toBeGreaterThan(0)
+  })
+})
+
+/** Just enough of the AudioContext surface for startCapture()'s own logic -
+ * state and resume() - never the worklet message port or real-time
+ * scheduling createPlayer relies on. See this file's header for why the
+ * line is drawn there. */
+class FakeAudioContext {
+  static instances: FakeAudioContext[] = []
+  sampleRate: number
+  state: 'running' | 'suspended' | 'closed'
+  resumeCalls = 0
+  audioWorklet = { addModule: async () => {} }
+
+  constructor(options?: { sampleRate?: number }) {
+    this.sampleRate = options?.sampleRate ?? 48000
+    // Browsers hand back a context already 'suspended' unless the autoplay
+    // heuristic is satisfied - see createPlayer's own comment. Starting
+    // suspended here is what makes this fake exercise that path at all.
+    this.state = 'suspended'
+    FakeAudioContext.instances.push(this)
+  }
+
+  createMediaStreamSource() {
+    return { connect: () => {}, disconnect: () => {} }
+  }
+
+  async resume() {
+    this.resumeCalls += 1
+    this.state = 'running'
+  }
+
+  async close() {
+    this.state = 'closed'
+  }
+}
+
+class FakeAudioWorkletNode {
+  port: { onmessage: ((event: MessageEvent) => void) | null } = { onmessage: null }
+  onprocessorerror: (() => void) | null = null
+  connect() {}
+  disconnect() {}
+}
+
+function stubMediaDevices() {
+  const stop = vi.fn()
+  Object.defineProperty(navigator, 'mediaDevices', {
+    value: { getUserMedia: vi.fn().mockResolvedValue({ getTracks: () => [{ stop }] }) },
+    configurable: true,
+  })
+  return { stop }
+}
+
+describe('startCapture AudioContext handling', () => {
+  afterEach(() => {
+    FakeAudioContext.instances = []
+    vi.unstubAllGlobals()
+    // @ts-expect-error - test-only cleanup of the property stubMediaDevices defined.
+    delete navigator.mediaDevices
+  })
+
+  it('resumes a suspended AudioContext before capturing, same as createPlayer does for playback', async () => {
+    // Finding 4: createPlayer() resumes a suspended AudioContext and
+    // documents why (a context can come back 'suspended' unless the
+    // browser's autoplay heuristic is satisfied); startCapture() built its
+    // AudioContext the same way but never did the same check, leaving
+    // capture silently stuck exactly where playback was already guarded.
+    stubMediaDevices()
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    vi.stubGlobal('AudioWorkletNode', FakeAudioWorkletNode)
+
+    await startCapture({ onChunk: vi.fn(), onError: vi.fn() })
+
+    const context = FakeAudioContext.instances.at(-1)
+    expect(context).toBeDefined()
+    expect(context?.resumeCalls).toBeGreaterThan(0)
+    expect(context?.state).toBe('running')
   })
 })

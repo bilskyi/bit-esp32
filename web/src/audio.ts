@@ -246,6 +246,13 @@ export async function startCapture({ onChunk, onError }: CaptureCallbacks): Prom
     // chunk is resampled against whatever the browser actually granted
     // rather than trusted to already be 16000.
     context = new AudioContext({ sampleRate: SAMPLE_RATE })
+    // Browsers can hand back a context already 'suspended' unless the
+    // autoplay heuristic is satisfied - see createPlayer's own resume() for
+    // the full reasoning, which applies here just as much: this context is
+    // created asynchronously (after the getUserMedia prompt resolves, not
+    // synchronously inside the button-press handler), so it is not
+    // guaranteed to qualify on its own. A no-op if already running.
+    if (context.state === 'suspended') await context.resume()
     await ensureWorkletModule(context)
     source = context.createMediaStreamSource(stream)
     node = new AudioWorkletNode(context, WORKLET_NAME)
