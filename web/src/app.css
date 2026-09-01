@@ -371,6 +371,39 @@ fieldset.field {
   flex-shrink: 0;
 }
 
+/* ----------------------------------------------------------------- mic */
+
+/* Sits beside the textarea in the composer row - see Chat.tsx. */
+.mic {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  flex-shrink: 0;
+}
+
+.mic-button {
+  flex-shrink: 0;
+  /* Wide enough for the longest of its three labels ("Hold to interrupt and
+     speak") on one line at typical widths; wraps rather than overflows if a
+     narrow viewport still cannot fit it - see the 420px rule below. */
+  min-width: 11rem;
+  user-select: none;
+  /* Stops the browser's own touch gestures (scroll, pinch-zoom) from
+     competing with a touch-and-hold press on this button. */
+  touch-action: none;
+}
+/* --live is the one warm colour on the page and already means "running"
+   (see tokens.css) - recording is exactly that, so no new colour is
+   invented for it. */
+.mic-button.is-recording {
+  color: var(--live);
+  border-color: var(--live-mark);
+  background: var(--sunk);
+}
+.mic-button.is-recording::before {
+  content: '● ';
+}
+
 /* --------------------------------------------------------------- face rail */
 
 .face-rail {
@@ -490,6 +523,11 @@ fieldset.field {
 @media (max-width: 420px) {
   .chat-input {
     font-size: 0.85rem;
+  }
+  .mic-button {
+    min-width: 8rem;
+    font-size: 0.78rem;
+    padding: 0.55rem 0.7rem;
   }
 }
 

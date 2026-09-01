@@ -8,9 +8,11 @@ interface InspectorProps {
    * before the trace send - ever ran. `interrupted` is what tells them
    * apart. */
   trace: Trace | null
-  /** True when this finished turn produced no sentences, which on a
+  /** True when this finished turn has no trace, which on a
    * cookie-authorised connection can only mean it was cancelled: the server
-   * sends _trace before every natural `done`. */
+   * sends _trace before every natural `done` (see Message.tsx, which
+   * computes this from `turn.trace`, not from sentence count - a spoken
+   * turn's successful reply never has `reply` sentences either). */
   interrupted: boolean
   open: boolean
   onToggle: () => void

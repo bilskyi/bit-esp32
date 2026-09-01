@@ -37,9 +37,19 @@ export interface Trace {
 export interface Turn {
   id: number
   question: string
+  /** True for a turn started by startVoiceTurn() rather than ask(). The
+   * server never sends the transcript of a spoken question back, nor the
+   * text of a spoken reply (that goes out as binary PCM instead - see
+   * onVoiceReply below), so `question` is a fixed placeholder and
+   * `sentences` legitimately stays empty for the whole turn even when it
+   * succeeds. Message.tsx and Inspector.tsx need this flag to tell that
+   * apart from an interrupted typed turn, which also has no sentences but
+   * for a different reason. */
+  spoken: boolean
   /** One entry per `reply` frame, in arrival order. Joined with a space for
    * display - never replaced wholesale, since frames arrive one sentence at
-   * a time and the whole point is to render as they land. */
+   * a time and the whole point is to render as they land. Always empty for
+   * a spoken turn - see `spoken` above. */
   sentences: string[]
   emotion: string | null
   trace: Trace | null
@@ -53,21 +63,58 @@ export interface Connection {
   reason: string | null
 }
 
+/** What Mic.tsx registers to receive the binary/completion side of a spoken
+ * reply - see onVoiceReply below for why this bypasses React state. */
+export interface VoiceReplyHandlers {
+  /** A binary frame arrived: one chunk of PCM16LE audio for the reply in
+   * progress, ready for audio.ts's Player.push(). */
+  onChunk: (data: ArrayBuffer) => void
+  /** This reply's own `done` frame arrived - no more chunks are coming for
+   * it. Whatever is already scheduled keeps playing; see Player.finish(). */
+  onDone: () => void
+  /** A new question - typed or spoken - just cancelled whatever was still
+   * in flight, exactly like the device's own button interrupting a reply
+   * (server/session.py's on_start). Whatever is currently sounding should
+   * stop immediately, not fade out; see Player.stop(). */
+  onInterrupt: () => void
+}
+
 export interface TurnValue {
   connection: Connection
   state: ConversationState
   turns: Turn[]
-  /** Set when the most recent ask() could not reach the socket - see ask()'s
-   * comment. Null otherwise, including right after a later send that does
-   * succeed or a fresh reconnect. Chat.tsx shows this so a refused question
-   * is never silently lost - the person sees it and can just press send
-   * again once connected, rather than the app queuing it behind their back. */
+  /** Set when the most recent ask() or startVoiceTurn() could not reach the
+   * socket - see ask()'s comment. Null otherwise, including right after a
+   * later send that does succeed or a fresh reconnect. Chat.tsx shows this
+   * so a refused question is never silently lost - the person sees it and
+   * can just press send (or the mic) again once connected, rather than the
+   * app queuing it behind their back. */
   sendError: string | null
   /** Returns whether the question was actually handed to the socket. A
    * caller that clears its draft unconditionally would lose the question
    * on a `false` return - see Chat.tsx's submit(). */
   ask: (text: string) => boolean
   interrupt: () => void
+  /** Sends `{"type":"start"}` and opens a new turn locally, mirroring the
+   * device's own button-down: the server treats this exactly like a typed
+   * question for cancelling whatever reply is still in flight (on_start
+   * calls on_cancel when THINKING or SPEAKING), so pressing the mic while a
+   * reply plays interrupts it rather than needing a separate call. Returns
+   * whether it actually reached the socket, same contract as ask(). Binary
+   * chunks follow via sendVoiceChunk(), then endVoiceTurn(). */
+  startVoiceTurn: () => boolean
+  /** One binary chunk of the utterance in progress - sent immediately,
+   * never buffered client-side, matching the device's own streaming (see
+   * this file's header and README.md's protocol table). A no-op if the
+   * socket is not open, same as sendError's other silent-drop cases. */
+  sendVoiceChunk: (chunk: ArrayBuffer) => void
+  /** Sends `{"type":"end"}` - the button was released. */
+  endVoiceTurn: () => void
+  /** Registers the one live handler for binary reply frames and the
+   * completion/interrupt signals around them - see VoiceReplyHandlers.
+   * Mic.tsx is the only caller; registering a new set of handlers replaces
+   * whatever was registered before. Returns an unregister function. */
+  onVoiceReply: (handlers: VoiceReplyHandlers) => () => void
 }
 
 // 1s, 2s, 4s, then capped at 10s - reused for every attempt past the fourth.
@@ -86,40 +133,6 @@ function updateLastTurn(turns: Turn[], update: (turn: Turn) => Turn): Turn[] {
   return next
 }
 
-/** Read from ask()/interrupt() before calling setTurns - never from inside
- * a setState updater. It decides whether pendingCancelsRef gets bumped, and
- * that has to happen exactly once per real call: React 19 StrictMode
- * invokes a functional setState updater twice (with the same previous
- * state) specifically to catch impure updaters, and a ref mutation living
- * in that updater used to get double-counted there, which is Finding 1 -
- * see markCurrentCancelled below for what that count is for. */
-function hasCancellableTurn(turns: Turn[]): boolean {
-  if (turns.length === 0) return false
-  return !turns[turns.length - 1].done
-}
-
-/** Called from the setTurns updaters in ask() and interrupt(): the turn in
- * flight, if any, is about to be cancelled, so mark it done right away
- * rather than waiting on the server. Pure - checks turn.done itself before
- * doing anything, so calling it twice with the same turns array (exactly
- * what StrictMode's double-invoke does) is harmless.
- *
- * Marking it done locally isn't the whole story, though: the wire protocol
- * carries no turn id. When a question arrives mid-reply, session.on_text()
- * cancels the running task and *that* task's own finally block still sends
- * "done" for itself before the new turn produces anything - but by the time
- * it reaches the client, the new turn is already the current one. Left
- * unhandled, that stray "done" would close the new turn before a single
- * sentence arrived. pendingCancelsRef is how many such stray frames are
- * still owed; the "done" handler below swallows exactly that many before
- * applying one for real - see hasCancellableTurn above for where the count
- * itself gets incremented. */
-function markCurrentCancelled(turns: Turn[]): Turn[] {
-  if (turns.length === 0) return turns
-  if (turns[turns.length - 1].done) return turns
-  return updateLastTurn(turns, (turn) => ({ ...turn, done: true }))
-}
-
 export function useTurn(): TurnValue {
   const { notifyUnauthorized } = useSession()
   const [connection, setConnection] = useState<Connection>({
@@ -133,6 +146,61 @@ export function useTurn(): TurnValue {
   const socketRef = useRef<WebSocket | null>(null)
   const nextIdRef = useRef(0)
   const pendingCancelsRef = useRef(0)
+  // The one live registrant from onVoiceReply() - see VoiceReplyHandlers.
+  const voiceHandlersRef = useRef<VoiceReplyHandlers | null>(null)
+  // The last `prev` array cancelCurrentTurn has already accounted for -
+  // see that function's comment for what this guards against.
+  const lastCancelCheckRef = useRef<Turn[] | null>(null)
+
+  /** The single place a turn gets cancelled locally, from every caller that
+   * can preempt one: ask(), interrupt(), startVoiceTurn(). Marks the last
+   * turn done immediately rather than waiting on the server, and tracks how
+   * many stray "done" frames are still owed for it - see the giant comment
+   * on the `case 'done':` branch below for what that count is and why it
+   * exists at all.
+   *
+   * Must be called only from inside a setTurns() updater, and only ever
+   * with the `prev` that updater receives - never a value read from the
+   * `turns` closure. That used to be exactly backwards (Task 3's carried-
+   * forward defect): hasCancellableTurn() and the pendingCancelsRef bump
+   * read `turns` from the enclosing closure, which is fine for a single
+   * call but wrong the moment two real calls (say, two rapid mic presses,
+   * both landing before React has re-rendered) land in the same
+   * synchronous tick - both would read the *same* stale `turns`, so both
+   * would decide a cancellable turn exists and both would bump the ref,
+   * even when the server itself only sends one stray "done" for the pair
+   * (Session.on_cancel clears self._reply on the first cancel, so a second
+   * one back-to-back is a no-op there). The extra count then ate the
+   * *next* turn's genuine "done", leaving it stuck on "thinking..." forever
+   * - see useTurn.test.tsx's test for two calls in one tick.
+   *
+   * Deriving everything from `prev` fixes that: React threads a second
+   * queued updater's `prev` from the first one's return value, so a second
+   * *real* call in the same tick always receives an already-updated `prev`
+   * (reflecting the first call's cancellation) and correctly finds nothing
+   * left to cancel. The one wrinkle is React 19 StrictMode, which
+   * deliberately invokes a functional updater twice with the *identical*
+   * `prev` reference to catch impure updaters - without a guard, that
+   * would double-count a single real call all over again (this was Finding
+   * 1, from Task 3's own review). lastCancelCheckRef closes that: it is
+   * pure identity - "have I already processed exactly this prev" - so
+   * StrictMode's second invocation with the same reference is a no-op, but
+   * a second call's genuinely different (already-updated) `prev` is not. */
+  const cancelCurrentTurn = useCallback((prev: Turn[]): Turn[] => {
+    if (prev.length === 0 || prev[prev.length - 1].done) return prev
+    if (lastCancelCheckRef.current !== prev) {
+      lastCancelCheckRef.current = prev
+      pendingCancelsRef.current += 1
+      // A new question, typed or spoken, always means whatever was still
+      // sounding from the last one should stop now, not fade out - the
+      // same thing a mic press interrupting a reply needs. Routed through
+      // here rather than called separately by each of ask()/interrupt()/
+      // startVoiceTurn() so it shares this function's exactly-once
+      // guarantee instead of needing its own.
+      voiceHandlersRef.current?.onInterrupt()
+    }
+    return updateLastTurn(prev, (turn) => ({ ...turn, done: true }))
+  }, [])
 
   useEffect(() => {
     // Guards every handler below against setting state after this effect's
@@ -190,6 +258,9 @@ export function useTurn(): TurnValue {
       let openedThisAttempt = false
       const url = `${location.origin.replace(/^http/, 'ws')}/ws?device=default`
       const ws = new WebSocket(url)
+      // Plain Blob otherwise - audio.ts's Player and downsample() both work
+      // on ArrayBuffer, and there is no other consumer of a binary frame.
+      ws.binaryType = 'arraybuffer'
       socketRef.current = ws
 
       ws.onopen = () => {
@@ -207,11 +278,17 @@ export function useTurn(): TurnValue {
         if (!alive) return
 
         if (typeof event.data !== 'string') {
-          // Binary frames are TTS audio (see server/session.py's `render`).
-          // A typed question only ever gets `reply` text frames - voice
-          // playback on the web client is Task 7's job. Ignoring binary
-          // frames here is expected, not a bug: nothing plays because there
-          // is nothing to play yet.
+          // Binary frames are TTS audio for a spoken reply (see
+          // server/session.py's `render`) - forwarded straight to whoever is
+          // playing it back, bypassing React state on purpose: a PCM frame
+          // can arrive many times a second, and a setTurns() call per frame
+          // would be a re-render per frame for something no component
+          // actually needs to render. A typed question never produces one
+          // of these (speak=False there), so there is exactly one
+          // registrant to forward to - see onVoiceReply below. Before Mic
+          // ever mounts (or if voice is never used) there is nothing
+          // registered, and dropping the frame here is not a bug.
+          voiceHandlersRef.current?.onChunk(event.data as ArrayBuffer)
           return
         }
 
@@ -252,6 +329,13 @@ export function useTurn(): TurnValue {
               break
             }
             setTurns((prev) => updateLastTurn(prev, (turn) => ({ ...turn, done: true })))
+            // Outside the updater, not inside it: a function passed to
+            // setTurns() can be invoked twice by StrictMode (see
+            // cancelCurrentTurn's comment), and this must fire exactly
+            // once per real "done". Harmless when nothing is registered,
+            // and harmless for a typed turn's own done (no chunks were
+            // ever pushed, so there is nothing to finish).
+            voiceHandlersRef.current?.onDone()
             break
           default:
             // The server may grow frame types before this app does; an
@@ -327,26 +411,89 @@ export function useTurn(): TurnValue {
       }
 
       setSendError(null)
-      if (hasCancellableTurn(turns)) pendingCancelsRef.current += 1
       const id = nextIdRef.current++
       setTurns((prev) => [
-        ...markCurrentCancelled(prev),
-        { id, question: text, sentences: [], emotion: null, trace: null, done: false },
+        ...cancelCurrentTurn(prev),
+        { id, question: text, spoken: false, sentences: [], emotion: null, trace: null, done: false },
       ])
       socket.send(JSON.stringify({ type: 'text', value: text }))
       return true
     },
-    [turns],
+    [cancelCurrentTurn],
   )
 
   const interrupt = useCallback(() => {
-    if (hasCancellableTurn(turns)) pendingCancelsRef.current += 1
-    setTurns((prev) => markCurrentCancelled(prev))
+    setTurns((prev) => cancelCurrentTurn(prev))
     socketRef.current?.send(JSON.stringify({ type: 'cancel' }))
-  }, [turns])
+  }, [cancelCurrentTurn])
+
+  const startVoiceTurn = useCallback((): boolean => {
+    const socket = socketRef.current
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      // Same contract as ask() above, and for the same reason - see its
+      // comment.
+      setSendError('Not connected - recording was not started. Try again once reconnected.')
+      return false
+    }
+
+    setSendError(null)
+    const id = nextIdRef.current++
+    setTurns((prev) => [
+      ...cancelCurrentTurn(prev),
+      { id, question: '(spoken)', spoken: true, sentences: [], emotion: null, trace: null, done: false },
+    ])
+    // The server treats a "start" arriving while it is THINKING or SPEAKING
+    // as an interruption on its own (session.py's on_start calls
+    // on_cancel) - the same thing the device's own button does. So this one
+    // message is both "interrupt whatever is playing" and "start
+    // listening"; no separate cancel frame is needed, and cancelCurrentTurn
+    // above already did the matching local bookkeeping for it.
+    socket.send(JSON.stringify({ type: 'start' }))
+    return true
+  }, [cancelCurrentTurn])
+
+  const sendVoiceChunk = useCallback((chunk: ArrayBuffer) => {
+    const socket = socketRef.current
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(chunk)
+    }
+    // Silently dropped otherwise - Mic.tsx's capture is already tearing
+    // down by the time a caller could see this, same as ask()'s composer
+    // being one render behind the socket, except there is no separate
+    // error to show for a single dropped chunk mid-recording.
+  }, [])
+
+  const endVoiceTurn = useCallback(() => {
+    const socket = socketRef.current
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: 'end' }))
+    }
+  }, [])
+
+  const onVoiceReply = useCallback((handlers: VoiceReplyHandlers): (() => void) => {
+    voiceHandlersRef.current = handlers
+    return () => {
+      // Only clears it if this registration is still the live one - a
+      // stale unregister running after something else already replaced it
+      // (StrictMode's mount/cleanup/mount, in particular) must not clobber
+      // the new registration.
+      if (voiceHandlersRef.current === handlers) voiceHandlersRef.current = null
+    }
+  }, [])
 
   return useMemo(
-    () => ({ connection, state, turns, sendError, ask, interrupt }),
-    [connection, state, turns, sendError, ask, interrupt],
+    () => ({
+      connection,
+      state,
+      turns,
+      sendError,
+      ask,
+      interrupt,
+      startVoiceTurn,
+      sendVoiceChunk,
+      endVoiceTurn,
+      onVoiceReply,
+    }),
+    [connection, state, turns, sendError, ask, interrupt, startVoiceTurn, sendVoiceChunk, endVoiceTurn, onVoiceReply],
   )
 }

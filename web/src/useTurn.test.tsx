@@ -139,6 +139,53 @@ describe('useTurn', () => {
     expect(result.current.turns[1].done).toBe(true)
   })
 
+  it('does not double-count two real cancels in the same tick, so the next turn\'s real "done" is not swallowed', () => {
+    // Task 7's carried-forward defect: hasCancellableTurn()/pendingCancelsRef
+    // used to read `turns` from the enclosing closure. A single call is fine
+    // that way, but two *real* calls landing in the same synchronous tick
+    // (two rapid presses of an interrupt/mic control, say) both see the same
+    // stale `turns` and both bump the ref - even though Session.on_cancel
+    // (server/session.py) clears self._reply on the first cancel, so a
+    // second cancel back-to-back is a no-op there and the server sends only
+    // one stray "done", not two. The extra count then swallows the *next*
+    // turn's genuine "done". cancelCurrentTurn fixes this by deriving
+    // everything from the `prev` each setTurns updater actually receives,
+    // guarded against StrictMode's separate double-invoke-with-same-prev
+    // behaviour - see its comment in useTurn.ts.
+    const { result } = renderHook(() => useTurn(), { wrapper })
+    const ws = lastSocket()
+    act(() => ws.open())
+
+    act(() => {
+      result.current.ask('first question')
+    })
+    act(() => ws.frame({ type: 'reply', value: 'Partial answer.' }))
+
+    // Two real interrupts in one tick - both actually reach the socket, but
+    // only the first is a real cancellation server-side.
+    act(() => {
+      result.current.interrupt()
+      result.current.interrupt()
+    })
+    expect(ws.sent.filter((s) => s.includes('"cancel"'))).toHaveLength(2)
+
+    // The single stray "done" the server actually sends for the pair.
+    act(() => ws.frame({ type: 'done' }))
+
+    // A fresh question after the interrupt - its own "done" must land, not
+    // be eaten by a pendingCancelsRef left over-counted from above.
+    act(() => {
+      result.current.ask('second question')
+    })
+    act(() => ws.frame({ type: 'reply', value: 'Second answer.' }))
+    act(() => ws.frame({ type: 'done' }))
+
+    expect(result.current.turns).toHaveLength(2)
+    expect(result.current.turns[0].done).toBe(true)
+    expect(result.current.turns[1].sentences).toEqual(['Second answer.'])
+    expect(result.current.turns[1].done).toBe(true)
+  })
+
   it('refuses to send when the socket is not open, and leaves no turn claiming to be in progress', () => {
     // Finding 2: ask() used to trust the composer's disabled prop and send
     // unconditionally. In the gap between onclose nulling socketRef and the

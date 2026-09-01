@@ -3,6 +3,7 @@ import type { FormEvent, KeyboardEvent } from 'react'
 import type { Turn, TurnValue } from './useTurn.ts'
 import Face from './Face.tsx'
 import Message from './Message.tsx'
+import Mic from './Mic.tsx'
 
 interface ChatProps {
   turn: TurnValue
@@ -133,6 +134,7 @@ function Chat({ turn }: ChatProps) {
         )}
 
         <form className="chat-composer" onSubmit={handleSubmit}>
+          <Mic turn={turn} />
           <textarea
             ref={textareaRef}
             className="chat-input"

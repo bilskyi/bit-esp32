@@ -20,18 +20,26 @@ interface MessageProps {
  * that switches to `.prose` - a monospace paragraph of Cyrillic is tiring
  * to read, see tokens.css.
  *
- * There is deliberately no speaker affordance here. `state` turns
- * "speaking" for a typed question too, but nothing is actually playing -
- * that only becomes true once Task 7 adds voice - so a play button here
- * would do nothing and just be a lie.
+ * There is still no play/pause affordance here for a spoken reply - Mic.tsx
+ * owns the one live audio pipeline (see useTurn.ts's onVoiceReply), and it
+ * plays automatically as the reply streams in, the same way the device's
+ * speaker does. A control here would just be a second, redundant way to
+ * control audio this component has no handle on.
  *
  * The inspector renders once the turn is done, whether it was answered or
- * interrupted. A turn that finished with nothing streamed was cancelled, and
- * Inspector needs to know: the two reasons a trace can be missing want
- * different sentences. While a turn is still in flight there is nothing to
- * show yet - the trace frame is the last thing the server sends for it. */
+ * interrupted. server/session.py's _trace() runs right before every natural
+ * `done` (see its own comment), so a finished turn with no trace can only
+ * mean it was cancelled - that is `interrupted` below, and it is what
+ * Inspector needs to pick between its two "no trace" sentences. Sentence
+ * count is not that signal: a spoken turn (`turn.spoken`) never gets `reply`
+ * frames at all - its answer goes out as audio instead, see useTurn.ts's
+ * `Turn.spoken` - so "no sentences" is the normal, successful outcome for
+ * one of those, not evidence of anything going wrong. While a turn is still
+ * in flight there is nothing to show yet - the trace frame is the last thing
+ * the server sends for it. */
 function Message({ turn, inspectorOpen, onToggleInspector }: MessageProps) {
   const roleName = turn.trace?.role ?? 'assistant'
+  const interrupted = turn.done && turn.trace === null
 
   return (
     <div className="message">
@@ -44,15 +52,23 @@ function Message({ turn, inspectorOpen, onToggleInspector }: MessageProps) {
         <p className="message-label">{roleName}</p>
         {turn.sentences.length > 0 ? (
           <p className="prose message-reply">{turn.sentences.join(' ')}</p>
+        ) : !turn.done ? (
+          <p className="message-thinking">thinking…</p>
+        ) : interrupted ? (
+          <p className="message-thinking">interrupted</p>
         ) : (
-          <p className="message-thinking">{turn.done ? 'interrupted' : 'thinking…'}</p>
+          // A spoken turn that finished normally: the trace frame arrived,
+          // so it was not cancelled, but there was never any `reply` text to
+          // show - the answer was heard, not read. Never reachable for a
+          // typed turn, which always gets `reply` frames for a real answer.
+          <p className="message-thinking">played aloud</p>
         )}
       </div>
 
       {turn.done && (
         <Inspector
           trace={turn.trace}
-          interrupted={turn.sentences.length === 0}
+          interrupted={interrupted}
           open={inspectorOpen}
           onToggle={onToggleInspector}
         />
