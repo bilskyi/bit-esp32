@@ -773,6 +773,25 @@ def test_a_bearer_socket_never_receives_a_trace_frame():
     assert "trace" not in seen
 
 
+def test_a_cookie_authorised_socket_does_receive_a_trace_frame():
+    """The bearer-token negative case above was covered over the wire, but
+    the positive case - a logged-in browser actually getting the debugging
+    frame it needs - was only ever exercised at the Session level
+    (test_session.py's test_a_web_session_gets_a_trace_frame), never through
+    a real WebSocket."""
+    with client(device_token="s3cret") as c:
+        _login(c)
+        with c.websocket_connect("/ws") as ws:
+            ws.send_text(json.dumps({"type": "text", "value": "Як справи?"}))
+            seen = []
+            for _ in range(12):
+                frame = json.loads(ws.receive_text())
+                seen.append(frame["type"])
+                if frame["type"] == "state" and frame["value"] == "idle":
+                    break
+    assert "trace" in seen
+
+
 # --------------------------------------------------- conversations API
 
 def test_deleting_conversations_requires_login():
@@ -794,6 +813,42 @@ def test_deleting_conversations_deletes_and_leaves_facts_intact():
     assert store.deleted_conversations_for == ["default"]
 
 
+def test_lifespan_purges_expired_rows_on_startup():
+    """Deleting the purge_expired() call from the lifespan left every test
+    passing, on what is now one of two retention paths (the other runs at
+    the end of each session - see Session.finish). client() always injects a
+    real Store, and an injected store's lifespan skips backfill/purge
+    entirely, so this has to build the app the way production does: with no
+    store at all, so create_app constructs its own real Store and the
+    startup path actually runs."""
+    import tempfile
+
+    from server.memory.store import Store
+
+    called = []
+    original = Store.purge_expired
+
+    async def spy(self):
+        called.append(True)
+        return await original(self)
+
+    import unittest.mock
+
+    with unittest.mock.patch.object(Store, "purge_expired", spy):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = create_app(
+                settings=Settings(
+                    _env_file=None, session_cookie_secure=False, db_path=f"{tmp}/test.db",
+                ),
+                stt=FakeSTT(), llm=FakeLLM(), tts=FakeTTS(),
+                embedder=FakeEmbedder(), accounts=FakeAccounts(),
+            )
+            with TestClient(app):
+                pass
+
+    assert called == [True]
+
+
 def test_app_settings_require_login():
     with client() as c:
         assert c.get("/settings/app").status_code == 401
@@ -808,3 +863,15 @@ def test_app_settings_round_trip_over_http():
         }
         updated = c.put("/settings/app", json={"store_conversations": False}).json()
     assert updated["store_conversations"] is False
+
+
+def test_put_settings_app_retention_days_reaches_the_store():
+    """FakeStore.set_app_settings used to drop its retention_days argument,
+    so nothing exercised PUT /settings/app {"retention_days": N} actually
+    reaching the store."""
+    with client() as c:
+        _login(c)
+        updated = c.put("/settings/app", json={"retention_days": 7}).json()
+        again = c.get("/settings/app").json()
+    assert updated["retention_days"] == 7
+    assert again["retention_days"] == 7

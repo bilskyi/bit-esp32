@@ -100,7 +100,7 @@ class FakeAccounts:
 class FakeStore:
     def __init__(
         self, facts: list[str] | None = None, standing: list[str] | None = None,
-        store_conversations: bool = True,
+        store_conversations: bool = True, retention_days: int = 90,
     ) -> None:
         self.facts = {"default": list(facts or [])}
         self.standing = {"default": list(standing or [])}
@@ -113,13 +113,19 @@ class FakeStore:
         self.ended: list[int] = []
         self.deleted_conversations_for: list[str] = []
         self._store_conversations = store_conversations
+        self._retention_days = retention_days
 
     async def app_settings(self) -> dict:
-        return {"store_conversations": self._store_conversations, "retention_days": 90}
+        return {
+            "store_conversations": self._store_conversations,
+            "retention_days": self._retention_days,
+        }
 
     async def set_app_settings(self, store_conversations=None, retention_days=None) -> dict:
         if store_conversations is not None:
             self._store_conversations = store_conversations
+        if retention_days is not None:
+            self._retention_days = retention_days
         return await self.app_settings()
 
     async def start_conversation(self, device_id: str, surface: str, role_name: str) -> int:
