@@ -659,3 +659,16 @@ def test_deleting_the_active_role_returns_the_surface_to_its_default():
         assert c.delete(f"/roles/{role_id}").status_code == 200
         surfaces = c.get("/settings/surfaces").json()
     assert surfaces["esp32"]["name"] == "Device default"
+
+
+def test_a_bearer_socket_never_receives_a_trace_frame():
+    with client(device_token="s3cret") as c:
+        with c.websocket_connect("/ws", headers={"Authorization": "Bearer s3cret"}) as ws:
+            ws.send_text(json.dumps({"type": "text", "value": "Як справи?"}))
+            seen = []
+            for _ in range(12):
+                frame = json.loads(ws.receive_text())
+                seen.append(frame["type"])
+                if frame["type"] == "state" and frame["value"] == "idle":
+                    break
+    assert "trace" not in seen

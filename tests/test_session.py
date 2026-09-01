@@ -586,6 +586,70 @@ async def test_on_text_does_not_count_tts_chars_or_audio_seconds():
     assert session.usage.tts_chars == 0
 
 
+async def test_a_web_session_gets_a_trace_frame():
+    from server.roles import WEB_DEFAULT
+
+    session = Session(
+        transport=(transport := FakeTransport()), stt=FakeSTT(),
+        llm=FakeLLM("[happy] Все добре."), tts=FakeTTS(),
+        settings=Settings(_env_file=None), embedder=FakeEmbedder(),
+        role=WEB_DEFAULT, surface="web",
+    )
+    await session.on_text("Як справи?")
+    await session.wait_for_reply()
+
+    traces = [f["value"] for f in transport.json if f.get("type") == "trace"]
+    assert len(traces) == 1
+    trace = traces[0]
+    assert trace["role"] == "Web default"
+    assert trace["surface"] == "web"
+    assert trace["emotion"] == "happy"
+    assert trace["spoken"] is False
+    assert trace["prompt_tokens"] > 0
+    assert "Rules:" in trace["prompt"]
+
+
+async def test_the_device_never_gets_a_trace_frame():
+    session = Session(
+        transport=(transport := FakeTransport()), stt=FakeSTT(), llm=FakeLLM(),
+        tts=FakeTTS(), settings=Settings(_env_file=None), embedder=FakeEmbedder(),
+    )
+    await utter(session)
+    assert "trace" not in transport.types
+
+
+async def test_the_trace_carries_the_retrieved_facts_and_their_scores():
+    from tests.fakes import FakeStore
+
+    session = Session(
+        transport=(transport := FakeTransport()), stt=FakeSTT(), llm=FakeLLM(),
+        tts=FakeTTS(), settings=Settings(_env_file=None), embedder=FakeEmbedder(),
+        store=FakeStore(facts=["Lives in Chernivtsi"]), surface="web",
+    )
+    await session.on_text("Де я живу?")
+    await session.wait_for_reply()
+
+    trace = next(f["value"] for f in transport.json if f.get("type") == "trace")
+    assert trace["facts"] == [{"text": "Lives in Chernivtsi", "score": 1.0}]
+
+
+async def test_a_broken_trace_does_not_lose_the_reply(monkeypatch):
+    """The frame is a debugging aid; the answer is the product."""
+    from server.roles import WEB_DEFAULT
+
+    session = Session(
+        transport=(transport := FakeTransport()), stt=FakeSTT(),
+        llm=FakeLLM("Все добре."), tts=FakeTTS(),
+        settings=Settings(_env_file=None), embedder=FakeEmbedder(),
+        role=WEB_DEFAULT, surface="web",
+    )
+    monkeypatch.setattr(session, "_trace", lambda **kw: (_ for _ in ()).throw(RuntimeError("boom")))
+    await session.on_text("Як справи?")
+    await session.wait_for_reply()
+    assert "reply" in transport.types
+    assert "trace" not in transport.types
+
+
 async def test_on_text_while_listening_discards_the_recording_and_logs_it(caplog):
     session, transport = build()
     await session.on_start()

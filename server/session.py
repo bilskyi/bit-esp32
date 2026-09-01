@@ -233,11 +233,16 @@ class Session:
         if not text:
             log.info("empty transcript, skipping LLM")
             return
-        log.info("stt %.0f ms: %s", (time.perf_counter() - started) * 1000, text)
+        stt_ms = (time.perf_counter() - started) * 1000
+        log.info("stt %.0f ms: %s", stt_ms, text)
 
-        await self._answer(text, speak=True, audio_seconds=transcript.seconds)
+        await self._answer(text, speak=True, audio_seconds=transcript.seconds,
+                           stt_ms=stt_ms)
 
-    async def _answer(self, text: str, *, speak: bool = True, audio_seconds: float = 0.0) -> None:
+    async def _answer(
+        self, text: str, *, speak: bool = True, audio_seconds: float = 0.0,
+        stt_ms: float = 0.0,
+    ) -> None:
         if self.store is not None:
             query_vector = await self.embedder.embed_query(text)
             self.retrieved = await self.store.relevant_facts(
@@ -245,16 +250,14 @@ class Session:
             )
             self.facts = [fact for fact, _ in self.retrieved]
 
-        messages = build_messages(
+        system_prompt = build_system_prompt(
             # persona.py takes one flat list; standing instructions come
             # first so a relevant fact never pushes a user's own rule out of
             # the prompt if both were ever truncated upstream.
-            build_system_prompt(
-                self.standing_instructions + self.facts, self.role, spoken=speak
-            ),
-            self.history,
-            text,
-            self.settings.max_context_tokens,
+            self.standing_instructions + self.facts, self.role, spoken=speak
+        )
+        messages = build_messages(
+            system_prompt, self.history, text, self.settings.max_context_tokens
         )
         prompt_tokens = sum(estimate_tokens(m["content"]) for m in messages)
 
@@ -265,6 +268,7 @@ class Session:
         spoken: list[str] = []
         voice: str | None = None
         language: str | None = None
+        chosen_emotion: str | None = None
         sent_bytes = 0
         reply_started = time.monotonic()
         # Reply audio goes back compressed too when the device asked for it.
@@ -282,7 +286,7 @@ class Session:
             return any(ch.isalnum() for ch in sentence)
 
         async def say(sentence: str) -> None:
-            nonlocal voice, language
+            nonlocal voice, language, chosen_emotion
             # Belt and braces. The sniffer takes the tag off the head of the
             # stream; this catches one the model put anywhere else, because
             # edge-tts will pronounce "curious" without hesitation.
@@ -300,6 +304,7 @@ class Session:
                 # tag has almost always resolved; when it has not, the first
                 # sentence is a better thing to guess from than nothing.
                 emotion = self.role.pinned_mood or tag.emotion or from_text(sentence)
+                chosen_emotion = emotion
                 await self.transport.send_json({"type": "emotion", "value": emotion})
                 log.info("emotion %s (%s)", emotion,
                          "pinned" if self.role.pinned_mood
@@ -402,7 +407,46 @@ class Session:
             tts_chars=sum(len(s) for s in spoken) if speak else 0,
         )
 
+        if self.surface == "web":
+            try:
+                await self._trace(
+                    prompt=system_prompt,
+                    prompt_tokens=prompt_tokens,
+                    reply=reply,
+                    emotion=chosen_emotion,
+                    spoken=speak,
+                    stt_ms=stt_ms,
+                    reply_ms=(time.monotonic() - reply_started) * 1000,
+                )
+            except Exception:
+                # The answer is already delivered. A debugging aid must never
+                # be the reason a turn looks like it failed.
+                log.exception("failed to send trace frame")
+
     # -- helpers -----------------------------------------------------------
+
+    async def _trace(self, *, prompt, prompt_tokens, reply, emotion, spoken,
+                     stt_ms, reply_ms) -> None:
+        """What this turn actually did, for the playground's inspector.
+
+        Web only. The device is on a metered radio with a 55 KB free-heap
+        margin (RESUME.md) and no use for the payload.
+        """
+        await self.transport.send_json({
+            "type": "trace",
+            "value": {
+                "role": self.role.name,
+                "surface": self.surface,
+                "facts": [{"text": t, "score": round(s, 4)} for t, s in self.retrieved],
+                "prompt": prompt,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": estimate_tokens(reply),
+                "emotion": emotion,
+                "spoken": spoken,
+                "stt_ms": round(stt_ms, 1),
+                "reply_ms": round(reply_ms, 1),
+            },
+        })
 
     async def _set_state(self, state: State) -> None:
         self.state = state
