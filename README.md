@@ -82,7 +82,13 @@ Authorization: Bearer <DEVICE_TOKEN>
 ```
 
 Leaving `DEVICE_TOKEN` empty disables the check. Set it before the URL is
-public: an open socket lets anyone drain the Groq free tier. `/ws` also
+public: an open socket lets anyone drain the Groq free tier.
+
+An unauthorised connection is closed with code 4401 — but the close happens
+*before* the handshake is accepted, which Starlette answers as an HTTP 403, so
+a browser's `onclose` sees a generic abnormal closure and never that code. The
+device reads the close; a browser has to ask `GET /me` to tell "my cookie is
+gone" from "the server is down". `/ws` also
 accepts a logged-in session cookie as an alternative credential, so a browser
 that has called `POST /login` can open the socket with no bearer token at
 all.
