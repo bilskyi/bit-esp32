@@ -31,7 +31,9 @@ button:disabled {
   cursor: default;
 }
 button:focus-visible,
-input:focus-visible {
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
   outline: 2px solid var(--live-mark);
   outline-offset: 2px;
 }
@@ -84,16 +86,21 @@ input:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
+  min-width: 0;
 }
 
-.field label {
+.field label,
+.field legend {
   font-size: 0.62rem;
   letter-spacing: 0.13em;
   text-transform: uppercase;
   color: var(--ink-3);
+  padding: 0;
 }
 
-.field input {
+.field input,
+.field select,
+.field textarea {
   font-family: inherit;
   font-size: 0.95rem;
   color: var(--ink);
@@ -103,8 +110,41 @@ input:focus-visible {
   padding: 0.55rem 0.65rem;
   width: 100%;
 }
-.field input:disabled {
+.field textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+.field input:disabled,
+.field select:disabled,
+.field textarea:disabled {
   opacity: 0.7;
+}
+/* <fieldset className="field"> (the language checkboxes) needs its own
+   reset - a bare <fieldset> otherwise carries a browser border and padding
+   that nothing else in this design uses. */
+fieldset.field {
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+
+/* A checkbox next to its own label, never stacked like a text field - used
+   for every boolean control (markdown allowed, a language, record
+   conversations). */
+.field-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.field-row input[type='checkbox'] {
+  width: 1rem;
+  height: 1rem;
+  accent-color: var(--live-mark);
+  flex-shrink: 0;
+}
+.field-row label {
+  font-size: 0.85rem;
+  color: var(--ink);
 }
 
 .login-error {
@@ -527,6 +567,281 @@ input:focus-visible {
   color: var(--ink);
   font-variant-numeric: tabular-nums;
   word-break: break-word;
+}
+
+/* ----------------------------------------------------------- settings */
+
+/* Shell.tsx's .shell-content is a flex column with min-height:0, which is
+   what lets this scroll internally instead of pushing the shell taller than
+   the viewport - same trick .chat-scroll uses for the transcript. */
+.settings {
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 1.1rem 1.25rem;
+}
+
+.settings-section-title {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.settings-kicker {
+  margin: 0;
+  font-size: 0.62rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.settings-note {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--ink-2);
+  line-height: 1.5;
+}
+
+.settings-warning {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--live);
+  line-height: 1.5;
+}
+
+.settings-error {
+  margin: 0;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.settings-empty {
+  margin: 0;
+  color: var(--ink-3);
+  font-size: 0.85rem;
+}
+
+.settings-surface-row {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.settings-surface-row .field {
+  max-width: 20rem;
+}
+
+.settings-role-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.settings-role-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-radius: 0;
+  border-bottom: 1px solid var(--rule-soft);
+  background: var(--surface);
+}
+li:last-child > .settings-role-item {
+  border-bottom: 0;
+}
+.settings-role-item:hover:not(:disabled) {
+  background: var(--sunk);
+}
+.settings-role-item[aria-current='true'] {
+  background: var(--sunk);
+  color: var(--ink);
+  font-weight: 700;
+}
+
+.settings-role-item-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-role-item-tag,
+.memory-item-tag {
+  flex-shrink: 0;
+  font-size: 0.62rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  padding: 0.1rem 0.4rem;
+}
+
+.checkbox-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1.25rem;
+}
+
+/* --------------------------------------------------------- role editor */
+
+.role-editor-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--rule-soft);
+}
+
+.role-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.role-editor-prompt-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.role-editor-prompt-footer .chat-status {
+  font-variant-numeric: tabular-nums;
+}
+.role-editor-prompt-footer .chat-status.is-over-limit {
+  color: var(--live);
+}
+
+.role-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+/* ------------------------------------------------------------- memory */
+
+.memory {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.memory-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.6rem;
+}
+.memory-composer .field {
+  flex: 1;
+}
+
+.memory-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.memory-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.memory-item:last-child {
+  border-bottom: 0;
+}
+
+.memory-item-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--ink);
+  word-break: break-word;
+}
+
+.memory-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-shrink: 0;
+}
+
+.memory-danger-zone {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--rule);
+}
+
+.memory-danger-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.memory-danger-row > div {
+  flex: 1 1 16rem;
+  min-width: 0;
+}
+
+.memory-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  align-items: flex-start;
+  background: var(--sunk);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 0.85rem;
+}
+.memory-confirm .field {
+  max-width: 18rem;
+}
+
+@media (max-width: 420px) {
+  .settings-section {
+    padding: 0.9rem 1rem;
+  }
+  .memory-danger-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .memory-composer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .role-editor-prompt-footer {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.4rem;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
