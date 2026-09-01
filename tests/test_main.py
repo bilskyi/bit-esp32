@@ -450,6 +450,41 @@ def test_a_language_with_no_voice_is_rejected():
     assert r.status_code == 422
 
 
+def test_a_prompt_over_2000_characters_is_rejected_on_create():
+    """RoleIn.prompt has no length limit, and build_messages trims history
+    but never the system prompt - a pasted essay is sent in full on every
+    device turn, against the 6000-tokens-per-minute free-tier ceiling
+    MAX_CONTEXT_TOKENS exists to respect. An over-long prompt should be a
+    422 at the edge, not a budget failure at the provider."""
+    with client() as c:
+        _login(c)
+        r = c.post("/roles", json={
+            "name": "Essay", "prompt": "x" * 2001, "max_sentences": 2,
+            "markdown_allowed": False, "languages": ["uk"], "pinned_mood": None,
+        })
+    assert r.status_code == 422
+
+
+def test_a_prompt_of_exactly_2000_characters_is_accepted_on_create():
+    with client() as c:
+        _login(c)
+        r = c.post("/roles", json={
+            "name": "Essay", "prompt": "x" * 2000, "max_sentences": 2,
+            "markdown_allowed": False, "languages": ["uk"], "pinned_mood": None,
+        })
+    assert r.status_code == 200
+
+
+def test_a_prompt_over_2000_characters_is_rejected_on_update():
+    with client() as c:
+        _login(c)
+        role_id = c.post("/roles", json={"name": "Coach", "prompt": None, "max_sentences": 2,
+                                         "markdown_allowed": False, "languages": ["uk"],
+                                         "pinned_mood": None}).json()["id"]
+        r = c.put(f"/roles/{role_id}", json={"prompt": "x" * 2001})
+    assert r.status_code == 422
+
+
 def test_a_mood_that_is_not_a_face_is_rejected():
     with client() as c:
         _login(c)

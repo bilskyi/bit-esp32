@@ -12,7 +12,7 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from starlette.middleware.sessions import SessionMiddleware
 
 from server.accounts import Accounts
@@ -84,7 +84,12 @@ class AppSettingsIn(BaseModel):
 
 class RoleIn(BaseModel):
     name: str
-    prompt: str | None = None
+    # build_messages (server/context.py) trims history to fit the token
+    # budget but never trims the system prompt, so an unbounded persona
+    # would be sent in full on every device turn against MAX_CONTEXT_TOKENS.
+    # 2000 characters is ample for a persona section; SQLite itself does not
+    # enforce RoleRow.prompt's String(4000), so this is the only real limit.
+    prompt: str | None = Field(default=None, max_length=2000)
     max_sentences: int = 2
     markdown_allowed: bool = False
     languages: list[str] = list(SPEAKABLE_LANGUAGES)
@@ -99,7 +104,7 @@ class RolePatch(BaseModel):
     defaults.
     """
     name: str | None = None
-    prompt: str | None = None
+    prompt: str | None = Field(default=None, max_length=2000)
     max_sentences: int | None = None
     markdown_allowed: bool | None = None
     languages: list[str] | None = None
