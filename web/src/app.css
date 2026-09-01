@@ -980,3 +980,10 @@ li:last-child > .settings-role-item {
     transition: none !important;
   }
 }
+
+.memory-item-date {
+  color: var(--ink-3);
+  font-size: 0.7rem;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}

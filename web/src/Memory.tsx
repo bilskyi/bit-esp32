@@ -27,6 +27,15 @@ function describeError(err: unknown, fallback: string): string {
  * person typed it here (`user`). Re-reads the whole list after every
  * mutation rather than patching locally - see Settings.tsx's header
  * comment on why that is the rule for this whole tab. */
+/** A remembered-on date, short and unambiguous. Returns the raw string if the
+ * server ever sends something unparseable, rather than rendering "Invalid
+ * Date" over a fact somebody is deciding whether to delete. */
+function remembered(value: string): string {
+  const at = new Date(value)
+  if (Number.isNaN(at.getTime())) return value
+  return at.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
 function Memory({ notifyUnauthorized }: MemoryProps) {
   const [facts, setFacts] = useState<Fact[] | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -183,6 +192,11 @@ function Memory({ notifyUnauthorized }: MemoryProps) {
               <span className="memory-item-text">{fact.text}</span>
               <div className="memory-item-meta">
                 <span className="memory-item-tag">{fact.source}</span>
+                {/* The date is the only way to tell whose fact this is. The
+                    deployed server accumulated facts from strangers who found
+                    the URL before the token was set, and deciding what to
+                    delete means knowing when it arrived. */}
+                <span className="memory-item-date">{remembered(fact.created_at)}</span>
                 <button
                   type="button"
                   onClick={() => handleDeleteFact(fact.id)}
