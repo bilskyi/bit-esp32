@@ -26,10 +26,10 @@ interface MessageProps {
  * would do nothing and just be a lie.
  *
  * The inspector renders once the turn is done, whether it was answered or
- * interrupted - see Inspector.tsx's comment on why `trace: null` covers
- * both an unauthenticated (esp32) connection and an interrupted turn with
- * the same line. While a turn is still in flight there is nothing to show
- * yet: the trace frame is the last thing the server sends for it. */
+ * interrupted. A turn that finished with nothing streamed was cancelled, and
+ * Inspector needs to know: the two reasons a trace can be missing want
+ * different sentences. While a turn is still in flight there is nothing to
+ * show yet - the trace frame is the last thing the server sends for it. */
 function Message({ turn, inspectorOpen, onToggleInspector }: MessageProps) {
   const roleName = turn.trace?.role ?? 'assistant'
 
@@ -50,7 +50,12 @@ function Message({ turn, inspectorOpen, onToggleInspector }: MessageProps) {
       </div>
 
       {turn.done && (
-        <Inspector trace={turn.trace} open={inspectorOpen} onToggle={onToggleInspector} />
+        <Inspector
+          trace={turn.trace}
+          interrupted={turn.sentences.length === 0}
+          open={inspectorOpen}
+          onToggle={onToggleInspector}
+        />
       )}
     </div>
   )

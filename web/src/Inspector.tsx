@@ -2,12 +2,16 @@ import { useId } from 'react'
 import type { Trace } from './useTurn.ts'
 
 interface InspectorProps {
-  /** null covers two real cases the copy below has to tell apart in the
-   * reader's head even though the code can't: an esp32-labelled connection
-   * (no session cookie, so session.py never calls _trace at all) and a turn
-   * that was interrupted before the reply - and therefore the trace send -
-   * ever ran. Both get the same line; see Message.tsx for why that's fine. */
+  /** null has two real causes and they need different sentences. An
+   * esp32-labelled connection (no session cookie, so session.py never calls
+   * _trace at all) versus a turn cancelled before the reply - and therefore
+   * before the trace send - ever ran. `interrupted` is what tells them
+   * apart. */
   trace: Trace | null
+  /** True when this finished turn produced no sentences, which on a
+   * cookie-authorised connection can only mean it was cancelled: the server
+   * sends _trace before every natural `done`. */
+  interrupted: boolean
   open: boolean
   onToggle: () => void
 }
@@ -30,13 +34,21 @@ function ms(value: number): string {
  * `open`/`onToggle` are controlled from Chat.tsx rather than owned here,
  * because "exactly one inspector open at a time" is a fact about the whole
  * turn list, not about any single message. */
-function Inspector({ trace, open, onToggle }: InspectorProps) {
+function Inspector({ trace, interrupted, open, onToggle }: InspectorProps) {
   const panelId = useId()
 
   if (!trace) {
+    // Two different reasons a turn has no trace, and the wrong explanation is
+    // worse than none. The server runs _trace() before every natural `done`
+    // on a cookie-authorised connection, so for a signed-in person a missing
+    // trace means they cancelled - telling them to sign in would be simply
+    // untrue. A turn cut off after some sentences had already streamed is
+    // still ambiguous from here and falls through to the second line.
     return (
       <p className="inspector-missing">
-        No trace for this turn. Sign in over a session cookie to see it.
+        {interrupted
+          ? 'Interrupted before this turn finished — no trace was recorded.'
+          : 'No trace for this turn. Sign in over a session cookie to see it.'}
       </p>
     )
   }
@@ -90,6 +102,10 @@ function Inspector({ trace, open, onToggle }: InspectorProps) {
                     <div className="inspector-bar-track">
                       <div
                         className="inspector-bar-fill"
+                        // Clamped on purpose: cosine similarity runs to -1,
+                        // and a negative score would otherwise render as a
+                        // negative width. Such a fact is drawn as an empty
+                        // bar and read from the number beside it.
                         style={{ width: `${Math.max(0, Math.min(1, fact.score)) * 100}%` }}
                       />
                     </div>
