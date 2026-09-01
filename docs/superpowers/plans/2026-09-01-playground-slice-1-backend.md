@@ -966,7 +966,15 @@ reply will be spoken, because TTS reads asterisks aloud."
 
 ---
 
-## Task 4: Roles and active-surface API
+## Task 4: Roles reach the pipeline (API and session, one task)
+**Two phases, one task, one review.** The endpoints and the session change
+together because removing `Style` cannot be done in either file alone: the
+suite is red between phase A and phase B by construction, which is why they
+are not separate tasks. Commit at the end of each phase; the task's gate is
+green tests after phase B.
+
+### Phase A: the endpoints
+
 
 Also deletes the `style_overrides` path this replaces: the table, its two
 Store methods, `_resolve_style`, `StyleIn` and both `/settings/style/{surface}`
@@ -1327,7 +1335,7 @@ surface)` with:
 ```
 
 and pass `role=role, surface=surface` to `Session(...)` instead of
-`style=style`. `Session` accepts them in Task 5; until then the suite has
+`style=style`. `Session` accepts them in phase B; until then the suite has
 one known failure, which Step 5 confirms is the only one.
 
 - [ ] **Step 5: Run the tests**
@@ -1335,7 +1343,8 @@ one known failure, which Step 5 confirms is the only one.
 Run: `uv run pytest tests/test_main.py -q`
 Expected: the roles tests PASS; the WebSocket tests FAIL with
 `TypeError: Session.__init__() got an unexpected keyword argument 'role'`.
-That is Task 5's job.
+Expected and temporary — phase B below is what clears it. Do not stop here
+and do not paper over it by keeping a `style` parameter alive.
 
 Run: `uv run pytest tests/test_roles.py tests/test_persona.py tests/test_store.py -q`
 Expected: all PASS.
@@ -1356,7 +1365,9 @@ is nothing to migrate and no reason to keep two shapes for one idea."
 
 ---
 
-## Task 5: The session obeys its role
+
+### Phase B: the session obeys its role
+
 
 **Files:**
 - Modify: `server/session.py`
@@ -1367,10 +1378,10 @@ is nothing to migrate and no reason to keep two shapes for one idea."
   `build_system_prompt(facts, role, *, spoken)` (Task 3); `role=`/`surface=`
   passed by `ws_endpoint` (Task 4).
 - Produces: `Session(..., role: Role = DEVICE_DEFAULT, surface: str = "esp32")`.
-  `self.style` is gone. `self.role` and `self.surface` are read by Tasks 7
-  and 8.
+  `self.style` is gone. `self.role` and `self.surface` are read by Tasks 6
+  and 7.
 
-- [ ] **Step 1: Write the failing tests**
+- [ ] **Step 7: Write the failing tests**
 
 In `tests/test_session.py`, replace the three tests `test_default_style_is_esp32`,
 `test_web_style_reaches_the_system_prompt` and
@@ -1466,13 +1477,13 @@ If `FakeTransport` exposes its frames under a different attribute than
 `sent`, use that one — check `tests/fakes.py`; it already has a `types`
 property, so a `sent` list of dicts exists under some name.
 
-- [ ] **Step 2: Run to verify they fail**
+- [ ] **Step 8: Run to verify they fail**
 
 Run: `uv run pytest tests/test_session.py -q`
 Expected: FAIL — `TypeError: Session.__init__() got an unexpected keyword
 argument 'role'`.
 
-- [ ] **Step 3: Change the session**
+- [ ] **Step 9: Change the session**
 
 In `server/session.py`, change the imports:
 
@@ -1511,7 +1522,7 @@ In the nested `say()`, replace the emotion line:
                          else "tagged" if tag.emotion else "guessed")
 ```
 
-- [ ] **Step 4: Run the tests**
+- [ ] **Step 10: Run the tests**
 
 Run: `uv run pytest tests/test_session.py -q`
 Expected: all PASS.
@@ -1520,7 +1531,7 @@ Run: `uv run pytest -q`
 Expected: green — Task 4's known WebSocket failures clear here. Record the
 count; it should be ~318.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 11: Commit**
 
 ```bash
 git add server/session.py tests/test_session.py
@@ -1535,7 +1546,7 @@ something you can drive from the app."
 
 ---
 
-## Task 6: Retrieval reports its scores
+## Task 5: Retrieval reports its scores
 
 `relevant_facts` sorts by cosine similarity and throws the number away. The
 inspector's whole value is showing *why* a fact was retrieved, so the score
@@ -1551,7 +1562,7 @@ next to an unscored one — two ways to rank the same rows would drift.
 **Interfaces:**
 - Produces: `Store.relevant_facts(device_id, query_embedding, limit=6) ->
   list[tuple[str, float]]`, sorted by score descending.
-  `Session.retrieved: list[tuple[str, float]]` — read by Task 7.
+  `Session.retrieved: list[tuple[str, float]]` — read by Task 6.
 
 - [ ] **Step 1: Update the tests to expect scores**
 
@@ -1642,7 +1653,7 @@ and initialise it in `__init__` next to `self.facts`:
 - [ ] **Step 5: Run the suite**
 
 Run: `uv run pytest -q`
-Expected: green, same count as Task 5.
+Expected: green, same count as Task 4.
 
 - [ ] **Step 6: Commit**
 
@@ -1658,7 +1669,7 @@ two implementations of the same ranking, free to drift."
 
 ---
 
-## Task 7: The trace frame
+## Task 6: The trace frame
 
 One JSON frame per answered turn, to `web` connections only, carrying what
 the turn actually did. Best-effort: if assembling it raises, the reply has
@@ -1670,7 +1681,7 @@ already been delivered and the failure is logged, never surfaced.
 - Modify: `tests/test_main.py`
 
 **Interfaces:**
-- Consumes: `self.retrieved` (Task 6), `self.role`, `self.surface` (Task 5).
+- Consumes: `self.retrieved` (Task 5), `self.role`, `self.surface` (Task 4).
 - Produces: a frame
   `{"type": "trace", "value": {"role", "surface", "facts": [{"text","score"}],
   "prompt", "prompt_tokens", "completion_tokens", "emotion", "spoken",
@@ -1879,7 +1890,7 @@ delivered answer into a failed one."
 
 ---
 
-## Task 8: Recorded conversations, with retention
+## Task 7: Recorded conversations, with retention
 
 Nothing has ever stored what was said — `session_usage` holds counters only.
 This records it, with no UI: slice 3 charts it, and starting now means there
@@ -2368,9 +2379,9 @@ reboot - it is other people's words in there too, not only mine."
 merge (T1), roles as rows with a surface pointer (T2), `BASE` byte-identical
 plus configurable persona and the ESP32 reversal (T3), the language subset
 rule (T2 validation + T3 wording), roles/settings API replacing
-`style_overrides` (T4), pinned mood (T3 wording + T5 forcing), scored
-retrieval (T6), web-only `trace` (T7), recording with retention and an off
-switch (T8).
+`style_overrides` and the session that obeys a role (T4, two phases), pinned
+mood (T3 wording + T4 phase B forcing), scored retrieval (T5), web-only
+`trace` (T6), recording with retention and an off switch (T7).
 
 **Deliberately deferred to the frontend plan**, all from the spec's own list:
 deleting `GET /memory`'s HTML page, the static mount and SPA fallback, the
@@ -2387,10 +2398,10 @@ keeps the dependency one-directional.
 and types in T2/T3/T4/T5/T7. `relevant_facts` returns `list[tuple[str,
 float]]` in T6 and is consumed as pairs in T6/T7. `record_turn` is called
 with exactly the keyword names T8 defines. `Session(role=, surface=)` is
-introduced in T5 and passed by `ws_endpoint` in T4 — T4's Step 5 states this
-leaves one known failing test until T5, which is the only intentional red
-step in the plan.
+introduced and consumed inside T4, whose two phases are red between them by
+construction — the only intentional red point in the plan, and the reason
+they are one task rather than two.
 
 **Test counts** are stated per task as a check that nothing silently
-disappears: 288 after T1, 308 after T2, ~318 after T5, ~324 after T7, ~345
-after T8.
+disappears: 288 after T1, 308 after T2, ~318 after T4, ~324 after T6, ~345
+after T7.
