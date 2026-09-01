@@ -296,7 +296,12 @@ class Session:
         # Sits ahead of the splitter: the model's feeling arrives as a tag on
         # the very first token, and nothing downstream should ever see it.
         tag = LeadingTag()
-        spoken: list[str] = []
+        # Sentences emitted so far. Named apart from the `speak`/`spoken=`
+        # flag meaning "will this reply be voiced" - say() below and
+        # build_system_prompt() above both use that other sense of the word,
+        # three lines from here, and a shared name for two different things
+        # is exactly the kind of thing that gets misread mid-edit.
+        said: list[str] = []
         voice: str | None = None
         language: str | None = None
         chosen_emotion: str | None = None
@@ -341,7 +346,7 @@ class Session:
                          "pinned" if self.role.pinned_mood
                          else "tagged" if tag.emotion else "guessed")
                 await self._set_state(State.SPEAKING)
-            spoken.append(sentence)
+            said.append(sentence)
 
             if not speak:
                 # Typed in, so written back - no TTS call spent on something
@@ -407,7 +412,7 @@ class Session:
         for sentence in splitter.flush():
             await say(sentence)
 
-        if not spoken:
+        if not said:
             # The model answers a garbled transcript with an empty string, and
             # an empty reply reaches the user as unexplained silence - which is
             # indistinguishable from the device being broken. Say so instead.
@@ -423,10 +428,10 @@ class Session:
             log.info("empty reply for %r, asking to repeat", text[:40])
             await say(fallback)
 
-        reply = " ".join(spoken)
+        reply = " ".join(said)
         log.info(
             "reply %d chars, %d sentences, %d B audio in %.1f s: %r",
-            len(reply), len(spoken), sent_bytes,
+            len(reply), len(said), sent_bytes,
             time.monotonic() - reply_started, reply[:80],
         )
         self.history.append({"role": "user", "content": text})
@@ -435,7 +440,7 @@ class Session:
             audio_seconds=audio_seconds,
             prompt_tokens=prompt_tokens,
             completion_tokens=estimate_tokens(reply),
-            tts_chars=sum(len(s) for s in spoken) if speak else 0,
+            tts_chars=sum(len(s) for s in said) if speak else 0,
         )
 
         if self.store is not None:
