@@ -208,6 +208,67 @@ describe('useTurn', () => {
     expect(ws.sent).toHaveLength(0)
   })
 
+  it('a failed capture leaves no live turn and no pending cancel, so the next turn\'s own "done" is not swallowed', () => {
+    // Finding 2: Mic.tsx's beginRecording() sends "start" via startVoiceTurn()
+    // before calling startCapture() - if that throws (permission denied, no
+    // device, a suspended context), nothing further used to be sent for this
+    // turn: no "end", so server/session.py's on_end/_run_reply never ran for
+    // it, so nothing would ever cancel a reply task that does not exist, so
+    // no "done" was ever owed for it. cancelCurrentTurn did not know that: a
+    // retry's startVoiceTurn() still bumped pendingCancelsRef expecting one
+    // stray "done" that server/session.py's on_start "start while already
+    // listening" branch (a deliberate, silent drop - see its own comment)
+    // never sends - permanently off by one, silently eating the *next* real
+    // turn's "done" and stranding it on "thinking…" forever. Confirmed by a
+    // RED version of this test (no abandonVoiceTurn() call) that failed on
+    // exactly `turns[1].done` before this fix.
+    const { result } = renderHook(() => useTurn(), { wrapper })
+    const ws = lastSocket()
+    act(() => ws.open())
+
+    act(() => {
+      result.current.startVoiceTurn()
+    })
+    // Capture fails right here in the real flow - Mic.tsx's beginRecording()
+    // catch calls this instead of leaving the turn dangling.
+    act(() => {
+      result.current.abandonVoiceTurn()
+    })
+
+    expect(result.current.turns).toHaveLength(1)
+    expect(result.current.turns[0].done).toBe(true)
+
+    // A retry, exactly like pressing the mic again after seeing the error.
+    act(() => {
+      result.current.startVoiceTurn()
+    })
+    act(() => ws.frame({ type: 'done' }))
+
+    expect(result.current.turns).toHaveLength(2)
+    expect(result.current.turns[1].done).toBe(true)
+  })
+
+  it('abandonVoiceTurn is a harmless no-op once the turn is already done', () => {
+    // Guards the same StrictMode double-invoke concern cancelCurrentTurn's
+    // own comment describes: nothing here should double-finalise or throw if
+    // called again, or if the last turn already finished on its own.
+    const { result } = renderHook(() => useTurn(), { wrapper })
+    const ws = lastSocket()
+    act(() => ws.open())
+
+    act(() => {
+      result.current.startVoiceTurn()
+    })
+    act(() => ws.frame({ type: 'done' }))
+    expect(result.current.turns[0].done).toBe(true)
+
+    act(() => {
+      result.current.abandonVoiceTurn()
+    })
+    expect(result.current.turns).toHaveLength(1)
+    expect(result.current.turns[0].done).toBe(true)
+  })
+
   it('accumulates reply frames in arrival order and only marks the turn done once "done" lands', () => {
     const { result } = renderHook(() => useTurn(), { wrapper })
     const ws = lastSocket()

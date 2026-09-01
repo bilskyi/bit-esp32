@@ -22,7 +22,7 @@ interface MicProps {
  * exactly that (see server/session.py), so this mirrors the device's own
  * gesture instead of inventing a second one. The label says which. */
 function Mic({ turn }: MicProps) {
-  const { connection, state, startVoiceTurn, sendVoiceChunk, endVoiceTurn, onVoiceReply } = turn
+  const { connection, state, startVoiceTurn, sendVoiceChunk, endVoiceTurn, abandonVoiceTurn, onVoiceReply } = turn
   const [recording, setRecording] = useState(false)
   const [micError, setMicError] = useState<string | null>(null)
   const captureRef = useRef<CaptureController | null>(null)
@@ -108,8 +108,17 @@ function Mic({ turn }: MicProps) {
       setRecording(true)
     } catch (err) {
       setMicError(describeMicError(err))
+      // startVoiceTurn() above already sent "start" and opened a turn
+      // locally, but capture never actually began - no audio, no "end", so
+      // the server never creates a reply task for it and nothing will ever
+      // send a "done" for it (see abandonVoiceTurn's own comment in
+      // useTurn.ts). Finalising it this way, rather than the ordinary
+      // stopRecording()/endVoiceTurn() path, is what keeps this turn from
+      // stranding "thinking…" forever *and* from silently eating the next
+      // turn's genuine "done".
+      abandonVoiceTurn()
     }
-  }, [disabled, recording, startVoiceTurn, sendVoiceChunk, stopRecording])
+  }, [disabled, recording, startVoiceTurn, sendVoiceChunk, stopRecording, abandonVoiceTurn])
 
   const handlePointerDown = (event: PointerEvent<HTMLButtonElement>) => {
     // Stops this from also firing a click/focus-drag text selection - a

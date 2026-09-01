@@ -110,6 +110,23 @@ export interface TurnValue {
   sendVoiceChunk: (chunk: ArrayBuffer) => void
   /** Sends `{"type":"end"}` - the button was released. */
   endVoiceTurn: () => void
+  /** Marks the last turn done locally without expecting any server
+   * acknowledgement and without touching pendingCancelsRef - see Mic.tsx's
+   * beginRecording(), the only caller. That is deliberately different from
+   * cancelCurrentTurn (ask()/interrupt()/startVoiceTurn()'s shared path),
+   * which always counts one stray "done" it expects the server to send for
+   * whatever it cancels. That assumption holds for a turn that reached
+   * THINKING or SPEAKING (on_cancel there really does cancel a running reply
+   * task, whose `finally` sends "done"), but not for a voice turn where
+   * "start" was sent and startCapture() then threw before any audio, let
+   * alone "end", ever followed: server/session.py never created a reply task
+   * for it, so nothing is left to cancel, so a retry's "start" hits on_start's
+   * "start while already listening" branch, which drops it silently and
+   * owes no "done" at all (see that branch's own comment). Counting one
+   * there anyway is exactly the bug this fixes: it left pendingCancelsRef
+   * permanently off by one, silently swallowing the *next* turn's genuine
+   * "done" and stranding it on "thinking…" forever. */
+  abandonVoiceTurn: () => void
   /** Registers the one live handler for binary reply frames and the
    * completion/interrupt signals around them - see VoiceReplyHandlers.
    * Mic.tsx is the only caller; registering a new set of handlers replaces
@@ -471,6 +488,17 @@ export function useTurn(): TurnValue {
     }
   }, [])
 
+  const abandonVoiceTurn = useCallback(() => {
+    // Finalises the turn locally, exactly like cancelCurrentTurn's own
+    // `{ ...turn, done: true }` - but with no pendingCancelsRef bump and no
+    // onInterrupt() call, since nothing was ever sent for this turn beyond
+    // "start" and nothing is currently sounding to interrupt. Guarding on
+    // `turn.done` (rather than assuming the last turn is always the one to
+    // abandon) keeps a stray or repeated call harmless, the same tolerance
+    // cancelCurrentTurn has for a `prev` whose last turn is already done.
+    setTurns((prev) => updateLastTurn(prev, (turn) => (turn.done ? turn : { ...turn, done: true })))
+  }, [])
+
   const onVoiceReply = useCallback((handlers: VoiceReplyHandlers): (() => void) => {
     voiceHandlersRef.current = handlers
     return () => {
@@ -493,8 +521,21 @@ export function useTurn(): TurnValue {
       startVoiceTurn,
       sendVoiceChunk,
       endVoiceTurn,
+      abandonVoiceTurn,
       onVoiceReply,
     }),
-    [connection, state, turns, sendError, ask, interrupt, startVoiceTurn, sendVoiceChunk, endVoiceTurn, onVoiceReply],
+    [
+      connection,
+      state,
+      turns,
+      sendError,
+      ask,
+      interrupt,
+      startVoiceTurn,
+      sendVoiceChunk,
+      endVoiceTurn,
+      abandonVoiceTurn,
+      onVoiceReply,
+    ],
   )
 }
