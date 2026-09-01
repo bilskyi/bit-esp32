@@ -67,37 +67,107 @@ def test_says_the_tag_is_not_to_be_spoken():
     assert "never spoken" in prompt
 
 
-def test_default_style_is_esp32_and_matches_existing_wording():
-    from server.persona import ESP32, build_system_prompt
+def test_the_device_default_reproduces_the_measured_prompt_exactly():
+    """The golden test. BASE was measured (RESUME.md); an attempt to reword it
+    made the emotion spread worse on three runs of emotion_survey.py. The
+    assembly must reproduce it byte for byte, or the measurement no longer
+    describes what ships."""
+    from server.persona import BASE, build_system_prompt
+    from server.roles import DEVICE_DEFAULT
 
-    assert build_system_prompt([]) == build_system_prompt([], ESP32)
+    assert build_system_prompt([], DEVICE_DEFAULT, spoken=True) == BASE
 
 
-def test_web_style_allows_markdown():
-    from server.persona import WEB, build_system_prompt
+def test_the_default_arguments_are_the_device_defaults():
+    from server.persona import BASE, build_system_prompt
 
-    prompt = build_system_prompt([], WEB).lower()
+    assert build_system_prompt([]) == BASE
+
+
+def test_a_screen_reply_allows_markdown_when_the_role_does():
+    from server.persona import build_system_prompt
+    from server.roles import WEB_DEFAULT
+
+    prompt = build_system_prompt([], WEB_DEFAULT, spoken=False).lower()
     assert "markdown, lists and headings are fine" in prompt
+    assert "up to 6 sentences" in prompt
 
 
-def test_esp32_style_still_forbids_markdown():
-    from server.persona import ESP32, build_system_prompt
+def test_a_spoken_reply_never_allows_markdown_even_if_the_role_does():
+    """TTS reads asterisks and hyphens out loud. Whatever the role says,
+    a reply that will be spoken gets the no-markdown rule."""
+    from server.persona import build_system_prompt
+    from server.roles import WEB_DEFAULT
 
-    prompt = build_system_prompt([], ESP32).lower()
+    prompt = build_system_prompt([], WEB_DEFAULT, spoken=True).lower()
     assert "no lists, no headings, no markdown" in prompt
+    assert "markdown, lists and headings are fine" not in prompt
 
 
-def test_web_style_sentence_count_is_configurable():
-    from server.persona import Style, build_system_prompt
-
-    custom = Style(max_sentences=4, markdown_allowed=True)
-    assert "up to 4 sentences" in build_system_prompt([], custom)
-
-
-def test_web_style_still_asks_for_every_emotion():
+def test_a_custom_persona_section_replaces_only_the_opening():
     from server.emotion import EMOTIONS
-    from server.persona import WEB, build_system_prompt
+    from server.persona import build_system_prompt
+    from server.roles import Role, SPEAKABLE_LANGUAGES
 
-    prompt = build_system_prompt([], WEB)
+    coach = Role(id=1, name="Coach", prompt="You are a blunt running coach.",
+                 max_sentences=2, markdown_allowed=False,
+                 languages=SPEAKABLE_LANGUAGES, pinned_mood=None)
+    prompt = build_system_prompt([], coach, spoken=True)
+    assert prompt.startswith("You are a blunt running coach.")
+    assert "voice companion" not in prompt
+    # The invariants survive a custom persona.
     for name in EMOTIONS:
         assert f"[{name}]" in prompt, name
+    assert "Reply only in Ukrainian, Russian or English." in prompt
+
+
+def test_narrowing_the_languages_narrows_the_rule():
+    from server.persona import build_system_prompt
+    from server.roles import Role
+
+    ukrainian_only = Role(id=1, name="UA", prompt=None, max_sentences=2,
+                          markdown_allowed=False, languages=("uk",), pinned_mood=None)
+    prompt = build_system_prompt([], ukrainian_only, spoken=True)
+    assert "Reply only in Ukrainian." in prompt
+    assert "Russian" not in prompt.split("Reply only in", 1)[1].split("\n", 1)[0]
+
+
+def test_two_languages_read_as_a_pair():
+    from server.persona import build_system_prompt
+    from server.roles import Role
+
+    pair = Role(id=1, name="Pair", prompt=None, max_sentences=2,
+                markdown_allowed=False, languages=("uk", "en"), pinned_mood=None)
+    assert "Reply only in Ukrainian or English." in build_system_prompt([], pair, spoken=True)
+
+
+def test_a_pinned_mood_becomes_a_rule():
+    from server.persona import build_system_prompt
+    from server.roles import Role, SPEAKABLE_LANGUAGES
+
+    sleepy = Role(id=1, name="Sleepy", prompt=None, max_sentences=2,
+                  markdown_allowed=False, languages=SPEAKABLE_LANGUAGES,
+                  pinned_mood="sleepy")
+    prompt = build_system_prompt([], sleepy, spoken=True)
+    assert "[sleepy]" in prompt
+    assert "you feel sleepy" in prompt.lower()
+
+
+def test_no_pinned_mood_adds_no_mood_rule():
+    from server.persona import BASE, build_system_prompt
+    from server.roles import DEVICE_DEFAULT
+
+    # Not "you feel" bare: BASE's tag rule itself says "how you feel about
+    # it", so that phrase is unavoidably present. What must be absent is the
+    # pinned-mood rule's distinct wording.
+    assert "right now you feel" not in build_system_prompt([], DEVICE_DEFAULT, spoken=True).lower()
+    assert build_system_prompt([], DEVICE_DEFAULT, spoken=True) == BASE
+
+
+def test_one_sentence_reads_as_one_sentence():
+    from server.persona import build_system_prompt
+    from server.roles import Role, SPEAKABLE_LANGUAGES
+
+    terse = Role(id=1, name="Terse", prompt=None, max_sentences=1,
+                 markdown_allowed=False, languages=SPEAKABLE_LANGUAGES, pinned_mood=None)
+    assert "Answer in one sentence." in build_system_prompt([], terse, spoken=False)
