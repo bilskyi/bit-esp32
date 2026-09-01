@@ -95,8 +95,22 @@ conversion, frame decoding, the Dockerfile, the SPA fallback — and specifies
 routine markup by structure, behaviour and acceptance instead of transcribing
 every element. Where a step says "exactly", it means exactly.
 
-**There is no browser in the implementation environment, and there are no
-frontend unit tests in this plan.** Backend changes get pytest as usual. Each
+**Amended during execution.** This plan originally said no frontend test
+runner. Task 3's review then reproduced a Critical that TypeScript, oxlint, a
+production build and a live server smoke test all missed: a ref mutated inside
+a `setState` updater, which React 19's StrictMode double-invokes, leaving the
+second question after an interrupt stuck on "thinking…" forever in development.
+So vitest + jsdom + @testing-library/react are now devDependencies with an
+`npm test` script and `web/src/useTurn.test.tsx`.
+
+Keep that harness narrow: it exists for logic that a browser check cannot
+falsify — the socket hook, and the PCM conversion in Task 7. Do not grow it
+into a component-testing culture; the per-task browser checklist is still the
+acceptance mechanism for anything visual. A test that would not have caught
+the bug it claims to cover is not a regression test: the one for the above
+runs the hook inside `StrictMode`, because outside it the bug does not appear.
+
+**There is no browser in the implementation environment.** Backend changes get pytest as usual. Each
 frontend task therefore ends with a **Verify in a browser** block: a numbered
 list of what to do and what must happen. The person running the plan performs
 it. A task is not complete until that block passes, and an implementer must
