@@ -672,3 +672,19 @@ def test_a_bearer_socket_never_receives_a_trace_frame():
                 if frame["type"] == "state" and frame["value"] == "idle":
                     break
     assert "trace" not in seen
+
+
+def test_app_settings_require_login():
+    with client() as c:
+        assert c.get("/settings/app").status_code == 401
+        assert c.put("/settings/app", json={"retention_days": 7}).status_code == 401
+
+
+def test_app_settings_round_trip_over_http():
+    with client() as c:
+        _login(c)
+        assert c.get("/settings/app").json() == {
+            "store_conversations": True, "retention_days": 90,
+        }
+        updated = c.put("/settings/app", json={"store_conversations": False}).json()
+    assert updated["store_conversations"] is False

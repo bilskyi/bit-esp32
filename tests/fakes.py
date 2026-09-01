@@ -84,13 +84,43 @@ class FakeAccounts:
 
 
 class FakeStore:
-    def __init__(self, facts: list[str] | None = None, standing: list[str] | None = None) -> None:
+    def __init__(
+        self, facts: list[str] | None = None, standing: list[str] | None = None,
+        store_conversations: bool = True,
+    ) -> None:
         self.facts = {"default": list(facts or [])}
         self.standing = {"default": list(standing or [])}
         self.added: list[tuple[str, list[str]]] = []
         self.usage_logged: list = []
         self._memory: dict[str, list[dict]] = {}
         self._next_id = 1
+        self.turns: list[tuple[str, str, str | None]] = []
+        self.started: list[int] = []
+        self.ended: list[int] = []
+        self._store_conversations = store_conversations
+
+    async def app_settings(self) -> dict:
+        return {"store_conversations": self._store_conversations, "retention_days": 90}
+
+    async def set_app_settings(self, store_conversations=None, retention_days=None) -> dict:
+        if store_conversations is not None:
+            self._store_conversations = store_conversations
+        return await self.app_settings()
+
+    async def start_conversation(self, device_id: str, surface: str, role_name: str) -> int:
+        cid = len(self.started) + 1
+        self.started.append(cid)
+        return cid
+
+    async def record_turn(self, conversation_id, *, question, reply, emotion,
+                          prompt_tokens, completion_tokens, latency_ms) -> None:
+        self.turns.append((question, reply, emotion))
+
+    async def end_conversation(self, conversation_id: int) -> None:
+        self.ended.append(conversation_id)
+
+    async def purge_expired(self) -> int:
+        return 0
 
     async def recent_facts(self, device_id: str, limit: int = 20) -> list[str]:
         return list(self.facts.get(device_id, []))

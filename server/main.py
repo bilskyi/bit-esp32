@@ -77,6 +77,11 @@ class MemoryIn(BaseModel):
     text: str
 
 
+class AppSettingsIn(BaseModel):
+    store_conversations: bool | None = None
+    retention_days: int | None = None
+
+
 class RoleIn(BaseModel):
     name: str
     prompt: str | None = None
@@ -180,6 +185,9 @@ def create_app(
         app.state.tts = tts or EdgeTTS(rate=settings.sample_rate)
         if not injected:
             await app.state.store.backfill_embeddings(app.state.embedder.embed_documents)
+            purged = await app.state.store.purge_expired()
+            if purged:
+                log.info("purged %d conversations past the retention window", purged)
         yield
         if not injected and app.state.store is not None:
             await app.state.store.close()
@@ -321,6 +329,17 @@ def create_app(
         if not await app.state.roles.set_active(surface, body.role_id):
             raise HTTPException(status_code=404, detail="not found")
         return {"status": "ok"}
+
+    @app.get("/settings/app", dependencies=[Depends(require_login)])
+    async def get_app_settings() -> dict:
+        return await app.state.store.app_settings()
+
+    @app.put("/settings/app", dependencies=[Depends(require_login)])
+    async def put_app_settings(body: AppSettingsIn) -> dict:
+        return await app.state.store.set_app_settings(
+            store_conversations=body.store_conversations,
+            retention_days=body.retention_days,
+        )
 
     @app.websocket("/ws")
     async def ws_endpoint(websocket: WebSocket) -> None:

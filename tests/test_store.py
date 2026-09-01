@@ -179,3 +179,87 @@ async def test_backfill_embeddings_is_idempotent(store):
 
     assert await store.backfill_embeddings(embed) == 1
     assert await store.backfill_embeddings(embed) == 0
+
+
+# ------------------------------------------------------- conversation history
+
+async def test_app_settings_default_to_recording_on_for_ninety_days(store):
+    assert await store.app_settings() == {"store_conversations": True, "retention_days": 90}
+
+
+async def test_app_settings_round_trip(store):
+    await store.set_app_settings(store_conversations=False, retention_days=7)
+    assert await store.app_settings() == {"store_conversations": False, "retention_days": 7}
+
+
+async def test_setting_one_app_setting_leaves_the_other(store):
+    await store.set_app_settings(retention_days=30)
+    settings = await store.app_settings()
+    assert settings == {"store_conversations": True, "retention_days": 30}
+
+
+async def test_a_recorded_turn_keeps_both_halves(store):
+    cid = await store.start_conversation("dev1", "web", "Web default")
+    await store.record_turn(cid, question="Де я живу?", reply="У Чернівцях.",
+                            emotion="neutral", prompt_tokens=120,
+                            completion_tokens=8, latency_ms=845.0)
+    rows = await store.conversation_rows("dev1")
+    assert len(rows) == 1
+    assert rows[0]["surface"] == "web"
+    assert rows[0]["role_name"] == "Web default"
+    assert rows[0]["turns"] == 1
+    assert rows[0]["messages"][0] == {"role": "user", "text": "Де я живу?", "emotion": None}
+    assert rows[0]["messages"][1]["role"] == "assistant"
+    assert rows[0]["messages"][1]["text"] == "У Чернівцях."
+    assert rows[0]["messages"][1]["emotion"] == "neutral"
+
+
+async def test_conversations_are_scoped_per_device(store):
+    await store.start_conversation("dev1", "web", "Web default")
+    assert await store.conversation_rows("dev2") == []
+
+
+async def test_ending_a_conversation_stamps_it(store):
+    cid = await store.start_conversation("dev1", "esp32", "Device default")
+    await store.end_conversation(cid)
+    assert (await store.conversation_rows("dev1"))[0]["ended_at"] is not None
+
+
+async def test_purge_removes_conversations_past_retention(store):
+    from datetime import datetime, timedelta, timezone
+
+    from server.memory.store import Conversation
+
+    cid = await store.start_conversation("dev1", "web", "Web default")
+    await store.record_turn(cid, question="q", reply="r", emotion=None,
+                            prompt_tokens=1, completion_tokens=1, latency_ms=1.0)
+    await store.set_app_settings(retention_days=1)
+    async with store._session() as s:  # noqa: SLF001 - fixture-level surgery
+        row = await s.get(Conversation, cid)
+        row.started_at = datetime.now(timezone.utc) - timedelta(days=5)
+        await s.commit()
+
+    assert await store.purge_expired() == 1
+    assert await store.conversation_rows("dev1") == []
+
+
+async def test_purge_keeps_conversations_inside_retention(store):
+    cid = await store.start_conversation("dev1", "web", "Web default")
+    await store.record_turn(cid, question="q", reply="r", emotion=None,
+                            prompt_tokens=1, completion_tokens=1, latency_ms=1.0)
+    assert await store.purge_expired() == 0
+    assert len(await store.conversation_rows("dev1")) == 1
+
+
+async def test_retention_of_zero_days_never_purges(store):
+    cid = await store.start_conversation("dev1", "web", "Web default")
+    await store.set_app_settings(retention_days=0)
+    from datetime import datetime, timedelta, timezone
+
+    from server.memory.store import Conversation
+
+    async with store._session() as s:  # noqa: SLF001
+        row = await s.get(Conversation, cid)
+        row.started_at = datetime.now(timezone.utc) - timedelta(days=4000)
+        await s.commit()
+    assert await store.purge_expired() == 0

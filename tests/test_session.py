@@ -663,3 +663,47 @@ async def test_on_text_while_listening_discards_the_recording_and_logs_it(caplog
     assert len(session._buf) == 0
     assert session._watchdog is None
     assert any("dropping" in r.message for r in caplog.records)
+
+
+async def test_a_turn_is_recorded_when_recording_is_on():
+    from tests.fakes import FakeStore
+
+    store = FakeStore()
+    session = Session(
+        transport=FakeTransport(), stt=FakeSTT(), llm=FakeLLM("[happy] Все добре."),
+        tts=FakeTTS(), settings=Settings(_env_file=None), embedder=FakeEmbedder(),
+        store=store, surface="web",
+    )
+    await session.on_text("Як справи?")
+    await session.wait_for_reply()
+    assert store.turns == [("Як справи?", "Все добре.", "happy")]
+
+
+async def test_nothing_is_recorded_when_recording_is_off():
+    from tests.fakes import FakeStore
+
+    store = FakeStore(store_conversations=False)
+    session = Session(
+        transport=FakeTransport(), stt=FakeSTT(), llm=FakeLLM("Все добре."),
+        tts=FakeTTS(), settings=Settings(_env_file=None), embedder=FakeEmbedder(),
+        store=store, surface="web",
+    )
+    await session.on_text("Як справи?")
+    await session.wait_for_reply()
+    assert store.turns == []
+    assert store.started == []
+
+
+async def test_finishing_ends_the_conversation():
+    from tests.fakes import FakeStore
+
+    store = FakeStore()
+    session = Session(
+        transport=FakeTransport(), stt=FakeSTT(), llm=FakeLLM("Все добре."),
+        tts=FakeTTS(), settings=Settings(_env_file=None), embedder=FakeEmbedder(),
+        store=store, surface="web",
+    )
+    await session.on_text("Як справи?")
+    await session.wait_for_reply()
+    await session.finish()
+    assert store.ended == store.started

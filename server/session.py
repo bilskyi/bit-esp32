@@ -62,6 +62,7 @@ class Session:
         self.retrieved: list[tuple[str, float]] = []
         self.standing_instructions: list[str] = []
         self.usage = Usage()
+        self.conversation_id: int | None = None
 
         self._buf = bytearray()
         self._codec = "pcm16"
@@ -206,6 +207,8 @@ class Session:
                 await self.store.add_facts(self.device_id, facts, embeddings)
         if not self.usage.is_empty:
             await self.store.log_usage(self.device_id, self.usage)
+        if self.conversation_id is not None:
+            await self.store.end_conversation(self.conversation_id)
 
     # -- pipeline ----------------------------------------------------------
 
@@ -406,6 +409,26 @@ class Session:
             completion_tokens=estimate_tokens(reply),
             tts_chars=sum(len(s) for s in spoken) if speak else 0,
         )
+
+        if self.store is not None:
+            # Read per turn, not per session, so switching recording off in
+            # Settings takes effect on the next question rather than the next
+            # connection.
+            recording = (await self.store.app_settings())["store_conversations"]
+            if recording:
+                if self.conversation_id is None:
+                    self.conversation_id = await self.store.start_conversation(
+                        self.device_id, self.surface, self.role.name
+                    )
+                await self.store.record_turn(
+                    self.conversation_id,
+                    question=text,
+                    reply=reply,
+                    emotion=chosen_emotion,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=estimate_tokens(reply),
+                    latency_ms=(time.monotonic() - reply_started) * 1000,
+                )
 
         if self.surface == "web":
             try:

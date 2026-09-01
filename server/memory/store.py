@@ -18,10 +18,10 @@ calls this embeds elsewhere (server/session.py, via an injected Embedder).
 
 import math
 import struct
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable
 
-from sqlalchemy import Integer, Float, LargeBinary, String, DateTime, select, delete
+from sqlalchemy import Integer, Float, LargeBinary, String, DateTime, Text, select, delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -74,6 +74,44 @@ class SessionUsage(Base):
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
     tts_chars: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    device_id: Mapped[str] = mapped_column(String(64), index=True)
+    surface: Mapped[str] = mapped_column(String(16))
+    role_name: Mapped[str] = mapped_column(String(64))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    ended_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class Message(Base):
+    __tablename__ = "messages"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(Integer, index=True)
+    # "user" or "assistant" - the same two names the LLM history uses, so a
+    # recorded turn and a prompt turn do not need translating between them.
+    role: Mapped[str] = mapped_column(String(16))
+    text: Mapped[str] = mapped_column(Text)
+    emotion: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    latency_ms: Mapped[float] = mapped_column(Float, default=0.0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
+class AppSetting(Base):
+    """Key/value, because there are two of these and both are user-editable.
+
+    Settings.py is for deploy-time configuration a person sets once on
+    Railway; this is for switches the app itself flips at runtime.
+    """
+    __tablename__ = "app_settings"
+    key: Mapped[str] = mapped_column(String(32), primary_key=True)
+    value: Mapped[str] = mapped_column(String(64))
 
 
 class Store:
@@ -296,4 +334,120 @@ class Store:
                 }
                 for r in rows.all()
             ]
+
+    _DEFAULT_APP_SETTINGS = {"store_conversations": "1", "retention_days": "90"}
+
+    async def app_settings(self) -> dict:
+        async with self._session() as s:
+            rows = await s.scalars(select(AppSetting))
+            stored = {r.key: r.value for r in rows.all()}
+        merged = {**self._DEFAULT_APP_SETTINGS, **stored}
+        return {
+            "store_conversations": merged["store_conversations"] == "1",
+            "retention_days": int(merged["retention_days"]),
+        }
+
+    async def set_app_settings(
+        self, store_conversations: bool | None = None, retention_days: int | None = None
+    ) -> dict:
+        pairs = {}
+        if store_conversations is not None:
+            pairs["store_conversations"] = "1" if store_conversations else "0"
+        if retention_days is not None:
+            pairs["retention_days"] = str(max(0, int(retention_days)))
+        async with self._session() as s:
+            for key, value in pairs.items():
+                row = await s.get(AppSetting, key)
+                if row is None:
+                    s.add(AppSetting(key=key, value=value))
+                else:
+                    row.value = value
+            await s.commit()
+        return await self.app_settings()
+
+    async def start_conversation(self, device_id: str, surface: str, role_name: str) -> int:
+        async with self._session() as s:
+            row = Conversation(device_id=device_id, surface=surface, role_name=role_name)
+            s.add(row)
+            await s.commit()
+            await s.refresh(row)
+            return row.id
+
+    async def record_turn(
+        self, conversation_id: int, *, question: str, reply: str, emotion: str | None,
+        prompt_tokens: int, completion_tokens: int, latency_ms: float,
+    ) -> None:
+        """Two rows, not one: a turn is a question and an answer, and slice 3
+        wants to read them back in order without unpacking a composite row."""
+        async with self._session() as s:
+            s.add(Message(conversation_id=conversation_id, role="user", text=question,
+                          emotion=None, prompt_tokens=prompt_tokens,
+                          completion_tokens=0, latency_ms=0.0))
+            s.add(Message(conversation_id=conversation_id, role="assistant", text=reply,
+                          emotion=emotion, prompt_tokens=0,
+                          completion_tokens=completion_tokens, latency_ms=latency_ms))
+            await s.commit()
+
+    async def end_conversation(self, conversation_id: int) -> None:
+        async with self._session() as s:
+            row = await s.get(Conversation, conversation_id)
+            if row is not None:
+                row.ended_at = _now()
+                await s.commit()
+
+    async def conversation_rows(self, device_id: str, limit: int = 50) -> list[dict]:
+        async with self._session() as s:
+            conversations = (
+                await s.scalars(
+                    select(Conversation)
+                    .where(Conversation.device_id == device_id)
+                    .order_by(Conversation.id.desc())
+                    .limit(limit)
+                )
+            ).all()
+            out = []
+            for c in conversations:
+                messages = (
+                    await s.scalars(
+                        select(Message)
+                        .where(Message.conversation_id == c.id)
+                        .order_by(Message.id.asc())
+                    )
+                ).all()
+                out.append({
+                    "id": c.id,
+                    "surface": c.surface,
+                    "role_name": c.role_name,
+                    "started_at": c.started_at,
+                    "ended_at": c.ended_at,
+                    "turns": sum(1 for m in messages if m.role == "user"),
+                    "messages": [
+                        {"role": m.role, "text": m.text, "emotion": m.emotion}
+                        for m in messages
+                    ],
+                })
+            return out
+
+    async def purge_expired(self) -> int:
+        """Delete conversations past the retention window. Returns how many.
+
+        `retention_days = 0` means keep forever, which is why this reads the
+        setting rather than taking a parameter: the switch and the sweep must
+        agree, and there is exactly one place to set it.
+        """
+        settings = await self.app_settings()
+        days = settings["retention_days"]
+        if days <= 0:
+            return 0
+        cutoff = _now() - timedelta(days=days)
+        async with self._session() as s:
+            doomed = (
+                await s.scalars(select(Conversation.id).where(Conversation.started_at < cutoff))
+            ).all()
+            if not doomed:
+                return 0
+            await s.execute(delete(Message).where(Message.conversation_id.in_(doomed)))
+            await s.execute(delete(Conversation).where(Conversation.id.in_(doomed)))
+            await s.commit()
+            return len(doomed)
 
