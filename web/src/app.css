@@ -291,10 +291,30 @@ fieldset.field {
 
 /* ------------------------------------------------------------------- chat */
 
+/* Wraps the face panel and the chat column. A plain flex column stacks the
+   face above the transcript on mobile, in DOM order; from 900px it becomes
+   a two-column grid with the face in a fixed-width rail beside the
+   transcript instead - see .face-rail below for why that column is sticky
+   rather than stretched. */
+.chat-layout {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 1rem;
+}
+@media (min-width: 900px) {
+  .chat-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 15rem;
+    gap: 1.5rem;
+  }
+}
+
 .chat {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  flex: 1;
   min-height: 0;
   gap: 0.85rem;
 }
@@ -349,6 +369,79 @@ fieldset.field {
 
 .chat-composer button {
   flex-shrink: 0;
+}
+
+/* --------------------------------------------------------------- face rail */
+
+.face-rail {
+  flex-shrink: 0;
+}
+@media (min-width: 900px) {
+  /* Sticky rather than stretched to the transcript's height: .chat-scroll
+     is what scrolls, not the page, so this mostly holds the panel level
+     with the top of the transcript - but it costs nothing to also do the
+     right thing on the rare layout where the outer page scrolls instead
+     (a very short viewport, the composer growing tall). */
+  .face-rail {
+    position: sticky;
+    top: 0;
+    align-self: start;
+  }
+}
+
+.face {
+  /* Centred and capped on its own at any width under 900px - phone widths
+     and the stacked-tablet range both count as "mobile" here - so the
+     panel reads as a fixed-size instrument rather than stretching
+     edge-to-edge. From 900px .face-rail's own 15rem column is already the
+     right width, so this steps out of the way. */
+  max-width: 22rem;
+  margin: 0 auto;
+}
+@media (min-width: 900px) {
+  .face {
+    max-width: none;
+    margin: 0;
+  }
+}
+
+/* The face panel itself: a 128x64 canvas at native resolution, scaled up by
+   CSS rather than redrawn at a larger size, so image-rendering: pixelated
+   is what keeps every lit pixel a crisp square instead of a blurred one.
+   Palette and the --grid texture copied verbatim from
+   firmware/host/preview-template.html's .stage - see tokens.css. */
+.face-stage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.85rem;
+  background: var(--glass);
+  background-image:
+    repeating-linear-gradient(to right, var(--grid) 0 1px, transparent 1px 6px),
+    repeating-linear-gradient(to bottom, var(--grid) 0 1px, transparent 1px 6px);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  box-shadow: var(--shadow);
+}
+
+.face-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  image-rendering: pixelated;
+}
+
+/* One line under the panel: the state, and the emotion once one has been
+   chosen - or "offline" while the socket is down, in the same small mono
+   ink-3 treatment every other meta line in this app uses (see
+   .message-label, .inspector-toggle-label). */
+.face-readout {
+  margin: 0.55rem 0 0;
+  text-align: center;
+  font-size: 0.68rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-3);
 }
 
 /* -------------------------------------------------------------- message */

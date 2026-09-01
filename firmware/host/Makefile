@@ -24,7 +24,7 @@ BUILD        := build
 ASAN_BUILD   := build-asan
 ASAN         ?= 1
 
-.PHONY: all test asan preview clean
+.PHONY: all test asan preview face-data clean
 
 all: test preview
 
@@ -39,6 +39,9 @@ $(BUILD)/face_test: ../main/face.c ../main/face.h face_test.c | $(BUILD)
 
 $(BUILD)/face_preview: ../main/face.c ../main/face.h face_preview.c | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ ../main/face.c face_preview.c
+
+$(BUILD)/face_export: ../main/face.c ../main/face.h face_export.c | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ ../main/face.c face_export.c
 
 $(BUILD)/provision_logic_test: ../main/provision_logic.c ../main/provision_logic.h provision_logic_test.c | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ ../main/provision_logic.c provision_logic_test.c
@@ -71,6 +74,13 @@ asan: $(ASAN_BUILD)/face_test $(ASAN_BUILD)/provision_logic_test $(ASAN_BUILD)/s
 preview: $(BUILD)/face_preview preview-template.html
 	@./$(BUILD)/face_preview preview-template.html $(BUILD)/face-preview.html
 	@echo "wrote $(BUILD)/face-preview.html"
+
+# Not part of `all`: the frames only change when face.c does, and a frontend
+# build must not require a C compiler. Run this by hand and commit the
+# result - see web/src/face-frames.json's own size for the cost of that.
+face-data: $(BUILD)/face_export
+	@./$(BUILD)/face_export > ../../web/src/face-frames.json
+	@echo "wrote web/src/face-frames.json"
 
 clean:
 	rm -rf $(BUILD) $(ASAN_BUILD)

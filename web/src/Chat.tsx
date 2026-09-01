@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent, KeyboardEvent } from 'react'
-import type { TurnValue } from './useTurn.ts'
+import type { Turn, TurnValue } from './useTurn.ts'
+import Face from './Face.tsx'
 import Message from './Message.tsx'
 
 interface ChatProps {
@@ -11,12 +12,26 @@ interface ChatProps {
  * slack for the sub-pixel rounding scrollHeight arithmetic is prone to. */
 const BOTTOM_SLACK_PX = 24
 
+/** The most recent emotion any turn actually got tagged with, searching back
+ * from the newest turn. Not just the last turn's own `emotion`: a fresh
+ * question starts with `emotion: null` (see useTurn.ts's ask()) until its
+ * own `emotion` frame lands, and the face should keep the previous mood
+ * through listening/thinking rather than snapping to neutral the instant a
+ * new turn starts. */
+function lastEmotion(turns: Turn[]): string | null {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const emotion = turns[i].emotion
+    if (emotion) return emotion
+  }
+  return null
+}
+
 /** The Chat tab: a scrolling transcript with a composer pinned under it.
  * Owns none of the socket state itself - `turn` is the one `useTurn()`
  * instance App.tsx keeps alive for the whole signed-in session, so leaving
  * this tab and coming back never drops the connection or the transcript. */
 function Chat({ turn }: ChatProps) {
-  const { connection, turns, ask, sendError } = turn
+  const { connection, state, turns, ask, sendError } = turn
   const [draft, setDraft] = useState('')
   // Which turn's inspector is open, by turn id - a single value rather than
   // per-message state, so opening one always closes any other (Task 4's
@@ -83,47 +98,56 @@ function Chat({ turn }: ChatProps) {
   }
 
   return (
-    <div className="chat">
-      <div className="chat-scroll" ref={scrollRef} onScroll={handleScroll}>
-        {turns.length === 0 ? (
-          <p className="chat-empty">Ask it something. Ukrainian, Russian or English.</p>
+    <div className="chat-layout">
+      {/* Above the transcript on mobile (plain DOM order); a sticky right
+          rail beside it from 900px - see app.css. Task 6's own element: the
+          device's face, driven by the same `turn` this tab already has. */}
+      <aside className="face-rail">
+        <Face state={state} emotion={lastEmotion(turns)} online={!disabled} />
+      </aside>
+
+      <div className="chat">
+        <div className="chat-scroll" ref={scrollRef} onScroll={handleScroll}>
+          {turns.length === 0 ? (
+            <p className="chat-empty">Ask it something. Ukrainian, Russian or English.</p>
+          ) : (
+            turns.map((t) => (
+              <Message
+                key={t.id}
+                turn={t}
+                inspectorOpen={openTraceId === t.id}
+                onToggleInspector={() => setOpenTraceId((cur) => (cur === t.id ? null : t.id))}
+              />
+            ))
+          )}
+        </div>
+
+        {disabled ? (
+          <p className="chat-status">{connection.reason}</p>
         ) : (
-          turns.map((t) => (
-            <Message
-              key={t.id}
-              turn={t}
-              inspectorOpen={openTraceId === t.id}
-              onToggleInspector={() => setOpenTraceId((cur) => (cur === t.id ? null : t.id))}
-            />
-          ))
+          // Only shown while the composer looks enabled - once `disabled`
+          // flips true (which a refused send is usually the leading edge of)
+          // connection.reason above already explains why, and showing both
+          // would just be noise.
+          sendError && <p className="chat-status">{sendError}</p>
         )}
+
+        <form className="chat-composer" onSubmit={handleSubmit}>
+          <textarea
+            ref={textareaRef}
+            className="chat-input"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={handleKeyDown}
+            placeholder="Ask a question…"
+            disabled={disabled}
+            rows={1}
+          />
+          <button type="submit" disabled={disabled || !draft.trim()}>
+            Send
+          </button>
+        </form>
       </div>
-
-      {disabled ? (
-        <p className="chat-status">{connection.reason}</p>
-      ) : (
-        // Only shown while the composer looks enabled - once `disabled`
-        // flips true (which a refused send is usually the leading edge of)
-        // connection.reason above already explains why, and showing both
-        // would just be noise.
-        sendError && <p className="chat-status">{sendError}</p>
-      )}
-
-      <form className="chat-composer" onSubmit={handleSubmit}>
-        <textarea
-          ref={textareaRef}
-          className="chat-input"
-          value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder="Ask a question…"
-          disabled={disabled}
-          rows={1}
-        />
-        <button type="submit" disabled={disabled || !draft.trim()}>
-          Send
-        </button>
-      </form>
     </div>
   )
 }
