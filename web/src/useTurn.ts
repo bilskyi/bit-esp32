@@ -57,7 +57,16 @@ export interface TurnValue {
   connection: Connection
   state: ConversationState
   turns: Turn[]
-  ask: (text: string) => void
+  /** Set when the most recent ask() could not reach the socket - see ask()'s
+   * comment. Null otherwise, including right after a later send that does
+   * succeed or a fresh reconnect. Chat.tsx shows this so a refused question
+   * is never silently lost - the person sees it and can just press send
+   * again once connected, rather than the app queuing it behind their back. */
+  sendError: string | null
+  /** Returns whether the question was actually handed to the socket. A
+   * caller that clears its draft unconditionally would lose the question
+   * on a `false` return - see Chat.tsx's submit(). */
+  ask: (text: string) => boolean
   interrupt: () => void
 }
 
@@ -119,6 +128,7 @@ export function useTurn(): TurnValue {
   })
   const [state, setState] = useState<ConversationState>('idle')
   const [turns, setTurns] = useState<Turn[]>([])
+  const [sendError, setSendError] = useState<string | null>(null)
 
   const socketRef = useRef<WebSocket | null>(null)
   const nextIdRef = useRef(0)
@@ -187,6 +197,10 @@ export function useTurn(): TurnValue {
         openedThisAttempt = true
         attempt = 0
         setConnection({ status: 'open', reason: null })
+        // Whatever ask() last refused to send, a fresh connection makes it
+        // worth trying again - stale wording from the last drop would just
+        // confuse someone who has since reconnected.
+        setSendError(null)
       }
 
       ws.onmessage = (event) => {
@@ -297,14 +311,30 @@ export function useTurn(): TurnValue {
   }, [notifyUnauthorized])
 
   const ask = useCallback(
-    (text: string) => {
+    (text: string): boolean => {
+      const socket = socketRef.current
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        // The composer's disabled prop is one render behind the socket in
+        // the gap between onclose nulling socketRef and the state update
+        // that disables the UI reaching the screen - a question submitted
+        // in that gap must not look accepted when it never reached the
+        // server. Refuse outright rather than queuing it: this app's whole
+        // point is that a question either goes now or the person sees it
+        // did not and can retry, never a silent drop and never a hidden
+        // queue firing later against whatever has changed by then.
+        setSendError('Not connected - your question was not sent. Try again once reconnected.')
+        return false
+      }
+
+      setSendError(null)
       if (hasCancellableTurn(turns)) pendingCancelsRef.current += 1
       const id = nextIdRef.current++
       setTurns((prev) => [
         ...markCurrentCancelled(prev),
         { id, question: text, sentences: [], emotion: null, trace: null, done: false },
       ])
-      socketRef.current?.send(JSON.stringify({ type: 'text', value: text }))
+      socket.send(JSON.stringify({ type: 'text', value: text }))
+      return true
     },
     [turns],
   )
@@ -316,7 +346,7 @@ export function useTurn(): TurnValue {
   }, [turns])
 
   return useMemo(
-    () => ({ connection, state, turns, ask, interrupt }),
-    [connection, state, turns, ask, interrupt],
+    () => ({ connection, state, turns, sendError, ask, interrupt }),
+    [connection, state, turns, sendError, ask, interrupt],
   )
 }

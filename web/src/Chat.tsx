@@ -16,7 +16,7 @@ const BOTTOM_SLACK_PX = 24
  * instance App.tsx keeps alive for the whole signed-in session, so leaving
  * this tab and coming back never drops the connection or the transcript. */
 function Chat({ turn }: ChatProps) {
-  const { connection, turns, ask } = turn
+  const { connection, turns, ask, sendError } = turn
   const [draft, setDraft] = useState('')
 
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -58,7 +58,10 @@ function Chat({ turn }: ChatProps) {
   const submit = () => {
     const text = draft.trim()
     if (!text || disabled) return
-    ask(text)
+    // ask() can still refuse here even though the composer wasn't disabled -
+    // see its comment in useTurn.ts. Leave the draft in place when it does,
+    // so the question is not lost and a retry is just pressing send again.
+    if (!ask(text)) return
     setDraft('')
     stickToBottomRef.current = true
   }
@@ -85,7 +88,15 @@ function Chat({ turn }: ChatProps) {
         )}
       </div>
 
-      {disabled && <p className="chat-status">{connection.reason}</p>}
+      {disabled ? (
+        <p className="chat-status">{connection.reason}</p>
+      ) : (
+        // Only shown while the composer looks enabled - once `disabled`
+        // flips true (which a refused send is usually the leading edge of)
+        // connection.reason above already explains why, and showing both
+        // would just be noise.
+        sendError && <p className="chat-status">{sendError}</p>
+      )}
 
       <form className="chat-composer" onSubmit={handleSubmit}>
         <textarea
