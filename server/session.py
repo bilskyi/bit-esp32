@@ -43,7 +43,7 @@ class State(str, Enum):
 class Session:
     def __init__(
         self, transport, stt, llm, tts, settings, store=None, device_id="default", embedder=None,
-        style=DEVICE_DEFAULT,
+        role=DEVICE_DEFAULT, surface="esp32",
     ):
         self.transport = transport
         self.stt = stt
@@ -53,7 +53,8 @@ class Session:
         self.store = store
         self.device_id = device_id
         self.embedder = embedder
-        self.style = style
+        self.role = role
+        self.surface = surface
 
         self.state = State.IDLE
         self.history: list[dict] = []
@@ -246,7 +247,9 @@ class Session:
             # persona.py takes one flat list; standing instructions come
             # first so a relevant fact never pushes a user's own rule out of
             # the prompt if both were ever truncated upstream.
-            build_system_prompt(self.standing_instructions + self.facts, self.style),
+            build_system_prompt(
+                self.standing_instructions + self.facts, self.role, spoken=speak
+            ),
             self.history,
             text,
             self.settings.max_context_tokens,
@@ -294,10 +297,11 @@ class Session:
                 # the emotion goes out ahead of the speaking state. By now the
                 # tag has almost always resolved; when it has not, the first
                 # sentence is a better thing to guess from than nothing.
-                emotion = tag.emotion or from_text(sentence)
+                emotion = self.role.pinned_mood or tag.emotion or from_text(sentence)
                 await self.transport.send_json({"type": "emotion", "value": emotion})
                 log.info("emotion %s (%s)", emotion,
-                         "tagged" if tag.emotion else "guessed")
+                         "pinned" if self.role.pinned_mood
+                         else "tagged" if tag.emotion else "guessed")
                 await self._set_state(State.SPEAKING)
             spoken.append(sentence)
 

@@ -455,49 +455,89 @@ async def test_an_utterance_long_enough_to_be_speech_still_gets_through():
     assert stt.received == [len(two_seconds)]
 
 
-async def test_default_style_is_esp32():
-    from server.persona import ESP32
+async def test_default_role_is_the_device_default():
+    from server.roles import DEVICE_DEFAULT
 
     session, _ = build()
-    assert session.style is ESP32
+    assert session.role is DEVICE_DEFAULT
+    assert session.surface == "esp32"
 
 
-async def test_web_style_reaches_the_system_prompt():
-    from server.persona import WEB
+async def test_a_typed_question_gets_the_screen_wording():
+    from server.roles import WEB_DEFAULT
 
-    llm = FakeLLM()
-    session = Session(
-        transport=FakeTransport(),
-        stt=FakeSTT(),
-        llm=llm,
-        tts=FakeTTS(),
-        settings=Settings(_env_file=None),
-        embedder=FakeEmbedder(),
-        style=WEB,
-    )
-    await utter(session)
-    assert "markdown" in llm.prompts[0][0]["content"].lower()
-
-
-async def test_a_style_shaped_like_esp32_defaults_still_uses_base():
-    """Guards against the identity-check bug: even a freshly-constructed
-    Style with ESP32's own field values must not silently swap in the web
-    prompt - only the literal ESP32 singleton may."""
-    from server.persona import BASE, Style
-
-    lookalike = Style(max_sentences=2, markdown_allowed=False)
     llm = FakeLLM()
     session = Session(
         transport=FakeTransport(), stt=FakeSTT(), llm=llm, tts=FakeTTS(),
-        settings=Settings(_env_file=None), embedder=FakeEmbedder(), style=lookalike,
+        settings=Settings(_env_file=None), embedder=FakeEmbedder(),
+        role=WEB_DEFAULT, surface="web",
+    )
+    await session.on_text("Як справи?")
+    await session.wait_for_reply()
+    assert "markdown, lists and headings are fine" in llm.prompts[0][0]["content"].lower()
+
+
+async def test_a_spoken_question_never_gets_markdown_permission():
+    """Same role, spoken instead of typed: TTS would read the asterisks."""
+    from server.roles import WEB_DEFAULT
+
+    llm = FakeLLM()
+    session = Session(
+        transport=FakeTransport(), stt=FakeSTT(), llm=llm, tts=FakeTTS(),
+        settings=Settings(_env_file=None), embedder=FakeEmbedder(),
+        role=WEB_DEFAULT, surface="web",
     )
     await utter(session)
-    # This documents the actual (surprising) behavior of build_system_prompt's
-    # identity check: a lookalike Style still gets the web prompt. The real
-    # fix is that _resolve_style (main.py) must never construct a lookalike
-    # for "esp32" in the first place - test_esp32_style_cannot_be_overridden
-    # in test_main.py is the test that actually guards production behavior.
-    assert BASE not in llm.prompts[0][0]["content"]
+    prompt = llm.prompts[0][0]["content"].lower()
+    assert "no lists, no headings, no markdown" in prompt
+    assert "markdown, lists and headings are fine" not in prompt
+
+
+async def test_a_role_shaped_like_the_device_default_gets_the_measured_prompt():
+    """The old identity check made a freshly-built lookalike get the *web*
+    prompt, which was surprising enough to need a test explaining it. Roles
+    are compared by value, so a lookalike now gets exactly BASE - the
+    surprise is gone rather than documented."""
+    from server.persona import BASE
+    from server.roles import Role, SPEAKABLE_LANGUAGES
+
+    lookalike = Role(id=7, name="Copy", prompt=None, max_sentences=2,
+                     markdown_allowed=False, languages=SPEAKABLE_LANGUAGES,
+                     pinned_mood=None)
+    llm = FakeLLM()
+    session = Session(
+        transport=FakeTransport(), stt=FakeSTT(), llm=llm, tts=FakeTTS(),
+        settings=Settings(_env_file=None), embedder=FakeEmbedder(), role=lookalike,
+    )
+    await utter(session)
+    assert llm.prompts[0][0]["content"] == BASE
+
+
+async def test_a_pinned_mood_overrides_the_tag_the_model_chose():
+    from server.roles import Role, SPEAKABLE_LANGUAGES
+
+    sleepy = Role(id=8, name="Sleepy", prompt=None, max_sentences=2,
+                  markdown_allowed=False, languages=SPEAKABLE_LANGUAGES,
+                  pinned_mood="sleepy")
+    session = Session(
+        transport=(transport := FakeTransport()), stt=FakeSTT(),
+        llm=FakeLLM("[happy] Все добре."), tts=FakeTTS(),
+        settings=Settings(_env_file=None), embedder=FakeEmbedder(), role=sleepy,
+    )
+    await utter(session)
+    emotions = [f["value"] for f in transport.json if f.get("type") == "emotion"]
+    assert emotions == ["sleepy"]
+
+
+async def test_no_pinned_mood_leaves_the_models_tag_alone():
+    session = Session(
+        transport=(transport := FakeTransport()), stt=FakeSTT(),
+        llm=FakeLLM("[happy] Все добре."), tts=FakeTTS(),
+        settings=Settings(_env_file=None), embedder=FakeEmbedder(),
+    )
+    await utter(session)
+    emotions = [f["value"] for f in transport.json if f.get("type") == "emotion"]
+    assert emotions == ["happy"]
 
 
 # ------------------------------------------------------------ typed questions
