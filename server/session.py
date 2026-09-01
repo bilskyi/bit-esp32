@@ -411,24 +411,30 @@ class Session:
         )
 
         if self.store is not None:
-            # Read per turn, not per session, so switching recording off in
-            # Settings takes effect on the next question rather than the next
-            # connection.
-            recording = (await self.store.app_settings())["store_conversations"]
-            if recording:
-                if self.conversation_id is None:
-                    self.conversation_id = await self.store.start_conversation(
-                        self.device_id, self.surface, self.role.name
+            try:
+                # Read per turn, not per session, so switching recording off
+                # in Settings takes effect on the next question rather than
+                # the next connection.
+                recording = (await self.store.app_settings())["store_conversations"]
+                if recording:
+                    if self.conversation_id is None:
+                        self.conversation_id = await self.store.start_conversation(
+                            self.device_id, self.surface, self.role.name
+                        )
+                    await self.store.record_turn(
+                        self.conversation_id,
+                        question=text,
+                        reply=reply,
+                        emotion=chosen_emotion,
+                        prompt_tokens=prompt_tokens,
+                        completion_tokens=estimate_tokens(reply),
+                        latency_ms=(time.monotonic() - reply_started) * 1000,
                     )
-                await self.store.record_turn(
-                    self.conversation_id,
-                    question=text,
-                    reply=reply,
-                    emotion=chosen_emotion,
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=estimate_tokens(reply),
-                    latency_ms=(time.monotonic() - reply_started) * 1000,
-                )
+            except Exception:
+                # The answer is already delivered. A write failure here (a
+                # locked database, a full disk) must cost the recording, not
+                # the turn - and it must not skip the trace block below.
+                log.exception("failed to record the turn")
 
         if self.surface == "web":
             try:

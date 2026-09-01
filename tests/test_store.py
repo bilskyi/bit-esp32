@@ -214,6 +214,16 @@ async def test_a_recorded_turn_keeps_both_halves(store):
     assert rows[0]["messages"][1]["emotion"] == "neutral"
 
 
+async def test_conversation_rows_started_at_is_timezone_aware(store):
+    """SQLite hands datetimes back naive even though the column is declared
+    DateTime(timezone=True). A dashboard reading conversation_rows() and
+    treating started_at as UTC-aware would otherwise hit
+    `TypeError: can't compare offset-naive and offset-aware datetimes`."""
+    await store.start_conversation("dev1", "web", "Web default")
+    rows = await store.conversation_rows("dev1")
+    assert rows[0]["started_at"].tzinfo is not None
+
+
 async def test_conversations_are_scoped_per_device(store):
     await store.start_conversation("dev1", "web", "Web default")
     assert await store.conversation_rows("dev2") == []
@@ -263,3 +273,55 @@ async def test_retention_of_zero_days_never_purges(store):
         row.started_at = datetime.now(timezone.utc) - timedelta(days=4000)
         await s.commit()
     assert await store.purge_expired() == 0
+
+
+async def test_purge_batches_deletes_past_sqlites_bound_parameter_limit(store):
+    """One un-chunked `WHERE id IN (...)` over every expired id blows past
+    SQLite's bound-parameter ceiling (32766 in the build this test runs
+    against) and raises `OperationalError`, aborting before anything is
+    deleted - so every later startup hits the same wall. This seeds enough
+    expired conversations to cross that ceiling for real and asserts the
+    sweep still purges every one of them, in one call, without orphaning
+    a single message - while a conversation still inside retention is left
+    alone."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import insert, select
+
+    from server.memory.store import Conversation, Message
+
+    kept_cid = await store.start_conversation("dev1", "web", "Web default")
+    await store.record_turn(kept_cid, question="q", reply="r", emotion=None,
+                            prompt_tokens=1, completion_tokens=1, latency_ms=1.0)
+
+    old = datetime.now(timezone.utc) - timedelta(days=200)
+    count = 33000  # comfortably past this SQLite build's 32766-variable ceiling
+    async with store._session() as s:  # noqa: SLF001 - fixture-level bulk seeding
+        await s.execute(
+            insert(Conversation),
+            [
+                {"device_id": "dev1", "surface": "web", "role_name": "Web default",
+                 "started_at": old}
+                for _ in range(count)
+            ],
+        )
+        await s.commit()
+        doomed_ids = (
+            await s.scalars(
+                select(Conversation.id).where(Conversation.id != kept_cid)
+            )
+        ).all()
+        await s.execute(
+            insert(Message),
+            [{"conversation_id": i, "role": "user", "text": "q"} for i in doomed_ids],
+        )
+        await s.commit()
+
+    await store.set_app_settings(retention_days=1)
+    assert await store.purge_expired() == count
+
+    async with store._session() as s:  # noqa: SLF001
+        remaining_ids = set((await s.scalars(select(Conversation.id))).all())
+        remaining_messages = (await s.scalars(select(Message.id))).all()
+    assert remaining_ids == {kept_cid}
+    assert len(remaining_messages) == 2  # the kept conversation's own turn

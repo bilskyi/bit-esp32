@@ -694,6 +694,36 @@ async def test_nothing_is_recorded_when_recording_is_off():
     assert store.started == []
 
 
+async def test_a_broken_recording_does_not_lose_the_reply_or_the_trace(monkeypatch):
+    """The recording is a debugging/history aid, same as the trace frame
+    right below it - a locked database or a full disk must lose only the
+    recording, not the answer the person already heard, and not the trace
+    frame that runs after it."""
+    from server.roles import WEB_DEFAULT
+    from tests.fakes import FakeStore
+
+    store = FakeStore()
+
+    async def broken_record_turn(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(store, "record_turn", broken_record_turn)
+
+    session = Session(
+        transport=(transport := FakeTransport()), stt=FakeSTT(),
+        llm=FakeLLM("Все добре."), tts=FakeTTS(),
+        settings=Settings(_env_file=None), embedder=FakeEmbedder(),
+        role=WEB_DEFAULT, surface="web", store=store,
+    )
+    await session.on_text("Як справи?")
+    await session.wait_for_reply()
+
+    assert "reply" in transport.types
+    traces = [f["value"] for f in transport.json if f.get("type") == "trace"]
+    assert len(traces) == 1
+    assert store.turns == []
+
+
 async def test_finishing_ends_the_conversation():
     from tests.fakes import FakeStore
 

@@ -32,6 +32,19 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _aware(dt: datetime | None) -> datetime | None:
+    """SQLite always hands datetimes back naive, even through a column
+    declared DateTime(timezone=True). conversation_rows() is the one path
+    Task 7 added for the planned dashboard, and code there that treats a
+    naive value as UTC will hit `TypeError: can't compare offset-naive and
+    offset-aware datetimes` the moment it compares one - so make it true
+    instead of leaving that landmine. The other timestamp paths (Fact,
+    SessionUsage) predate this and are left alone."""
+    if dt is None or dt.tzinfo is not None:
+        return dt
+    return dt.replace(tzinfo=timezone.utc)
+
+
 def _pack(vector: list[float]) -> bytes:
     return struct.pack(f"<{len(vector)}f", *vector)
 
@@ -418,8 +431,8 @@ class Store:
                     "id": c.id,
                     "surface": c.surface,
                     "role_name": c.role_name,
-                    "started_at": c.started_at,
-                    "ended_at": c.ended_at,
+                    "started_at": _aware(c.started_at),
+                    "ended_at": _aware(c.ended_at),
                     "turns": sum(1 for m in messages if m.role == "user"),
                     "messages": [
                         {"role": m.role, "text": m.text, "emotion": m.emotion}
@@ -427,6 +440,14 @@ class Store:
                     ],
                 })
             return out
+
+    # SQLite refuses a statement with more bound parameters than it was built
+    # to allow - 32766 on a modern build, 999 on an older one. A single
+    # `WHERE id IN (...)` over every expired conversation can blow past
+    # either, and when it does the whole sweep raises before deleting
+    # anything, so every later startup hits the identical wall. Chunking
+    # keeps each statement's parameter count far under even the old limit.
+    _PURGE_BATCH_SIZE = 500
 
     async def purge_expired(self) -> int:
         """Delete conversations past the retention window. Returns how many.
@@ -441,13 +462,15 @@ class Store:
             return 0
         cutoff = _now() - timedelta(days=days)
         async with self._session() as s:
-            doomed = (
+            doomed = list(
                 await s.scalars(select(Conversation.id).where(Conversation.started_at < cutoff))
-            ).all()
+            )
             if not doomed:
                 return 0
-            await s.execute(delete(Message).where(Message.conversation_id.in_(doomed)))
-            await s.execute(delete(Conversation).where(Conversation.id.in_(doomed)))
+            for start in range(0, len(doomed), self._PURGE_BATCH_SIZE):
+                batch = doomed[start : start + self._PURGE_BATCH_SIZE]
+                await s.execute(delete(Message).where(Message.conversation_id.in_(batch)))
+                await s.execute(delete(Conversation).where(Conversation.id.in_(batch)))
             await s.commit()
             return len(doomed)
 
