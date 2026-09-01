@@ -16,6 +16,86 @@ face" below.
 
 ---
 
+## The playground backend — shipped 1 Sep, NOT deployed
+
+The web playground was specced into four slices; **slice 1's backend is done
+and on main, and none of it has been deployed.** There is no UI: the frontend
+is a separate plan that has not been written. So the only way to touch any of
+this today is curl plus a session cookie.
+
+What landed, in one line each:
+
+- The shared-identity branch that had been sitting unmerged in a locked
+  worktree for three days: password accounts, a session cookie additive to
+  `DEVICE_TOKEN`, and a `text` control frame so a typed question runs the same
+  pipeline as a spoken one. Its own whole-branch review never ran last session
+  (spend limit); it ran this time, as part of the final review.
+- **Roles.** The personality is rows now, not a constant. Per-surface active
+  role, so the device and the browser can differ. Two seeded roles are
+  `built_in` and cannot be renamed or deleted.
+- **`persona.BASE` is still byte-identical**, and now protected by a golden test
+  rather than by being impossible to change. Verified on the real path — a role
+  resolved from a live database — not just against the in-memory constant.
+- **Mood can be pinned**, overriding the tag the model chose, and reaches the
+  device's face on the next turn of an already-open socket.
+- **Retrieval returns its cosine scores**, and a web-only `trace` frame carries
+  them, the assembled prompt, token counts and per-stage timings.
+- **Conversations are recorded.** Nothing stored a transcript before this.
+
+### Before this deploys — in this order
+
+1. Set `SESSION_SECRET_KEY` in Railway vars. Empty means a random key per
+   process, so every restart invalidates logins.
+2. Decide the recording default **before first boot**, because the table starts
+   filling on turn one. It currently defaults to on with 90-day retention.
+3. `uv run python scripts/create_account.py` against the volume, or you cannot
+   log in and none of the new endpoints are reachable.
+4. Then the cleanup the spec asks for: log in and delete the facts belonging to
+   other people. `DELETE /memory/{device_id}` now drops that device's
+   conversations too, which it did not when the spec was written.
+
+`SESSION_COOKIE_SECURE` defaults to True. Right for Railway, wrong for testing
+from a phone over plain http on the LAN — the browser drops the cookie and
+every call after a 200 login returns 401.
+
+### Things the final review found that are worth carrying forward
+
+- **Facts are not covered by retention.** `extract_facts` derives facts *from*
+  the transcripts at session end. Expiring or deleting a conversation does not
+  remove the summary made from it. `DELETE /memory/{id}` removes both; the
+  retention sweep removes only messages and the conversations they emptied.
+- **SQLite now has three engines on one file** (Store, Accounts, Roles) and
+  writes moved from once per session to two message rows plus two small reads
+  per turn. WAL, `synchronous=NORMAL` and a 5 s busy timeout are set on all
+  three. `synchronous=NORMAL` is the documented WAL pairing and trades a
+  fsync-per-commit for the possibility of losing the last transactions on a
+  hard power loss — not corruption. It was added because WAL alone produced
+  3-72 s non-deterministic stalls in the sandbox this was built in.
+- **`/login` has no rate limit.** bcrypt runs on its own single-thread executor
+  now, so it can no longer contend with the per-turn embedding calls, but an
+  unauthenticated endpoint that deliberately does expensive work is still an
+  open door on a small container. Rate-limit it if the URL gets shared.
+- **The startup purge had no test at all** until the last pass: deleting the
+  call from the lifespan left all 380 tests green. It has one now.
+- One subagent observed an intermittent native `libc++abi recursive_mutex`
+  abort at interpreter shutdown, always after the test count printed, roughly
+  1 in 10 runs. Five consecutive controller runs did not reproduce it. Likely
+  an aiosqlite/anyio teardown flake, not this work — but if it turns up in CI,
+  this is where it was first seen.
+
+### Not done, deliberately
+
+Document RAG (uploads) is slice 2, the dashboard that reads these conversations
+is slice 3, MCP tool-calling is slice 4. `Store.conversation_rows()` exists and
+is unused until slice 3.
+
+**The twenty-second stalls are still the open bug.** Nine of sixteen remain
+unexplained (see section 0a). None of the playground work touched the radio
+link, and the uncommitted firmware changes in the working tree are from that
+investigation, not this one.
+
+---
+
 ## Where things run
 
 | | |
@@ -273,7 +353,7 @@ flicking about once a second reads as nervous rather than thoughtful.
   plain build and its own wrong-length test, which passed a string literal —
   and a literal has enough bytes after it that the read lands in the same page.
 - All four sketches build with **zero warnings**.
-- 223 server tests. One reads the emotion names straight out of `face.c`, because
+- 394 server tests. One reads the emotion names straight out of `face.c`, because
   the device matches them by substring and a rename would not raise anywhere —
   the face would just quietly stop changing.
 - The text fallback reaches seven of the nine emotions by decision, not

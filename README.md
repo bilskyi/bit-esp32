@@ -46,7 +46,7 @@ For the real pipeline, put a Groq key in `.env` and drop `PROVIDER_MODE`.
 uv run pytest
 ```
 
-284 tests, no network, no hardware, under ten seconds.
+394 tests, no network, no hardware, under ten seconds.
 
 ## Protocol
 
@@ -62,6 +62,15 @@ frames are JSON control messages.
 | server → device | `{"type":"state","value":"listening\|thinking\|speaking\|idle"}` | drives the LED |
 | server → device | binary | PCM chunks of the reply |
 | server → device | `{"type":"done"}` | playback finished, re-arm mute |
+| server → device | `{"type":"emotion","value":"curious"}` | drives the face, ahead of the first word |
+| server → browser | `{"type":"reply","value":"<sentence>"}` | a typed question streams back as text, one sentence at a time — no TTS spent on something already being read |
+| server → browser | `{"type":"trace","value":{…}}` | what the turn actually did: active role, retrieved facts with their similarity scores, the assembled prompt, token counts, per-stage timings |
+
+The `trace` frame goes **only** to a connection authorised by a session cookie.
+The device never receives it: it has about 55 KB of free heap mid-conversation
+and no use for the payload. On an open dev server with no login, a browser is
+labelled `esp32` and gets no `trace` frames either — it fails closed, so log in
+if the inspector looks empty.
 
 Audio is 16 kHz, 16-bit signed, mono, little-endian, raw PCM — in both
 directions, so the firmware never converts anything.
@@ -115,21 +124,88 @@ either door:
 | `GET` | `/memory/{device_id}` | list everything remembered, with its source |
 | `POST` | `/memory/{device_id}` | add a standing instruction (`{"text": "..."}`) |
 | `DELETE` | `/memory/{device_id}/{fact_id}` | remove one entry |
-| `DELETE` | `/memory/{device_id}` | wipe a device's memory entirely |
+| `DELETE` | `/memory/{device_id}` | drop this device's facts **and** its recorded conversations |
 
-The web login and the per-surface persona settings are gated by the session
-cookie only, not the device token:
+`RELEVANT_FACTS_LIMIT` (default 6) caps how many auto facts reach the prompt
+per turn. `EMBEDDING_CACHE_DIR` should point at the same Railway volume the
+database uses, or every redeploy re-downloads the model.
+
+## Roles: the personality, as rows
+
+The prompt is not one hardcoded string any more. A **role** is a persona
+section plus four knobs — how many sentences, whether markdown is allowed,
+which of the three available languages, and an optional pinned mood — and each
+surface (`esp32`, `web`) points at one. The device can run "Terse" while the
+laptop runs "Coach", off the same memory.
+
+Two roles are seeded and marked `built_in`: they cannot be deleted or renamed,
+because `ensure_defaults()` re-seeds by that flag on every boot and a renamed
+built-in would come back as a duplicate.
+
+`prompt: null` is a real value, not an omission — it is how a customised role
+reverts to the built-in wording. That matters most for the device: **the
+measured prompt is the default and stays byte-identical** (`persona.BASE`, with
+a golden test asserting the assembly reproduces it exactly — it was measured,
+and rewording it made the emotion spread worse across three runs of
+`scripts/emotion_survey.py`). You *can* override it now, unlike before, but the
+revert is one field away.
+
+Two invariants are appended to every prompt regardless of what a role says: the
+emotion-tag rule, because it drives the device's face, and the language
+restriction, because `lang.VOICES` has voices for uk/ru/en and edge-tts emits
+silence for anything else. A role may narrow those three, never extend them.
+Markdown is force-disabled whenever a reply will be spoken, whatever the role
+asked for, because TTS reads asterisks aloud.
+
+A role change and a pinned mood take effect on the **next turn** of an
+already-open socket, not the next connection — the device holds one socket for
+days, so per-connection resolution would have meant rebooting it to hear a
+change.
+
+## Conversations are recorded
+
+Every answered turn is stored as two rows (question, reply) under a
+conversation per connection. This is what the planned dashboard reads; there is
+no UI for it yet.
+
+It is personal data, including other people's — strangers found the deployed
+server before the token was set — so: recording defaults **on** and is
+switchable at runtime, `retention_days` defaults to **90**, and expired
+messages are swept both at startup and after each session ends. `retention_days
+= 0` means keep forever. Expiry is keyed on each message's own timestamp, not
+the conversation's, because one conversation row can span days on an
+always-connected device.
+
+**One gap to know about:** facts are extracted *from* these transcripts at
+session end, and facts are not covered by `retention_days`. Deleting or expiring
+a conversation does not remove the summary derived from it. `DELETE
+/memory/{device_id}` drops both.
+
+## Endpoints behind the login
+
+These are for the person, not the device: session cookie only, never the
+device token.
 
 | Method | Path | Does |
 |---|---|---|
 | `POST` | `/login` | verify `{"username", "password"}`, set the session cookie |
 | `POST` | `/logout` | clear the session |
-| `GET` | `/settings/style/{surface}` | read the persona style for `esp32` or `web` |
-| `PUT` | `/settings/style/{surface}` | set a style override (`esp32` rejects this — its prompt is fixed) |
+| `GET` | `/roles` | list every role, with `built_in` |
+| `POST` | `/roles` | create one (409 on a duplicate name, 422 on a language with no voice, a mood that is not one of the nine faces, or a prompt over 2000 chars) |
+| `PUT` | `/roles/{role_id}` | change only the fields sent; `prompt: null` reverts to built-in wording |
+| `DELETE` | `/roles/{role_id}` | remove one (409 for a built-in; any surface pointing at it falls back to its default) |
+| `GET` | `/settings/surfaces` | which role `esp32` and `web` are each using |
+| `PUT` | `/settings/surfaces/{surface}` | switch one (404 for an unknown surface or role) |
+| `GET` | `/settings/app` | `{"store_conversations", "retention_days"}` |
+| `PUT` | `/settings/app` | change either |
+| `DELETE` | `/conversations/{device_id}` | drop recorded transcripts, keeping facts |
 
-`RELEVANT_FACTS_LIMIT` (default 6) caps how many auto facts reach the prompt
-per turn. `EMBEDDING_CACHE_DIR` should point at the same Railway volume the
-database uses, or every redeploy re-downloads the model.
+Create the account with `uv run python scripts/create_account.py`, and set
+`SESSION_SECRET_KEY` before deploying — left empty, the app signs cookies with
+a random key generated per process, so every restart logs you out.
+`SESSION_COOKIE_SECURE` defaults to `True`, which is right for Railway and
+wrong for testing from a phone over plain `http://` on your LAN: the browser
+discards the cookie silently, `/login` returns 200 and everything after it 401s.
 
 ## Layout
 
@@ -141,7 +217,8 @@ server/
   sentences.py         incremental sentence segmentation
   lang.py              uk/ru/en detection, voice selection
   audio.py             streaming MP3 -> 16 kHz PCM, WAV wrapper
-  persona.py           system prompt
+  persona.py           system prompt, assembled from a role
+  roles.py             roles and which one each surface uses; rows, not wording
   accounts.py          password accounts, separate from the facts/usage store
   costs.py             per-session usage accounting
   config.py            pydantic-settings
@@ -154,7 +231,7 @@ server/
     mock.py            offline stand-ins
     _retry.py          shared 429/5xx backoff
   memory/
-    store.py           SQLAlchemy 2.0 async, SQLite, cosine similarity in Python
+    store.py           facts, usage, conversations, app settings; cosine similarity in Python
     summarise.py       end-of-session fact extraction
 ```
 
