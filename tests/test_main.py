@@ -7,16 +7,16 @@ from starlette.websockets import WebSocketDisconnect
 
 from server.config import Settings
 from server.main import create_app
-from tests.fakes import FakeEmbedder, FakeLLM, FakeSTT, FakeStore, FakeTTS
+from tests.fakes import FakeEmbedder, FakeLLM, FakeSTT, FakeStore, FakeTTS, SlowTTS
 
 
 @contextmanager
-def client(store=None, **kw):
+def client(stt=None, tts=None, store=None, **kw):
     app = create_app(
         settings=Settings(_env_file=None, **kw),
-        stt=FakeSTT(),
+        stt=stt or FakeSTT(),
         llm=FakeLLM("Все добре."),
-        tts=FakeTTS(),
+        tts=tts or FakeTTS(),
         store=store or FakeStore(),
         embedder=FakeEmbedder(),
     )
@@ -93,6 +93,84 @@ def test_malformed_json_does_not_kill_the_connection():
         ws.send_text("{not json")
         ws.send_text(json.dumps({"type": "start"}))
         assert json.loads(ws.receive_text())["value"] == "listening"
+
+
+def controls(ws, until, limit=400):
+    """Read frames, discarding audio, until `until` matches a control frame."""
+    seen = []
+    for _ in range(limit):
+        message = ws.receive()
+        if message.get("bytes") is not None:
+            continue
+        if message.get("text") is None:
+            continue
+        payload = json.loads(message["text"])
+        seen.append(payload)
+        if until(payload):
+            return seen
+    raise AssertionError(f"never saw the frame we were waiting for: {seen}")
+
+
+def answered():
+    """Matches the "idle" that closes a turn, not one sent before it began."""
+    thinking = False
+
+    def match(payload):
+        nonlocal thinking
+        thinking = thinking or payload.get("value") == "thinking"
+        return thinking and payload.get("value") == "idle"
+
+    return match
+
+
+def test_an_utterance_the_device_abandons_does_not_deafen_the_session():
+    """The 28 Aug stall, over the wire.
+
+    The device interrupts a reply and immediately starts the next question -
+    cancel, then start forty milliseconds later. The "done" closing the
+    cancelled reply then lands while the mic is already recording, and until
+    this was fixed in voice_main.c the device's playback task forced it back to
+    idle: the question was recorded into a state that never sends "end", so the
+    release sent nothing and the next thing the device did was press again.
+
+    From the server's log that day: a start accepted 0.19 s after a cancel,
+    0.22 s of audio buffered, no "end", and sixty seconds later "utterance
+    timed out after 60.0s". The user heard nothing for the whole minute and
+    eventually asked the device "почему-то только что не отвечал".
+
+    The device is fixed, but it must not be the only thing standing between a
+    dropped "end" and a session that has stopped answering.
+    """
+    stt = FakeSTT()
+    with client(stt=stt, tts=SlowTTS(chunks=200, delay=0.01)) as c:
+        with c.websocket_connect("/ws") as ws:
+            ws.send_text(json.dumps({"type": "start"}))
+            ws.send_bytes(b"\x00\x01" * 32000)
+            ws.send_text(json.dumps({"type": "end"}))
+            controls(ws, lambda p: p.get("value") == "speaking")
+
+            # The press: silence the reply, then start the next question.
+            ws.send_text(json.dumps({"type": "cancel"}))
+            ws.send_text(json.dumps({"type": "start"}))
+            ws.send_bytes(b"\x7f\x7f" * 3520)  # the 0.22 s that got recorded
+
+            # ...and here the device went deaf. No "end" is ever sent for it.
+            # The user presses again and asks the question a second time.
+            ws.send_text(json.dumps({"type": "start"}))
+            ws.send_bytes(b"\x00\x01" * 32000)
+            ws.send_text(json.dumps({"type": "end"}))
+
+            # Not simply "the next idle": the cancelled reply sends one of its
+            # own on the way out, ahead of anything the new question causes.
+            seen = controls(ws, answered())
+
+    states = [p["value"] for p in seen if p.get("type") == "state"]
+    assert states[-3:] == ["thinking", "speaking", "idle"], (
+        "the second question was never answered"
+    )
+    assert stt.received[-1] == 2 * 32000, (
+        "the abandoned fragment was prepended to the question"
+    )
 
 
 # ---------------------------------------------------------- memory / customization API

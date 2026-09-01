@@ -107,9 +107,11 @@ possible but has not been needed.
 >
 > What *did* show up twice in four captures is a different fault wearing the
 > same coat: `no data from server for 20 s in state 3, forcing idle` - with the
-> link healthy. That is the server or the TLS connection, not the radio, and it
-> is what tripped the stuck-state timer that made interrupting misbehave. It is
-> the most concrete open lead in the project. See "Agreed next".
+> link healthy. **It is not the radio and it is not the server either**: the
+> device was dropping the question on the floor, and the server was waiting for
+> an `end` that was never going to come. Chased and fixed on 28 Aug from
+> `railway logs` alone - see item 0 of "Agreed next" for the evidence and for
+> the one part of it that is still unaccounted for.
 
 
 Everything else is tuned. This is what stands between the current state and a
@@ -271,7 +273,7 @@ flicking about once a second reads as nervous rather than thoughtful.
   plain build and its own wrong-length test, which passed a string literal —
   and a literal has enough bytes after it that the read lands in the same page.
 - All four sketches build with **zero warnings**.
-- 209 server tests. One reads the emotion names straight out of `face.c`, because
+- 223 server tests. One reads the emotion names straight out of `face.c`, because
   the device matches them by substring and a rename would not raise anywhere —
   the face would just quietly stop changing.
 - The text fallback reaches seven of the nine emotions by decision, not
@@ -481,19 +483,92 @@ needs several round trips in succession and falls apart on a lossy link where
 plain TCP scraped through. What changed is that switching between them now
 costs a long press instead of a toolchain.
 
-### 0. The twenty-second stalls — **start here**
+### 0. The twenty-second stalls — **half of it found and fixed; see 0a**
 
-Twice in four captures on 28 Aug, with the radio measurably healthy, the device
-logged `no data from server for 20 s in state 3, forcing idle`. Twenty seconds
-of silence from the server in the middle of a reply. It is what forces
-`ST_IDLE` while audio is still playing, which is why a press sometimes recorded
-a question while the abandoned reply talked over it.
+The lead was `no data from server for 20 s in state 3, forcing idle`, twice in
+four captures on 28 Aug with the radio measurably healthy. `railway logs
+--json` answered it without the board, and the answer was not the server going
+quiet. **The device was throwing away the question.**
 
-Both halves of the evidence are available without the user: the device's serial
-log and `railway logs`. The question is what the server is doing while the
-device hears nothing - whether `end` arrived, whether a reply was generated,
-and where the time went. Nothing about this needs the button pressed, so it can
-be chased from the desk.
+**What the server's own log says.** Timestamps on 28 Aug:
+
+```
+11:15:32.913  reply cancelled by the device
+11:16:33.103  utterance timed out after 60.0s
+11:16:33.103  utterance of 0.22 s is too short to be speech, not transcribing
+```
+
+The 60 s watchdog is armed by `on_start`, so it fired 60.00 s after a `start`
+the session accepted at 11:15:33.10 — **0.19 s after the cancel**. So the
+device did begin the next question. It then sent **0.22 s of audio and no
+`end` at all**, and the user heard nothing for a full minute. Three questions
+later they asked the device `почему-то только что не отвечал`.
+
+**Why.** `done` was not scoped to a reply. The server sends one for *every*
+reply task including a cancelled one, and that `done` necessarily lands after
+the device has already started recording again — measured at 0.3 s twice and
+7 s twice, which the interrupt work above had already established. The device
+applied it to whatever it was doing now: `audio_out_task`'s "reply produced no
+audio" rescue fired unconditionally and forced `ST_IDLE` **out from under
+`ST_LISTENING`**. `end` is only ever sent from `ST_LISTENING`, so the release
+sent nothing, and the question was recorded into a state that could not deliver
+it. It is the same late `done` the discard-window fix already proved dangerous;
+only the discard window was moved off it, not this.
+
+The server then made it worse by being quiet about it: `on_start` returned
+early for any state that was not `IDLE`, at `log.debug`, so a device pressing
+again was ignored without a line in the log — and the abandoned fragment stayed
+in the buffer, ready to be prepended to the next question.
+
+**Fixed.**
+
+- `voice_main.c` — the rescue only fires in `ST_THINKING` or `ST_SPEAKING`,
+  which are the only states a reply lives in. The flag is cleared either way,
+  because leaving it raised just moves the damage to the next `THINKING`.
+  Anything else logs `stale done ignored in state N`.
+- `session.py` — a second `start` with no `end` between them starts a clean
+  utterance: buffer cleared, watchdog re-armed, and one `INFO` line saying how
+  many bytes were dropped.
+- Three tests, all of which fail without the fix: two in `test_session.py`, and
+  `test_an_utterance_the_device_abandons_does_not_deafen_the_session` in
+  `test_main.py`, which replays the whole cancel → start → go-deaf → start
+  sequence over a real socket.
+
+**What is verified and what is not.** The server half is covered by tests
+(223 pass) and is **deployed**. The firmware half builds with zero warnings,
+48% of the app partition free, and is **flashed to the board** — but
+`voice_main.c` is not host-testable and **the confirming log line has never
+been read**. On the bench, one interrupted reply is enough: **`stale done
+ignored in state 1` is the fix working.** Seeing `idle (reply produced no
+audio)` while the button is down is the bug still there.
+
+### 0a. …and nine of the sixteen stalls are still unexplained — **the real next move**
+
+The full 400-line window holds **16** twenty-second stalls, not the eight the
+first pass saw. They span 19.75–20.10 s against 98 ordinary gaps whose median
+is 3.48 s and whose maximum is 9.41 s — no overlap, so every one of them is the
+device's watchdog and not a person. But they split:
+
+| Preceded by | n | |
+|---|---|---|
+| `reply cancelled by the device` | 7 | the fault above, fixed |
+| a **completed** reply | 9 | **not explained, not fixed** |
+
+The nine follow a reply that finished normally — no cancel, no stale `done`.
+And the gap is anchored to `done`, not to when the speaker went quiet: playback
+end varies over 2.57 s across the nine while the gap varies over 0.12 s. So the
+device sat in a non-idle state for twenty seconds *after the reply was fully
+delivered*. That is `ST_SPEAKING` that never ended — **exactly the `state 3` in
+the original report.**
+
+So the fix above closes the "it stopped answering" complaint and the proven
+no-`end` case. It does **not** close `state 3`, and it was wrong to imply it
+did. The server cannot see any further: it has sent everything it owes. The
+next move is a serial capture across an ordinary conversation with **no
+interruptions**, watching whether `idle: played … B` appears after each reply.
+
+Full evidence, the ruled-out theories and the bench recipe:
+`docs/superpowers/measurements/2026-08-28-twenty-second-stalls.md`.
 
 ### 1a. Finish taking provisioning to the bench
 

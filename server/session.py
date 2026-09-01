@@ -76,9 +76,22 @@ class Session:
         # by the time it arrives the speaker is already quiet.
         if self.state in (State.THINKING, State.SPEAKING):
             await self.on_cancel()
-        if self.state is not State.IDLE:
-            log.debug("ignoring start in state %s", self.state)
-            return
+        elif self.state is State.LISTENING:
+            # A second "start" with no "end" between them, which the device
+            # does not send idly: it means the utterance in progress was
+            # abandoned on its side and is never going to be ended.
+            #
+            # This used to return here instead, and the silence was the whole
+            # problem. The session stayed listening to a device that had
+            # stopped sending, so every frame of the new question was accepted
+            # into the old buffer, no reply was ever produced, and the first
+            # thing anyone heard about it was "utterance timed out after
+            # 60.0s" a minute later. Measured on 28 Aug: a start accepted
+            # 0.19 s after a cancel, 0.22 s of audio, no "end", sixty seconds
+            # of nothing. Starting cleanly costs the fragment, which was not
+            # a question, and answers the one that was.
+            log.info("start while already listening: dropping %d B never ended",
+                     len(self._buf))
         self._buf.clear()
         # The device announces its codec per utterance. Absent the field it is
         # raw PCM, which keeps the laptop simulator working unchanged.

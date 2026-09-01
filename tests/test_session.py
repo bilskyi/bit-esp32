@@ -282,6 +282,51 @@ async def test_a_press_during_a_reply_interrupts_and_listens_again():
     assert tts.finished == 0
 
 
+# -------------------------------------------- a start with no end before it
+#
+# The device can leave LISTENING without ever sending "end". Its playback task
+# rescues a reply that produced no audio by forcing ST_IDLE, and until 28 Aug
+# it did that on any "done" at all - including the one closing a reply the user
+# had just interrupted, which lands a moment after the mic has already started
+# on the next question. The recording is then made in a state that never sends
+# "end", and the next thing the device does is press again and send a second
+# "start".
+#
+# Measured on 28 Aug, from the server's own log: a start accepted 0.19 s after
+# a cancel, 0.22 s of audio buffered, no "end", and sixty seconds later
+# "utterance timed out after 60.0s". The device half is fixed in voice_main.c;
+# these cover this side of it, because a device that does this must not be able
+# to wedge the session.
+
+
+async def test_a_second_start_while_listening_begins_a_fresh_utterance():
+    stt = FakeSTT()
+    session, transport = build(stt=stt)
+    await session.on_start()
+    await session.on_audio(b"\x7f\x7f" * 3520)  # the abandoned 0.22 s
+
+    await session.on_start()  # the user pressed again
+    assert session.state is State.LISTENING
+    assert transport.states == ["listening", "listening"]
+
+    await session.on_audio(b"\x00\x01" * 32000)
+    await session.on_end()
+    await session.wait_for_reply()
+    assert stt.received == [2 * 32000], "the abandoned fragment was prepended"
+
+
+async def test_a_second_start_rearms_the_utterance_watchdog():
+    """Or the new question inherits what is left of the old one's sixty
+    seconds, and a long answer is cut off part-way through."""
+    session, _ = build(session_timeout_s=0.3)
+    await session.on_start()
+    await asyncio.sleep(0.2)
+    await session.on_start()
+
+    await asyncio.sleep(0.2)  # 0.4 s since the first start, 0.2 s since the second
+    assert session.state is State.LISTENING
+
+
 async def test_cancel_when_nothing_is_playing_is_harmless():
     session, _ = build()
     await session.on_cancel()
