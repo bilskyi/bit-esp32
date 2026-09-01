@@ -13,12 +13,19 @@ from tests.fakes import FakeAccounts, FakeEmbedder, FakeLLM, FakeSTT, FakeStore,
 @contextmanager
 def client(stt=None, tts=None, store=None, accounts=None, roles=None, **kw):
     kw.setdefault("session_cookie_secure", False)
+    import asyncio
     import tempfile
     from server.roles import Roles
 
     tmp = tempfile.TemporaryDirectory()
     real_roles = roles
-    if real_roles is None:
+    # Only a Roles this helper built itself is this helper's to close. It is
+    # always passed in already-constructed (create_app's `roles` argument),
+    # so create_app's own lifespan sees roles_injected=True and skips closing
+    # it - if this didn't, every one of client()'s uses would leak an
+    # aiosqlite connection and its thread.
+    owns_roles = real_roles is None
+    if owns_roles:
         real_roles = Roles(f"sqlite+aiosqlite:///{tmp.name}/roles.db")
     app = create_app(
         settings=Settings(_env_file=None, **kw),
@@ -34,7 +41,51 @@ def client(stt=None, tts=None, store=None, accounts=None, roles=None, **kw):
         with TestClient(app) as c:
             yield c
     finally:
+        if owns_roles:
+            asyncio.run(real_roles.close())
         tmp.cleanup()
+
+
+def test_client_closes_the_roles_engine_it_creates(monkeypatch):
+    """client() builds a real Roles for every test and injects it, so the
+    app's own lifespan shutdown skips closing it (roles_injected
+    short-circuits). Left unclosed, each of the 40+ uses of client() leaks
+    an aiosqlite connection and its thread."""
+    from server.roles import Roles
+
+    original_close = Roles.close
+    closed = []
+
+    async def spy_close(self):
+        closed.append(True)
+        await original_close(self)
+
+    monkeypatch.setattr(Roles, "close", spy_close)
+
+    with client() as c:
+        _login(c)
+
+    assert closed == [True]
+
+
+def test_client_closes_the_roles_engine_even_when_the_test_raises(monkeypatch):
+    from server.roles import Roles
+
+    original_close = Roles.close
+    closed = []
+
+    async def spy_close(self):
+        closed.append(True)
+        await original_close(self)
+
+    monkeypatch.setattr(Roles, "close", spy_close)
+
+    with pytest.raises(RuntimeError):
+        with client() as c:
+            _login(c)
+            raise RuntimeError("boom")
+
+    assert closed == [True]
 
 
 def test_healthz_reports_ok():
@@ -448,6 +499,129 @@ def test_an_explicit_null_language_list_is_a_422_not_a_500():
                                          "pinned_mood": None}).json()["id"]
         r = c.put(f"/roles/{role_id}", json={"languages": None})
     assert r.status_code == 422
+
+
+def test_an_explicit_null_name_is_a_422_not_a_500():
+    """name is NOT NULL; an explicit null used to reach the column and raise
+    an IntegrityError (500) instead of the ValueError the endpoint turns
+    into a 422 - the same shape of bug languages=None had."""
+    with client() as c:
+        _login(c)
+        role_id = c.post("/roles", json={"name": "Coach", "prompt": None, "max_sentences": 2,
+                                         "markdown_allowed": False, "languages": ["uk"],
+                                         "pinned_mood": None}).json()["id"]
+        r = c.put(f"/roles/{role_id}", json={"name": None})
+    assert r.status_code == 422
+
+
+def test_an_explicit_null_max_sentences_is_a_422_not_a_500():
+    with client() as c:
+        _login(c)
+        role_id = c.post("/roles", json={"name": "Coach", "prompt": None, "max_sentences": 2,
+                                         "markdown_allowed": False, "languages": ["uk"],
+                                         "pinned_mood": None}).json()["id"]
+        r = c.put(f"/roles/{role_id}", json={"max_sentences": None})
+    assert r.status_code == 422
+
+
+def test_an_explicit_null_markdown_allowed_is_a_422_not_a_500():
+    with client() as c:
+        _login(c)
+        role_id = c.post("/roles", json={"name": "Coach", "prompt": None, "max_sentences": 2,
+                                         "markdown_allowed": False, "languages": ["uk"],
+                                         "pinned_mood": None}).json()["id"]
+        r = c.put(f"/roles/{role_id}", json={"markdown_allowed": None})
+    assert r.status_code == 422
+
+
+def test_a_language_named_taken_is_still_a_422_not_a_409():
+    """_validate interpolates the client's own value into its message, so a
+    naive `"taken" in str(exc)` check for the 409/422 split would mistake an
+    invalid language for a duplicate-name conflict."""
+    with client() as c:
+        _login(c)
+        r = c.post("/roles", json={"name": "X", "prompt": None, "max_sentences": 2,
+                                   "markdown_allowed": False, "languages": ["taken"],
+                                   "pinned_mood": None})
+    assert r.status_code == 422
+
+
+def test_a_mood_named_taken_is_still_a_422_not_a_409():
+    with client() as c:
+        _login(c)
+        r = c.post("/roles", json={"name": "Y", "prompt": None, "max_sentences": 2,
+                                   "markdown_allowed": False, "languages": ["uk"],
+                                   "pinned_mood": "taken"})
+    assert r.status_code == 422
+
+
+def test_updating_a_role_to_a_taken_name_is_a_conflict():
+    with client() as c:
+        _login(c)
+        c.post("/roles", json={"name": "Coach", "prompt": None, "max_sentences": 2,
+                               "markdown_allowed": False, "languages": ["uk"], "pinned_mood": None})
+        other_id = c.post("/roles", json={"name": "Other", "prompt": None, "max_sentences": 2,
+                                          "markdown_allowed": False, "languages": ["uk"],
+                                          "pinned_mood": None}).json()["id"]
+        r = c.put(f"/roles/{other_id}", json={"name": "Coach"})
+    assert r.status_code == 409
+
+
+def test_setting_an_unknown_surfaces_role_is_404():
+    """/settings/surfaces/{surface} used to accept any string and write a
+    junk row into surface_roles that /settings/surfaces never displays."""
+    with client() as c:
+        _login(c)
+        role_id = c.post("/roles", json={"name": "X", "prompt": None, "max_sentences": 2,
+                                         "markdown_allowed": False, "languages": ["uk"],
+                                         "pinned_mood": None}).json()["id"]
+        r = c.put("/settings/surfaces/bogus", json={"role_id": role_id})
+    assert r.status_code == 404
+
+
+def test_the_esp32_surfaces_active_role_reaches_the_llm():
+    """Task 4's central wiring: ws_endpoint reads
+    app.state.roles.active_for(surface) into Session(role=...), and that
+    role's prompt has to be what the LLM actually receives. A previous test
+    that was the only end-to-end guard of this seam was deleted without a
+    replacement, and three more tasks build on it."""
+    with client(device_token="s3cret") as c:
+        _login(c)
+        role_id = c.post("/roles", json={
+            "name": "Pirate",
+            "prompt": "Ye speak only as Captain Sparrow the parrot, arr.",
+            "max_sentences": 2, "markdown_allowed": False,
+            "languages": ["uk", "ru", "en"], "pinned_mood": None,
+        }).json()["id"]
+        assert c.put("/settings/surfaces/esp32", json={"role_id": role_id}).status_code == 200
+
+        with c.websocket_connect("/ws", headers={"Authorization": "Bearer s3cret"}) as ws:
+            ws.send_text(json.dumps({"type": "start"}))
+            assert json.loads(ws.receive_text())["value"] == "listening"
+            ws.send_bytes(b"\x00\x01" * 32000)
+            ws.send_text(json.dumps({"type": "end"}))
+            controls(ws, answered())
+
+        prompt = c.app.state.llm.prompts[0][0]["content"]
+    assert prompt.startswith("Ye speak only as Captain Sparrow the parrot, arr.")
+
+
+def test_the_esp32_surfaces_default_role_sends_the_measured_base_prompt():
+    """The other half of the same seam: with no custom role in play, the
+    prompt the LLM receives for the device surface must be byte-identical to
+    server.persona.BASE."""
+    from server.persona import BASE
+
+    with client(device_token="s3cret") as c:
+        with c.websocket_connect("/ws", headers={"Authorization": "Bearer s3cret"}) as ws:
+            ws.send_text(json.dumps({"type": "start"}))
+            assert json.loads(ws.receive_text())["value"] == "listening"
+            ws.send_bytes(b"\x00\x01" * 32000)
+            ws.send_text(json.dumps({"type": "end"}))
+            controls(ws, answered())
+
+        prompt = c.app.state.llm.prompts[0][0]["content"]
+    assert prompt == BASE
 
 
 def test_a_built_in_role_cannot_be_deleted():

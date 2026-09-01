@@ -70,6 +70,18 @@ WEB_DEFAULT = Role(
 _SURFACE_DEFAULTS = {"esp32": DEVICE_DEFAULT, "web": WEB_DEFAULT}
 
 
+class NameTaken(ValueError):
+    """A create or update collided with another role's name.
+
+    Its own type, not a bare ValueError, because server/main.py has to tell
+    this apart from every other validation failure to answer 409 instead of
+    422 - and `_validate`'s messages interpolate the client's own values
+    (a language, a mood), so sniffing a substring like "taken" out of
+    str(exc) is not safe: a client can put that word in a value and get the
+    wrong status code.
+    """
+
+
 class RoleRow(Base):
     __tablename__ = "roles"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -174,7 +186,7 @@ class Roles:
         async with self._session() as s:
             clash = (await s.scalars(select(RoleRow).where(RoleRow.name == name))).first()
             if clash is not None:
-                raise ValueError(f"a role name must be unique; {name!r} is taken")
+                raise NameTaken(f"a role name must be unique; {name!r} is taken")
             row = RoleRow(
                 name=name, prompt=prompt, max_sentences=max_sentences,
                 markdown_allowed=markdown_allowed, languages=",".join(languages),
@@ -189,11 +201,19 @@ class Roles:
         """Change only the fields named. `prompt=None` is a real value here -
         it is how a customised device role is reverted to the measured
         wording - so absence, not None, means "leave alone". `pinned_mood=None`
-        is likewise real: it unpins the mood. `languages=None`, however, is
-        not a legitimate value for any caller - a role must always have at
-        least one language - so it is rejected the same way an empty tuple
-        is, rather than reaching `",".join(None)` as a TypeError.
+        is likewise real: it unpins the mood. `name`, `max_sentences`,
+        `languages` and `markdown_allowed`, however, back NOT NULL columns
+        and have no legitimate None - each is rejected up front the same way
+        an empty language tuple is, rather than reaching the database and
+        surfacing as an IntegrityError (a 500) instead of the ValueError the
+        endpoint turns into a 422.
         """
+        if "name" in fields and fields["name"] is None:
+            raise ValueError("a role must have a name")
+        if "max_sentences" in fields and fields["max_sentences"] is None:
+            raise ValueError("a role must have a max_sentences value")
+        if "markdown_allowed" in fields and fields["markdown_allowed"] is None:
+            raise ValueError("a role must have a markdown_allowed value")
         if "languages" in fields and fields["languages"] is None:
             raise ValueError("a role needs at least one language")
         _validate(fields.get("languages"), fields.get("pinned_mood"))
@@ -210,7 +230,7 @@ class Roles:
                     )
                 ).first()
                 if clash is not None:
-                    raise ValueError(f"a role name must be unique; {fields['name']!r} is taken")
+                    raise NameTaken(f"a role name must be unique; {fields['name']!r} is taken")
                 row.name = fields["name"]
             if "prompt" in fields:
                 row.prompt = fields["prompt"]

@@ -1,6 +1,6 @@
 import pytest
 
-from server.roles import DEVICE_DEFAULT, WEB_DEFAULT, Role, Roles
+from server.roles import DEVICE_DEFAULT, WEB_DEFAULT, NameTaken, Role, Roles
 
 
 @pytest.fixture
@@ -110,6 +110,36 @@ async def test_update_rejects_an_explicit_null_language_list(roles):
         await roles.update(created.id, languages=None)
 
 
+async def test_update_rejects_an_explicit_null_name(roles):
+    """name is Mapped[str], NOT NULL. Unlike prompt=None (a revert) and
+    pinned_mood=None (an unpin), name=None is not a legitimate value for any
+    caller, so it must be rejected before it reaches the column and raises an
+    IntegrityError (a 500) instead of the ValueError the endpoint turns into
+    a 422."""
+    created = await roles.create(name="Coach", prompt=None, max_sentences=3,
+                                 markdown_allowed=False, languages=("uk",), pinned_mood=None)
+    with pytest.raises(ValueError, match="name"):
+        await roles.update(created.id, name=None)
+
+
+async def test_update_rejects_an_explicit_null_max_sentences(roles):
+    """max_sentences is Mapped[int], NOT NULL - same shape of bug as
+    languages=None and name=None."""
+    created = await roles.create(name="Coach", prompt=None, max_sentences=3,
+                                 markdown_allowed=False, languages=("uk",), pinned_mood=None)
+    with pytest.raises(ValueError, match="max_sentences"):
+        await roles.update(created.id, max_sentences=None)
+
+
+async def test_update_rejects_an_explicit_null_markdown_allowed(roles):
+    """markdown_allowed is Mapped[bool], NOT NULL - same shape of bug as
+    languages=None and name=None."""
+    created = await roles.create(name="Coach", prompt=None, max_sentences=3,
+                                 markdown_allowed=False, languages=("uk",), pinned_mood=None)
+    with pytest.raises(ValueError, match="markdown_allowed"):
+        await roles.update(created.id, markdown_allowed=None)
+
+
 async def test_update_of_an_unknown_role_is_none(roles):
     assert await roles.update(999, max_sentences=2) is None
 
@@ -142,6 +172,27 @@ async def test_a_built_in_default_cannot_be_deleted(roles):
 
 async def test_deleting_an_unknown_role_is_false(roles):
     assert await roles.delete(999) is False
+
+
+async def test_a_duplicate_name_raises_the_dedicated_exception_on_create(roles):
+    """NameTaken is what main.py catches to route this to 409 rather than the
+    422 every other ValueError gets. If create ever goes back to raising a
+    bare ValueError here, that routing (and the substring sniffing it
+    replaced) would silently regress."""
+    await roles.create(name="Coach", prompt=None, max_sentences=2,
+                       markdown_allowed=False, languages=("uk",), pinned_mood=None)
+    with pytest.raises(NameTaken):
+        await roles.create(name="Coach", prompt=None, max_sentences=2,
+                           markdown_allowed=False, languages=("uk",), pinned_mood=None)
+
+
+async def test_a_duplicate_name_raises_the_dedicated_exception_on_update(roles):
+    await roles.create(name="Coach", prompt=None, max_sentences=2,
+                       markdown_allowed=False, languages=("uk",), pinned_mood=None)
+    other = await roles.create(name="Other", prompt=None, max_sentences=2,
+                               markdown_allowed=False, languages=("uk",), pinned_mood=None)
+    with pytest.raises(NameTaken):
+        await roles.update(other.id, name="Coach")
 
 
 async def test_reverting_the_device_role_restores_the_measured_prompt(roles):

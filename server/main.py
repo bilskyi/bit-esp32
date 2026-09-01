@@ -23,7 +23,7 @@ from server.providers.embeddings import FastEmbedEmbedder
 from server.providers.groq_llm import GroqLLM
 from server.providers.groq_stt import GroqSTT
 from server.providers.mock import MockEmbedder, MockLLM, MockSTT
-from server.roles import SPEAKABLE_LANGUAGES, Roles
+from server.roles import SPEAKABLE_LANGUAGES, NameTaken, Roles
 from server.session import Session
 
 log = logging.getLogger(__name__)
@@ -103,6 +103,13 @@ class RolePatch(BaseModel):
 
 class ActiveRoleIn(BaseModel):
     role_id: int
+
+
+# The only two clients that exist. server/roles.py's own default map has the
+# same two keys; this copy stays local because main.py is what answers 404
+# for the rest, and importing a private mapping just to get its keys would
+# be more coupling than the two literals are worth.
+_SURFACES = ("esp32", "web")
 
 
 # Read once at import, not per request - it's a static file, not a template.
@@ -260,11 +267,14 @@ def create_app(
                 markdown_allowed=body.markdown_allowed,
                 languages=tuple(body.languages), pinned_mood=body.pinned_mood,
             )
+        except NameTaken as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
-            # A taken name is a conflict; a language with no voice or a mood
-            # that is not a face is an unprocessable value.
-            raise HTTPException(status_code=409 if "taken" in str(exc) else 422,
-                                detail=str(exc)) from exc
+            # A language with no voice or a mood that is not a face is an
+            # unprocessable value. NameTaken (a conflict) is caught above -
+            # it must be, since _validate's messages interpolate the
+            # client's own values and could otherwise be mistaken for one.
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"id": role.id}
 
     @app.put("/roles/{role_id}", dependencies=[Depends(require_login)])
@@ -275,9 +285,10 @@ def create_app(
             fields[name] = tuple(value) if name == "languages" and value is not None else value
         try:
             role = await app.state.roles.update(role_id, **fields)
+        except NameTaken as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except ValueError as exc:
-            raise HTTPException(status_code=409 if "taken" in str(exc) else 422,
-                                detail=str(exc)) from exc
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         if role is None:
             raise HTTPException(status_code=404, detail="not found")
         return {"status": "ok"}
@@ -296,11 +307,17 @@ def create_app(
     async def get_surfaces() -> dict:
         return {
             surface: _role_json(await app.state.roles.active_for(surface))
-            for surface in ("esp32", "web")
+            for surface in _SURFACES
         }
 
     @app.put("/settings/surfaces/{surface}", dependencies=[Depends(require_login)])
     async def set_surface_role(surface: str, body: ActiveRoleIn) -> dict:
+        # Without this, an unknown surface (a typo, a future third client
+        # named wrong) still writes a row into surface_roles - it just never
+        # shows up in GET /settings/surfaces, which only ever asks about
+        # esp32 and web.
+        if surface not in _SURFACES:
+            raise HTTPException(status_code=404, detail="not found")
         if not await app.state.roles.set_active(surface, body.role_id):
             raise HTTPException(status_code=404, detail="not found")
         return {"status": "ok"}
