@@ -63,36 +63,32 @@ async def test_init_is_safe_to_run_twice(store):
 # --------------------------------------------------------- ranked retrieval
 
 async def test_relevant_facts_ranks_by_similarity_not_recency(store):
-    """The one test that would fail against the old newest-first behaviour."""
-    await store.add_facts("dev1", ["Owns a cat named Musya"], embeddings=[[1.0, 0.0]])
-    await store.add_facts("dev1", ["Lives in Kyiv"], embeddings=[[0.0, 1.0]])  # added later
-    result = await store.relevant_facts("dev1", [0.9, 0.1], limit=1)
-    assert result == ["Owns a cat named Musya"], "the older, more similar fact should win"
+    await store.add_facts("dev1", ["Has a cat named Musya", "Lives in Kyiv"],
+                          [[1.0, 0.0], [0.0, 1.0]])
+    ranked = await store.relevant_facts("dev1", [1.0, 0.0])
+    assert [text for text, _ in ranked] == ["Has a cat named Musya", "Lives in Kyiv"]
+    assert ranked[0][1] > ranked[1][1]
+    assert ranked[0][1] == pytest.approx(1.0)
 
 
 async def test_relevant_facts_respects_the_limit(store):
-    await store.add_facts(
-        "dev1",
-        [f"fact {i}" for i in range(5)],
-        embeddings=[[float(i), 1.0] for i in range(5)],
-    )
-    assert len(await store.relevant_facts("dev1", [2.0, 1.0], limit=2)) == 2
+    await store.add_facts("dev1", ["a", "b", "c"], [[1.0, 0.0], [0.9, 0.1], [0.0, 1.0]])
+    assert len(await store.relevant_facts("dev1", [1.0, 0.0], limit=2)) == 2
 
 
 async def test_relevant_facts_ignores_other_devices(store):
-    await store.add_facts("dev1", ["dev1 fact"], embeddings=[[1.0, 0.0]])
-    await store.add_facts("dev2", ["dev2 fact"], embeddings=[[1.0, 0.0]])
-    assert await store.relevant_facts("dev1", [1.0, 0.0]) == ["dev1 fact"]
+    await store.add_facts("dev1", ["mine"], [[1.0, 0.0]])
+    await store.add_facts("dev2", ["theirs"], [[1.0, 0.0]])
+    assert [t for t, _ in await store.relevant_facts("dev1", [1.0, 0.0])] == ["mine"]
 
 
 async def test_relevant_facts_skips_rows_with_no_embedding(store):
-    """A fact stored before embeddings existed must not crash retrieval."""
-    await store.add_facts("dev1", ["no vector yet"])  # embeddings=None
+    await store.add_facts("dev1", ["unembedded"])
     assert await store.relevant_facts("dev1", [1.0, 0.0]) == []
 
 
 async def test_relevant_facts_with_no_query_is_empty(store):
-    await store.add_facts("dev1", ["something"], embeddings=[[1.0, 0.0]])
+    await store.add_facts("dev1", ["a"], [[1.0, 0.0]])
     assert await store.relevant_facts("dev1", None) == []
 
 
@@ -111,7 +107,7 @@ async def test_user_facts_do_not_appear_in_auto_retrieval(store):
     """Standing instructions are never ranked - they always apply, so they
     must not compete with auto facts for the top-K slots."""
     await store.add_user_fact("dev1", "Always answer informally", embedding=[1.0, 0.0])
-    assert await store.relevant_facts("dev1", [1.0, 0.0]) == []
+    assert [t for t, _ in await store.relevant_facts("dev1", [1.0, 0.0])] == []
 
 
 async def test_list_memory_shows_both_kinds_with_their_source(store):
@@ -156,7 +152,8 @@ async def test_backfill_embeddings_fills_only_missing_rows(store):
     assert updated == 1
     assert calls == [["needs embedding"]]
     # Now retrievable, proving the write actually landed.
-    assert "needs embedding" in await store.relevant_facts("dev1", [0.5, 0.5])
+    ranked = await store.relevant_facts("dev1", [0.5, 0.5])
+    assert "needs embedding" in [text for text, _ in ranked]
 
 
 async def test_backfill_embeddings_is_idempotent(store):

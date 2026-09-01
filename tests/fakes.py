@@ -95,10 +95,18 @@ class FakeStore:
     async def recent_facts(self, device_id: str, limit: int = 20) -> list[str]:
         return list(self.facts.get(device_id, []))
 
-    async def relevant_facts(self, device_id: str, query_embedding, limit: int = 6) -> list[str]:
+    async def relevant_facts(
+        self, device_id: str, query_embedding, limit: int = 6
+    ) -> list[tuple[str, float]]:
         # No ranking here: the fake ignores the query and returns whatever
-        # was seeded, so pipeline tests don't need real embedding math.
-        return list(self.facts.get(device_id, []))[:limit]
+        # was seeded, with a fixed, descending score - the fake's job is the
+        # shape, not ranking.
+        if query_embedding is None:
+            return []
+        return [
+            (f, 1.0 - i / 100)
+            for i, f in enumerate(list(self.facts.get(device_id, []))[:limit])
+        ]
 
     async def user_facts(self, device_id: str) -> list[str]:
         return list(self.standing.get(device_id, []))

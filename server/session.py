@@ -59,6 +59,7 @@ class Session:
         self.state = State.IDLE
         self.history: list[dict] = []
         self.facts: list[str] = []
+        self.retrieved: list[tuple[str, float]] = []
         self.standing_instructions: list[str] = []
         self.usage = Usage()
 
@@ -239,9 +240,10 @@ class Session:
     async def _answer(self, text: str, *, speak: bool = True, audio_seconds: float = 0.0) -> None:
         if self.store is not None:
             query_vector = await self.embedder.embed_query(text)
-            self.facts = await self.store.relevant_facts(
+            self.retrieved = await self.store.relevant_facts(
                 self.device_id, query_vector, limit=self.settings.relevant_facts_limit
             )
+            self.facts = [fact for fact, _ in self.retrieved]
 
         messages = build_messages(
             # persona.py takes one flat list; standing instructions come

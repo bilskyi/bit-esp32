@@ -181,8 +181,8 @@ class Store:
 
     async def relevant_facts(
         self, device_id: str, query_embedding: list[float] | None, limit: int = 6
-    ) -> list[str]:
-        """Auto facts ranked by cosine similarity to `query_embedding`.
+    ) -> list[tuple[str, float]]:
+        """Auto facts and their cosine similarity to `query_embedding`, best first.
 
         Brute-force, in Python: at the row counts a single device's memory
         will ever reach, this is far cheaper than standing up a vector index
@@ -203,7 +203,7 @@ class Store:
                 for text, blob in rows.all()
             ]
         scored.sort(key=lambda pair: pair[1], reverse=True)
-        return [text for text, _ in scored[:limit]]
+        return scored[:limit]
 
     async def list_memory(self, device_id: str) -> list[dict]:
         """Everything remembered for a device, for the customization API."""
