@@ -18,6 +18,10 @@ const BOTTOM_SLACK_PX = 24
 function Chat({ turn }: ChatProps) {
   const { connection, turns, ask, sendError } = turn
   const [draft, setDraft] = useState('')
+  // Which turn's inspector is open, by turn id - a single value rather than
+  // per-message state, so opening one always closes any other (Task 4's
+  // requirement). null means none open.
+  const [openTraceId, setOpenTraceId] = useState<number | null>(null)
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -84,7 +88,14 @@ function Chat({ turn }: ChatProps) {
         {turns.length === 0 ? (
           <p className="chat-empty">Ask it something. Ukrainian, Russian or English.</p>
         ) : (
-          turns.map((t) => <Message key={t.id} turn={t} />)
+          turns.map((t) => (
+            <Message
+              key={t.id}
+              turn={t}
+              inspectorOpen={openTraceId === t.id}
+              onToggleInspector={() => setOpenTraceId((cur) => (cur === t.id ? null : t.id))}
+            />
+          ))
         )}
       </div>
 

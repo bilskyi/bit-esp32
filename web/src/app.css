@@ -360,6 +360,175 @@ input:focus-visible {
   }
 }
 
+/* ----------------------------------------------------------- inspector */
+
+.inspector {
+  margin-top: 0.15rem;
+}
+
+.inspector-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.7rem;
+  width: 100%;
+  text-align: left;
+  font-size: 0.76rem;
+}
+
+.inspector-toggle-label {
+  font-size: 0.62rem;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.inspector-toggle[aria-expanded='true'] .inspector-toggle-label {
+  color: var(--ink);
+}
+
+.inspector-figures {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.inspector-missing {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--ink-3);
+}
+
+/* Collapses via grid-template-rows rather than max-height, so the panel
+   settles at exactly its content height when open instead of an arbitrary
+   cap. Falls back to an instant show/hide in browsers that don't animate
+   the grid-template-rows fr unit - never broken, just unanimated. */
+.inspector-panel {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.2s ease;
+}
+.inspector-panel.is-open {
+  grid-template-rows: 1fr;
+}
+
+.inspector-panel-inner {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding-top: 0.75rem;
+}
+
+.inspector-section {
+  min-width: 0;
+}
+
+.inspector-heading {
+  margin: 0 0 0.4rem;
+  font-size: 0.62rem;
+  font-weight: 400;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.inspector-empty {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--ink-3);
+}
+
+.inspector-facts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.inspector-fact {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.inspector-fact-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.inspector-fact-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--ink);
+  word-break: break-word;
+}
+
+.inspector-fact-score {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+
+.inspector-bar-track {
+  height: 4px;
+  background: var(--rule);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.inspector-bar-fill {
+  height: 100%;
+  background: var(--ink-2);
+  border-radius: 2px;
+}
+
+.inspector-prompt {
+  margin: 0;
+  max-height: 40vh;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--sunk);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 0.65rem 0.75rem;
+  color: var(--ink);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.inspector-details {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
+  gap: 0.55rem 1rem;
+}
+
+.inspector-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+.inspector-detail dt {
+  margin: 0;
+  font-size: 0.62rem;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.inspector-detail dd {
+  margin: 0;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  word-break: break-word;
+}
+
 @media (prefers-reduced-motion: reduce) {
   * {
     transition: none !important;
