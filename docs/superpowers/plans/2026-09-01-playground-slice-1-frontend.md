@@ -260,6 +260,13 @@ and `git rm server/static/memory.html`. Then, immediately before `return app`:
         async def spa(path: str):
             if path.split("/", 1)[0] in _API_PREFIXES:
                 raise HTTPException(status_code=404, detail="not found")
+            # Vite emits favicons, manifests and everything else in public/ at
+            # the root of the bundle, not under assets/ - so without this, a
+            # favicon request gets a 200 of index.html.
+            if path:
+                candidate = (_DIST / path).resolve()
+                if candidate.is_file() and candidate.is_relative_to(_DIST.resolve()):
+                    return FileResponse(candidate)
             return FileResponse(_DIST / "index.html")
     else:
         log.warning("web/dist is missing - the API is up but there is no app to serve; "

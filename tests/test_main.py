@@ -384,9 +384,42 @@ def test_an_unknown_api_path_stays_a_json_404():
 
 def test_a_missing_bundle_does_not_break_the_api():
     """web/dist is git-ignored, so a fresh clone has no bundle. The API must
-    still answer rather than failing at import."""
-    with client() as c:
+    still answer rather than failing at import.
+
+    Points web_dist at a directory that does not exist: the previous version
+    of this test asserted /healthz against whatever bundle happened to be on
+    disk, so it passed without ever reaching the branch it is named for.
+    """
+    with client(web_dist="/nonexistent/bundle/path") as c:
         assert c.get("/healthz").status_code == 200
+        # No bundle, so navigation has nothing to serve and must not 500.
+        assert c.get("/").status_code == 404
+
+
+def test_a_file_at_the_root_of_the_bundle_is_served_as_itself(tmp_path):
+    """Vite puts favicons and manifests at the bundle root, not under
+    assets/, so the catch-all used to answer them with index.html - a
+    favicon request got a 200 of HTML."""
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "index.html").write_text("<!doctype html><title>app</title>")
+    (tmp_path / "favicon.svg").write_text("<svg xmlns='http://www.w3.org/2000/svg'/>")
+    with client(web_dist=str(tmp_path)) as c:
+        icon = c.get("/favicon.svg")
+        assert icon.status_code == 200
+        assert "svg" in icon.headers["content-type"]
+        # A navigation path still gets the app.
+        assert "<title>app</title>" in c.get("/some/deep/view").text
+
+
+def test_the_bundle_cannot_serve_a_file_outside_itself(tmp_path):
+    """The path comes from the URL, so it gets resolved and checked."""
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "index.html").write_text("<!doctype html><title>app</title>")
+    secret = tmp_path.parent / "secret.txt"
+    secret.write_text("not yours")
+    with client(web_dist=str(tmp_path)) as c:
+        r = c.get("/../secret.txt")
+    assert "not yours" not in r.text
 
 
 def test_websocket_accepts_a_valid_session_cookie_with_no_bearer_token():

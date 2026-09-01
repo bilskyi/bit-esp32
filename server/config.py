@@ -83,6 +83,12 @@ class Settings(BaseSettings):
     # requests internally.
     session_cookie_secure: bool = True
 
+    # Where the built frontend lives. Empty means the repo's own web/dist,
+    # which is what production uses. A test sets it to a directory that does
+    # not exist, because "a fresh clone has no bundle" is a state worth
+    # asserting and it cannot be reached by deleting files under the app.
+    web_dist: str = ""
+
     sample_rate: int = 16000
     db_path: str = "voice.db"
 

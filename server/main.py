@@ -415,7 +415,11 @@ def create_app(
     # answers GETs that look like navigation: anything else, and anything
     # under a known API prefix, must keep returning a JSON 404 rather than
     # an HTML page a fetch() would try to parse.
-    _DIST = Path(__file__).parent.parent / "web" / "dist"
+    _DIST = (
+        Path(settings.web_dist)
+        if settings.web_dist
+        else Path(__file__).parent.parent / "web" / "dist"
+    )
     _API_PREFIXES = (
         "login", "logout", "me", "roles", "settings", "memory",
         "conversations", "healthz", "ws",
@@ -427,6 +431,14 @@ def create_app(
         async def spa(path: str):
             if path.split("/", 1)[0] in _API_PREFIXES:
                 raise HTTPException(status_code=404, detail="not found")
+            # Vite emits favicons, manifests and anything else in public/ at
+            # the root of the bundle, not under assets/. Without this, the
+            # catch-all answered every one of them with index.html - a
+            # favicon request got a 200 of HTML.
+            if path:
+                candidate = (_DIST / path).resolve()
+                if candidate.is_file() and candidate.is_relative_to(_DIST.resolve()):
+                    return FileResponse(candidate)
             return FileResponse(_DIST / "index.html")
     else:
         log.warning("web/dist is missing - the API is up but there is no app to serve; "
