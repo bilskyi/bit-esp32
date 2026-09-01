@@ -187,7 +187,7 @@ def create_app(
             await app.state.store.backfill_embeddings(app.state.embedder.embed_documents)
             purged = await app.state.store.purge_expired()
             if purged:
-                log.info("purged %d conversations past the retention window", purged)
+                log.info("purged %d rows past the retention window", purged)
         yield
         if not injected and app.state.store is not None:
             await app.state.store.close()

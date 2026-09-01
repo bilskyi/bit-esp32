@@ -195,7 +195,17 @@ class Session:
         self._reply = asyncio.create_task(self._run_reply(lambda: self._answer(text, speak=False)))
 
     async def finish(self) -> None:
-        """Close out the session: extract durable facts, then log usage."""
+        """Close out the session: extract durable facts, then log usage.
+
+        purge_expired() runs last, deliberately: it is the spec's "after
+        each session ends" half of the retention sweep (the other half runs
+        once at startup, in main.py's lifespan - Railway only restarts on
+        redeploy, so that alone made a 90-day retention really "whenever we
+        next deploy"). If it raises, it must not cost the fact extraction
+        and usage logging above, which is why it runs after them rather than
+        before - ws_endpoint already wraps finish() in its own try/except,
+        which is what keeps a raise here from breaking teardown itself.
+        """
         self._cancel_watchdog()
         await self.on_cancel()
         if self.store is None:
@@ -209,6 +219,7 @@ class Session:
             await self.store.log_usage(self.device_id, self.usage)
         if self.conversation_id is not None:
             await self.store.end_conversation(self.conversation_id)
+        await self.store.purge_expired()
 
     # -- pipeline ----------------------------------------------------------
 

@@ -231,6 +231,52 @@ async def test_finish_on_an_empty_session_stores_nothing():
     assert store.added == [] and store.usage_logged == []
 
 
+async def test_finish_sweeps_expired_retention_too():
+    """The spec calls for the retention sweep to run 'at startup and after
+    each session ends'; only the startup half was ever wired up, which on
+    Railway (which only restarts on redeploy) means a 90-day retention is
+    really 'whenever we next deploy'."""
+    from tests.fakes import FakeStore
+
+    store = FakeStore()
+    calls = []
+
+    async def spy_purge():
+        calls.append(True)
+        return 0
+
+    store.purge_expired = spy_purge
+    session, _ = build()
+    session.store = store
+    await session.finish()
+    assert calls == [True]
+
+
+async def test_a_failing_purge_does_not_cost_the_facts_or_usage_it_follows():
+    """purge_expired must run after fact extraction and usage logging, not
+    before - otherwise a raise there would abort finish() early and lose
+    both, not just the retention sweep."""
+    from tests.fakes import FakeStore
+
+    store = FakeStore()
+    llm = FakeLLM("Добре.")
+    llm.completions = ['["Likes short answers"]']
+    session, _ = build(llm=llm)
+    session.store = store
+    await utter(session)
+    llm.completions = ['["Likes short answers"]']
+
+    async def broken_purge():
+        raise RuntimeError("disk full")
+
+    store.purge_expired = broken_purge
+
+    with pytest.raises(RuntimeError):
+        await session.finish()
+    assert store.added == [("default", ["Likes short answers"])]
+    assert len(store.usage_logged) == 1
+
+
 async def test_usage_counts_audio_seconds_and_tts_chars():
     session, _ = build(llm=FakeLLM("Добре."))
     await utter(session, audio=b"\x00\x01" * 16000)  # exactly 1 second, the floor itself

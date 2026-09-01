@@ -480,7 +480,19 @@ class Store:
     _PURGE_BATCH_SIZE = 500
 
     async def purge_expired(self) -> int:
-        """Delete conversations past the retention window. Returns how many.
+        """Delete messages past the retention window, and any conversation
+        they leave empty and already ended. Returns the total number of
+        rows deleted across both tables.
+
+        Keyed on Message.created_at, not Conversation.started_at: one
+        conversation row is one WebSocket connection, and the ESP32 holds a
+        single long-lived socket, so a conversation can span days or weeks.
+        Keying expiry on when it started would delete a 91-day-old row
+        wholesale - yesterday's turns included - while a still-open row
+        would never become eligible at all. A conversation is only dropped
+        once every message in it is gone *and* it has actually ended: a
+        conversation with zero messages so far because it just started is
+        not expired, it just hasn't been talked to yet.
 
         `retention_days = 0` means keep forever, which is why this reads the
         setting rather than taking a parameter: the switch and the sweep must
@@ -491,16 +503,36 @@ class Store:
         if days <= 0:
             return 0
         cutoff = _now() - timedelta(days=days)
+        deleted = 0
         async with self._session() as s:
-            doomed = list(
-                await s.scalars(select(Conversation.id).where(Conversation.started_at < cutoff))
+            doomed_messages = list(
+                await s.scalars(select(Message.id).where(Message.created_at < cutoff))
             )
-            if not doomed:
-                return 0
-            for start in range(0, len(doomed), self._PURGE_BATCH_SIZE):
-                batch = doomed[start : start + self._PURGE_BATCH_SIZE]
-                await s.execute(delete(Message).where(Message.conversation_id.in_(batch)))
-                await s.execute(delete(Conversation).where(Conversation.id.in_(batch)))
+            for start in range(0, len(doomed_messages), self._PURGE_BATCH_SIZE):
+                batch = doomed_messages[start : start + self._PURGE_BATCH_SIZE]
+                result = await s.execute(delete(Message).where(Message.id.in_(batch)))
+                deleted += result.rowcount
             await s.commit()
-            return len(doomed)
+
+            # NOT EXISTS rather than a Python-side id list: the surviving
+            # side of this can be far larger than the doomed side (most
+            # conversations keep most of their messages), and that list
+            # would reintroduce the exact bound-parameter wall this method
+            # exists to avoid.
+            no_messages_left = ~(
+                select(Message.id).where(Message.conversation_id == Conversation.id).exists()
+            )
+            empty_and_ended = list(
+                await s.scalars(
+                    select(Conversation.id).where(
+                        Conversation.ended_at.is_not(None), no_messages_left
+                    )
+                )
+            )
+            for start in range(0, len(empty_and_ended), self._PURGE_BATCH_SIZE):
+                batch = empty_and_ended[start : start + self._PURGE_BATCH_SIZE]
+                result = await s.execute(delete(Conversation).where(Conversation.id.in_(batch)))
+                deleted += result.rowcount
+            await s.commit()
+        return deleted
 

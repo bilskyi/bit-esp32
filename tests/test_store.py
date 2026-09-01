@@ -295,20 +295,28 @@ async def test_forget_leaves_another_devices_conversations_alone(store):
 
 
 async def test_purge_removes_conversations_past_retention(store):
+    """Keyed on Message.created_at, not Conversation.started_at: the
+    conversation must also have ended before it is eligible - a message
+    going stale is not the same thing as the socket having closed."""
     from datetime import datetime, timedelta, timezone
 
-    from server.memory.store import Conversation
+    from sqlalchemy import select
+
+    from server.memory.store import Message
 
     cid = await store.start_conversation("dev1", "web", "Web default")
     await store.record_turn(cid, question="q", reply="r", emotion=None,
                             prompt_tokens=1, completion_tokens=1, latency_ms=1.0)
+    await store.end_conversation(cid)
     await store.set_app_settings(retention_days=1)
     async with store._session() as s:  # noqa: SLF001 - fixture-level surgery
-        row = await s.get(Conversation, cid)
-        row.started_at = datetime.now(timezone.utc) - timedelta(days=5)
+        old = datetime.now(timezone.utc) - timedelta(days=5)
+        rows = (await s.scalars(select(Message).where(Message.conversation_id == cid))).all()
+        for m in rows:
+            m.created_at = old
         await s.commit()
 
-    assert await store.purge_expired() == 1
+    assert await store.purge_expired() == 3  # both messages, then the empty conversation
     assert await store.conversation_rows("dev1") == []
 
 
@@ -320,16 +328,63 @@ async def test_purge_keeps_conversations_inside_retention(store):
     assert len(await store.conversation_rows("dev1")) == 1
 
 
-async def test_retention_of_zero_days_never_purges(store):
-    cid = await store.start_conversation("dev1", "web", "Web default")
-    await store.set_app_settings(retention_days=0)
+async def test_a_long_lived_conversation_loses_only_its_expired_messages(store):
+    """One conversation row is one WebSocket connection, and the ESP32 holds
+    a single long-lived socket - so a conversation can span days, with some
+    messages older than the retention window and others still fresh. Purge
+    must not delete the row wholesale just because it is old, and must not
+    spare a message just because its conversation is still around."""
     from datetime import datetime, timedelta, timezone
 
-    from server.memory.store import Conversation
+    from sqlalchemy import select
 
-    async with store._session() as s:  # noqa: SLF001
-        row = await s.get(Conversation, cid)
-        row.started_at = datetime.now(timezone.utc) - timedelta(days=4000)
+    from server.memory.store import Message
+
+    cid = await store.start_conversation("dev1", "web", "Web default")
+    await store.record_turn(cid, question="old q", reply="old r", emotion=None,
+                            prompt_tokens=1, completion_tokens=1, latency_ms=1.0)
+    await store.record_turn(cid, question="recent q", reply="recent r", emotion=None,
+                            prompt_tokens=1, completion_tokens=1, latency_ms=1.0)
+    await store.set_app_settings(retention_days=1)
+    async with store._session() as s:  # noqa: SLF001 - fixture-level surgery
+        old = datetime.now(timezone.utc) - timedelta(days=5)
+        old_messages = (
+            await s.scalars(
+                select(Message)
+                .where(Message.conversation_id == cid)
+                .order_by(Message.id.asc())
+                .limit(2)
+            )
+        ).all()
+        for m in old_messages:
+            m.created_at = old
+        await s.commit()
+
+    deleted = await store.purge_expired()
+    assert deleted == 2  # only the expired turn's two messages
+
+    rows = await store.conversation_rows("dev1")
+    assert len(rows) == 1  # the conversation itself survives
+    assert {m["text"] for m in rows[0]["messages"]} == {"recent q", "recent r"}
+
+
+async def test_retention_of_zero_days_never_purges(store):
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select
+
+    from server.memory.store import Message
+
+    cid = await store.start_conversation("dev1", "web", "Web default")
+    await store.record_turn(cid, question="q", reply="r", emotion=None,
+                            prompt_tokens=1, completion_tokens=1, latency_ms=1.0)
+    await store.end_conversation(cid)
+    await store.set_app_settings(retention_days=0)
+    async with store._session() as s:  # noqa: SLF001 - fixture-level surgery
+        old = datetime.now(timezone.utc) - timedelta(days=4000)
+        rows = (await s.scalars(select(Message).where(Message.conversation_id == cid))).all()
+        for m in rows:
+            m.created_at = old
         await s.commit()
     assert await store.purge_expired() == 0
 
@@ -339,10 +394,11 @@ async def test_purge_batches_deletes_past_sqlites_bound_parameter_limit(store):
     SQLite's bound-parameter ceiling (32766 in the build this test runs
     against) and raises `OperationalError`, aborting before anything is
     deleted - so every later startup hits the same wall. This seeds enough
-    expired conversations to cross that ceiling for real and asserts the
-    sweep still purges every one of them, in one call, without orphaning
-    a single message - while a conversation still inside retention is left
-    alone."""
+    expired, ended conversations (one old message each) to cross that
+    ceiling for real, on both the message delete and the follow-up
+    conversation delete, and asserts the sweep still purges every row, in
+    one call, without orphaning a single message - while a conversation
+    still inside retention is left alone."""
     from datetime import datetime, timedelta, timezone
 
     from sqlalchemy import insert, select
@@ -360,7 +416,7 @@ async def test_purge_batches_deletes_past_sqlites_bound_parameter_limit(store):
             insert(Conversation),
             [
                 {"device_id": "dev1", "surface": "web", "role_name": "Web default",
-                 "started_at": old}
+                 "ended_at": old}
                 for _ in range(count)
             ],
         )
@@ -372,12 +428,13 @@ async def test_purge_batches_deletes_past_sqlites_bound_parameter_limit(store):
         ).all()
         await s.execute(
             insert(Message),
-            [{"conversation_id": i, "role": "user", "text": "q"} for i in doomed_ids],
+            [{"conversation_id": i, "role": "user", "text": "q", "created_at": old}
+             for i in doomed_ids],
         )
         await s.commit()
 
     await store.set_app_settings(retention_days=1)
-    assert await store.purge_expired() == count
+    assert await store.purge_expired() == count * 2  # each doomed message, then its conversation
 
     async with store._session() as s:  # noqa: SLF001
         remaining_ids = set((await s.scalars(select(Conversation.id))).all())
