@@ -37,11 +37,26 @@ export class Unauthorized extends ApiError {
   }
 }
 
+/** Status used when the request never reached the server at all. Not an
+ * HTTP code: 0 is what `fetch` rejecting looks like from a caller's side, and
+ * every caller reads `.detail`, so an offline failure has to arrive as an
+ * ApiError rather than a raw TypeError with no detail on it. */
+export const NETWORK_ERROR_STATUS = 0
+
 async function readDetail(res: Response): Promise<string> {
   try {
     const body: unknown = await res.json()
-    if (body && typeof body === 'object' && typeof (body as { detail?: unknown }).detail === 'string') {
-      return (body as { detail: string }).detail
+    const detail = (body as { detail?: unknown } | null)?.detail
+    if (typeof detail === 'string') return detail
+    // FastAPI's own validation errors are a list of {loc, msg, type}, not a
+    // string. Every 409 and 422 this app raises by hand carries a string, but
+    // a body the server generates itself would otherwise be reported as the
+    // status line and the real reason lost.
+    if (Array.isArray(detail)) {
+      const messages = detail
+        .map((item) => (item as { msg?: unknown })?.msg)
+        .filter((msg): msg is string => typeof msg === 'string')
+      if (messages.length) return messages.join('; ')
     }
   } catch {
     // Not JSON, or no body at all - fall through to the status line.
@@ -52,12 +67,20 @@ async function readDetail(res: Response): Promise<string> {
 // ------------------------------------------------------------------ fetch
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
-  const res = await fetch(path, {
-    method,
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  })
+  let res: Response
+  try {
+    res = await fetch(path, {
+      method,
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    })
+  } catch {
+    // The server was never reached. Normalised here so that every caller can
+    // rely on catching an ApiError with a readable .detail, instead of some
+    // getting a bare TypeError from the platform.
+    throw new ApiError(NETWORK_ERROR_STATUS, 'Could not reach the server.')
+  }
 
   if (res.status === 401) {
     throw new Unauthorized(await readDetail(res))
