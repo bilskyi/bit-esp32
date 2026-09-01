@@ -122,7 +122,11 @@ input:focus-visible {
 /* ------------------------------------------------------------------ shell */
 
 .shell {
-  min-height: 100vh;
+  /* height, not min-height: Chat (from this task on) scrolls its own
+     transcript with a composer pinned under it, which only works if the
+     shell itself is bounded rather than growing with its content. Settings
+     is still a bare paragraph today and does not mind either way. */
+  height: 100vh;
   display: flex;
   flex-direction: column;
 }
@@ -191,7 +195,13 @@ input:focus-visible {
 
 .shell-content {
   flex: 1;
+  /* Lets a bounded scrolling child (.chat-scroll) actually shrink to fit
+     instead of pushing this box taller than the flex column allows - the
+     default min-height:auto on a flex item ignores its own overflow. */
+  min-height: 0;
   padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
 }
 
 .app-loading {
@@ -236,6 +246,117 @@ input:focus-visible {
   }
   .shell-content {
     padding: 1rem;
+  }
+}
+
+/* ------------------------------------------------------------------- chat */
+
+.chat {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  gap: 0.85rem;
+}
+
+.chat-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1.35rem;
+}
+
+.chat-empty {
+  margin: auto 0 0;
+  color: var(--ink-3);
+  font-size: 0.85rem;
+}
+
+.chat-status {
+  margin: 0;
+  font-size: 0.7rem;
+  letter-spacing: 0.04em;
+  color: var(--ink-3);
+}
+
+.chat-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.6rem;
+  flex-shrink: 0;
+}
+
+.chat-input {
+  flex: 1;
+  min-width: 0;
+  font-family: inherit;
+  font-size: 0.9rem;
+  color: var(--ink);
+  background: var(--sunk);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 0.6rem 0.7rem;
+  line-height: 1.4;
+  resize: none;
+  max-height: 8rem;
+  overflow-y: auto;
+}
+.chat-input:disabled {
+  opacity: 0.7;
+}
+
+.chat-composer button {
+  flex-shrink: 0;
+}
+
+/* -------------------------------------------------------------- message */
+
+.message {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  min-width: 0;
+}
+
+.message-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  min-width: 0;
+}
+
+.message-label {
+  margin: 0;
+  font-size: 0.62rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.message-question {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.message-reply {
+  margin: 0;
+  color: var(--ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.message-thinking {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--ink-3);
+}
+
+@media (max-width: 420px) {
+  .chat-input {
+    font-size: 0.85rem;
   }
 }
 

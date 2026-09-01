@@ -1,0 +1,109 @@
+import { useEffect, useRef, useState } from 'react'
+import type { FormEvent, KeyboardEvent } from 'react'
+import type { TurnValue } from './useTurn.ts'
+import Message from './Message.tsx'
+
+interface ChatProps {
+  turn: TurnValue
+}
+
+/** How close to the bottom still counts as "at the bottom". A few pixels of
+ * slack for the sub-pixel rounding scrollHeight arithmetic is prone to. */
+const BOTTOM_SLACK_PX = 24
+
+/** The Chat tab: a scrolling transcript with a composer pinned under it.
+ * Owns none of the socket state itself - `turn` is the one `useTurn()`
+ * instance App.tsx keeps alive for the whole signed-in session, so leaving
+ * this tab and coming back never drops the connection or the transcript. */
+function Chat({ turn }: ChatProps) {
+  const { connection, turns, ask } = turn
+  const [draft, setDraft] = useState('')
+
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  // Whether to follow new content to the bottom. Read and written from plain
+  // refs rather than state: it changes on every scroll event and must never
+  // itself trigger a render.
+  const stickToBottomRef = useRef(true)
+
+  const disabled = connection.status !== 'open'
+
+  const handleScroll = () => {
+    const el = scrollRef.current
+    if (!el) return
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    stickToBottomRef.current = distanceFromBottom <= BOTTOM_SLACK_PX
+  }
+
+  // Follows the transcript to the bottom on every change - a new turn, a
+  // sentence landing, a trace attaching - but only when the person was
+  // already there. Yanking the view while they are reading something
+  // higher up (an inspector panel, from Task 4 onward) is worse than a
+  // missed scroll.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (!el || !stickToBottomRef.current) return
+    el.scrollTop = el.scrollHeight
+  }, [turns])
+
+  // Grows the textarea to fit what's typed, up to the CSS max-height where
+  // it starts scrolling internally instead.
+  useEffect(() => {
+    const el = textareaRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${el.scrollHeight}px`
+  }, [draft])
+
+  const submit = () => {
+    const text = draft.trim()
+    if (!text || disabled) return
+    ask(text)
+    setDraft('')
+    stickToBottomRef.current = true
+  }
+
+  const handleSubmit = (event: FormEvent) => {
+    event.preventDefault()
+    submit()
+  }
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault()
+      submit()
+    }
+  }
+
+  return (
+    <div className="chat">
+      <div className="chat-scroll" ref={scrollRef} onScroll={handleScroll}>
+        {turns.length === 0 ? (
+          <p className="chat-empty">Ask it something. Ukrainian, Russian or English.</p>
+        ) : (
+          turns.map((t) => <Message key={t.id} turn={t} />)
+        )}
+      </div>
+
+      {disabled && <p className="chat-status">{connection.reason}</p>}
+
+      <form className="chat-composer" onSubmit={handleSubmit}>
+        <textarea
+          ref={textareaRef}
+          className="chat-input"
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder="Ask a question…"
+          disabled={disabled}
+          rows={1}
+        />
+        <button type="submit" disabled={disabled || !draft.trim()}>
+          Send
+        </button>
+      </form>
+    </div>
+  )
+}
+
+export default Chat
