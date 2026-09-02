@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { ReactNode } from 'react'
 import './app.css'
 import { SessionContext, useSession, useSessionState } from './api'
+import Chat from './Chat.tsx'
 import Login from './Login.tsx'
 import Shell from './Shell.tsx'
 import type { Section } from './Shell.tsx'
@@ -48,17 +49,22 @@ function SectionPlaceholder({ section }: { section: Section }) {
 // is not. useTurn() is called here - one level above the sections - rather
 // than inside whichever one is showing, so switching sections never drops
 // the socket or the transcript, and signing out actually closes the socket
-// instead of leaving it open against a cookie that no longer exists. This
-// is also why the status pill is honest even though Розмова is still a
-// placeholder: the socket this task connects is the same one Task 2 wires
-// Chat.tsx to, not a stand-in.
+// instead of leaving it open against a cookie that no longer exists.
+//
+// Default section is 'talk' rather than 'home' for now: Розмова is the only
+// section this rebuild has actually ported so far (Task 2), and the shots
+// harness (web/tools/shots.mjs) logs in and immediately waits for
+// `.chat-composer` - it would time out against Головна's placeholder, which
+// has no composer until Task 6 gives it one. Task 6 is the right place to
+// move this back to 'home', once landing there also has something real to
+// show.
 function SignedIn() {
-  const [section, setSection] = useState<Section>('home')
-  const { connection, state } = useTurn()
+  const [section, setSection] = useState<Section>('talk')
+  const turn = useTurn()
 
   return (
-    <Shell section={section} onSectionChange={setSection} connection={connection} state={state}>
-      <SectionPlaceholder section={section} />
+    <Shell section={section} onSectionChange={setSection} connection={turn.connection} state={turn.state}>
+      {section === 'talk' ? <Chat turn={turn} onNavigate={setSection} /> : <SectionPlaceholder section={section} />}
     </Shell>
   )
 }
