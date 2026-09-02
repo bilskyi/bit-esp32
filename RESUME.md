@@ -45,6 +45,36 @@ name. The answer came from the standing instructions, which are injected in
 full every turn rather than ranked. Ranked retrieval contributed nothing to
 that answer - which is exactly the kind of thing this panel exists to reveal.
 
+### Three layout bugs, and the reason they shipped (2 Sep)
+
+All three passed a green suite, a clean typecheck and a lint pass, and all
+three were obvious the moment anyone looked:
+
+- The composer put its input on one row with a mic button pinned at 11rem and
+  a Send that refuses to shrink, so below roughly 600px the input collapsed to
+  a single character wide - placeholder wrapping one letter per line - and Send
+  was pushed off the edge. The 420px breakpoint never touched the composer and
+  the width where it broke was far above 420. The input owns its own row now.
+- The 900px grid assigned columns by DOM order, and the face comes first in the
+  markup so it can sit above the transcript on a phone - so the eyes took the
+  1fr column and the conversation was squeezed into 15rem. The eyes were the
+  hero and the chat a sidebar. Both are placed explicitly now.
+- One message left ~600px of nothing under it. The transcript anchors to the
+  bottom now.
+
+**The fix for the cause:** `npm --prefix web run shots` drives chromium at five
+widths in both colour schemes, screenshots each, and *fails* on the shapes
+these bugs had - a collapsed input, a Send past the edge, a face wider than
+the conversation beside it. Verified against production: ten combinations, no
+problems. It reproduces all three before the fix.
+
+One thing that tool taught immediately: it first screenshotted before the
+WebSocket connected, so every image showed "Connecting..." with the face
+marked OFFLINE - indistinguishable from a broken deploy. It waits for the
+socket now. The socket itself connects in 431 ms on production and a real
+conversation works: "Скажи одне слово." came back "Привет" with 6 facts
+retrieved and the inspector reading 335 ms.
+
 ### The volume's 10 facts, and an open question about them
 
     2026-08-27  auto   User prefers communicating in Russian
