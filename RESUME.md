@@ -34,11 +34,21 @@ browser checklist in the plan, **and nobody has run any of it yet.**
 
 ### Before you deploy — do these in order
 
-1. **Build the image locally first: `docker build -t vc-test .`** No Docker
-   daemon existed anywhere in the session that wrote this, so the Dockerfile
-   has never been built. It was validated by reading, which found one real
-   blocker (`scripts/` was not copied, so the deployed app could never have had
-   a login account). Assume reading missed something.
+1. **The image is built and smoke-tested — 2 Sep.** `docker build` succeeded
+   first try, and the container was then driven end to end on a mounted
+   volume. Proven in the real image, not by reading:
+   - it binds `$PORT` (told 9137, listened on 9137) — which is what the
+     deleted `startCommand` would have broken;
+   - `/` serves the app, `/favicon.svg` serves as SVG, `/roles` is 401 without
+     a cookie;
+   - `face-frames.json` comes over the wire **gzipped at 38,063 bytes** rather
+     than 1,234,649;
+   - `railway ssh -- python scripts/create_account.py` works inside the
+     container against the volume, then login → `/me` → `/roles` → `/settings/app`;
+   - **the device's socket gets no trace frame** (`state, emotion, state,
+     reply, reply, done`), a browser's gets exactly one, and a spoken question
+     returns 29 binary PCM frames plus its trace.
+   Rebuild before deploying if anything changed since: `docker build -t vc .`
 2. `SESSION_SECRET_KEY` set in Railway variables. Empty means a random key per
    process and everyone signed out on every restart.
 3. `DB_PATH=/data/voice.db`. It defaults to a relative path that lands inside
