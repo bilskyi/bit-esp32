@@ -167,6 +167,10 @@ fieldset.field {
      shell itself is bounded rather than growing with its content. Settings
      is still a bare paragraph today and does not mind either way. */
   height: 100vh;
+  /* dvh, with vh above as the fallback: on iOS Safari 100vh is the *large*
+     viewport, which puts the composer below the fold on first paint of a
+     mobile-first app. */
+  height: 100dvh;
   display: flex;
   flex-direction: column;
 }
@@ -309,6 +313,19 @@ fieldset.field {
     grid-template-columns: minmax(0, 1fr) 15rem;
     gap: 1.5rem;
   }
+  /* Placed explicitly, because grid otherwise assigns columns by DOM order -
+     and the face comes first in the markup so that it sits *above* the
+     transcript on a phone. Without these two lines the face took the 1fr
+     column and the chat was squeezed into 15rem: the eyes became the hero of
+     the page and the actual conversation a sidebar. */
+  .chat {
+    grid-column: 1;
+    grid-row: 1;
+  }
+  .face-rail {
+    grid-column: 2;
+    grid-row: 1;
+  }
 }
 
 .chat {
@@ -328,6 +345,15 @@ fieldset.field {
   gap: 1.35rem;
 }
 
+/* Anchors the conversation to the bottom, so a new turn appears just above
+   the composer instead of at the top of a tall empty column - one message on
+   a desktop left about 600px of nothing under it. margin-top on the first
+   child rather than justify-content: flex-end, which breaks scrolling to the
+   top once the transcript overflows. .chat-empty already does this. */
+.chat-scroll > .message:first-child {
+  margin-top: auto;
+}
+
 .chat-empty {
   margin: auto 0 0;
   color: var(--ink-3);
@@ -343,13 +369,33 @@ fieldset.field {
 
 .chat-composer {
   display: flex;
-  align-items: flex-end;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 0.6rem;
   flex-shrink: 0;
 }
 
+.chat-composer .mic {
+  /* Natural width, pushed left; Send sits at the right. The mic used to
+     stretch to fill the row, which made holding-to-speak look like the
+     primary action - but text is the primary surface here and voice is the
+     optional half. */
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-right: auto;
+}
+
 .chat-input {
-  flex: 1;
+  /* A row of its own, at every width. This used to share one line with the
+     mic button and Send, neither of which is allowed to shrink and one of
+     which is pinned at min-width: 11rem - so anywhere below roughly 600px the
+     fixed content exceeded the row: the input collapsed to a single character
+     wide, its placeholder wrapped one letter per line, and Send was pushed
+     off the edge. The 420px breakpoint never touched the composer, and the
+     width where it broke was far above 420. Giving the input its own row
+     removes the competition rather than tuning a breakpoint around it. */
+  flex: 1 1 100%;
+  order: -1;
   min-width: 0;
   font-family: inherit;
   font-size: 0.9rem;
@@ -428,7 +474,7 @@ fieldset.field {
      panel reads as a fixed-size instrument rather than stretching
      edge-to-edge. From 900px .face-rail's own 15rem column is already the
      right width, so this steps out of the way. */
-  max-width: 22rem;
+  max-width: 16rem;
   margin: 0 auto;
 }
 @media (min-width: 900px) {

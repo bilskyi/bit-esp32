@@ -56,8 +56,19 @@ resampler, the role patch payload, the face's bit unpacking):
 npm --prefix web test
 ```
 
-Everything visual is checked by a person in a browser. That is thinner than
-the Python side and the frontend plan says so.
+Layout is checked by driving a real headless browser at five widths in both
+colour schemes, which measures the things a screenshot alone will not tell
+you and fails on the two that actually shipped - an input collapsed to one
+character wide, and a face wider than the conversation beside it:
+
+```bash
+uv run python scripts/create_account.py --username shot --password shotpass123
+PROVIDER_MODE=mock SESSION_COOKIE_SECURE=False uv run uvicorn server.main:app --port 8000
+BASE=http://127.0.0.1:8000 npm --prefix web run shots   # writes web/shots/*.png
+```
+
+Judgement about how it *looks* is still a person's job; this only catches
+layout that is broken rather than merely ugly.
 
 ## Protocol
 
