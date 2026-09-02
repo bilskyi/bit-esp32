@@ -15,3 +15,15 @@ voice.db
 .env
 docs/
 RESUME.md
+
+# The frontend's source has to go up - the Dockerfile builds the bundle in the
+# image - but its dependencies and its local build must not. node_modules alone
+# is 115 MB, and "railway up" uploads a directory rather than a commit, so
+# .dockerignore having them is not enough on its own. These two drifted apart
+# when the frontend landed.
+web/node_modules/
+web/dist/
+
+# Scratch from the agent workflow: task briefs, reports and review diffs.
+.superpowers/
+.claude/
