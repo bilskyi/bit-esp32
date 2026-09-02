@@ -56,6 +56,13 @@ for (const scheme of ['light', 'dark']) {
       await page.fill('#login-password', PASS)
       await page.click('form button[type=submit]')
       await page.waitForSelector('.chat-composer', { timeout: 20000 })
+      // Wait for the socket, not just the markup. Without this every shot
+      // catches "Connecting…" with the composer disabled and the face marked
+      // OFFLINE, which looks exactly like a broken deploy and is not one.
+      await page.waitForFunction(() => {
+        const i = document.querySelector('.chat-input')
+        return i && !i.disabled
+      }, { timeout: 30000 })
       await page.waitForFunction(litNow, { timeout: 25000 })
 
       const m = await page.evaluate(() => {
