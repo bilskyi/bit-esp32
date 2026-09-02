@@ -77,6 +77,55 @@ and it should not feel like a generic AI chat wrapper either: the reason this
 exists is that it is *his*, it knows him, and he can see and change how it
 thinks.
 
+## Two decisions the client has made — do not relitigate them
+
+**The front door is a home that greets you.** Opening the app shows the
+assistant as *present and already running*: a greeting that knows the time
+and the person, what it has done since they last spoke, anything waiting, and
+a place to talk right there. Talking is one keystroke away, but the first
+thing on screen is that it exists and has been working. The client picked
+this over opening straight into a transcript and over a command bar. Their
+chosen sketch:
+
+    ┌──────────────────────────────────────────────┐
+    │  Доброго ранку, Саша.          ● на звʼязку  │
+    │                                              │
+    │  Since we last spoke I learned 2 things      │
+    │  about you and answered 6 questions.         │
+    │                                              │
+    │  ┌────────────────────────────────────────┐  │
+    │  │ Ask me anything…                    ▸  │  │
+    │  └────────────────────────────────────────┘  │
+    │                                              │
+    │  KNOWS 47        CONNECTED 3      DEVICES 1  │
+    │  12 documents    calendar, …      desk ● idle│
+    └──────────────────────────────────────────────┘
+
+Treat that as the *idea*, not the layout: a greeting, a status, an immediate
+way to talk, and the ecosystem present as live state rather than as a menu.
+Compose it properly.
+
+**The character is a presence with a cockpit behind it.** The assistant should
+feel like *someone*: warm surfaces, its own voice in the copy, personality
+visible up front. The instrumentation — retrieval scores, the assembled
+prompt, latency, cost — is one deliberate move away and done seriously when
+you get there. Not a cold cockpit throughout (that is what was just
+rejected), and not so ambient that the internals disappear, because those
+internals are the best thing about the product.
+
+## The sections
+
+One navigation, six places. Devices is one of them, not the frame.
+
+| Section | What lives there |
+|---|---|
+| **Talk** | The conversation. Chat and voice. Answers carry "why this answer?". |
+| **Knowledge** | Everything it knows: facts it extracted, standing instructions typed by the owner, and uploaded documents. One place — to the assistant they are all retrieval sources. |
+| **Connections** | MCP servers and integrations. Connect buttons, per-connection configuration. Mostly empty today, and it must look deliberately empty rather than broken. |
+| **Devices** | The desk device today, more later. Each one a personal object: name, state, health, which personality it runs. Plus adding one. |
+| **Personality** | Saved personas, the active one per surface, pinned mood. |
+| **Activity** | Conversations, what was asked, cost against the free tier, latency. |
+
 ## Hard constraints — a direction that breaks one of these is unusable
 
 1. **Cyrillic is mandatory.** Most of the content is Ukrainian and Russian.
