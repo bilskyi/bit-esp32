@@ -174,6 +174,45 @@ export const appSettingsApi = {
   set: (patch: Partial<AppSettings>): Promise<AppSettings> => api.put('/settings/app', patch),
 }
 
+/** One message inside a recorded conversation - server/memory/store.py's
+ * conversation_rows() shape, verbatim. */
+export interface ConversationMessage {
+  role: 'user' | 'assistant'
+  text: string
+  emotion: string | null
+}
+
+/** One recorded conversation, from GET /conversations/{id} (Task 5). Real
+ * since 2 Sep 2026, when recording went on in production - Journal.tsx is
+ * the first screen to read this back rather than only writing it. */
+export interface ConversationRow {
+  id: number
+  surface: Surface
+  role_name: string
+  started_at: string
+  ended_at: string | null
+  turns: number
+  messages: ConversationMessage[]
+}
+
+/** One session's usage, from GET /usage/{id} (Task 5) - server/memory/
+ * store.py's usage_rows(), which has been logging since long before
+ * recording did. Per-session, not per-minute: see Journal.tsx's own
+ * comment on why that rules out a "percent of the free-tier ceiling" bar. */
+export interface UsageRow {
+  turns: number
+  audio_seconds: number
+  prompt_tokens: number
+  completion_tokens: number
+  tts_chars: number
+  created_at: string
+}
+
+export const journalApi = {
+  conversations: (): Promise<ConversationRow[]> => api.get(`/conversations/${DEVICE_ID}`),
+  usage: (): Promise<UsageRow[]> => api.get(`/usage/${DEVICE_ID}`),
+}
+
 export const memoryApi = {
   list: (): Promise<Fact[]> => api.get(`/memory/${DEVICE_ID}`),
   add: (text: string): Promise<{ id: number }> => api.post(`/memory/${DEVICE_ID}`, { text }),

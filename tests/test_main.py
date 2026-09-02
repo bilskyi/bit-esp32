@@ -860,6 +860,42 @@ def test_a_cookie_authorised_socket_does_receive_a_trace_frame():
 
 # --------------------------------------------------- conversations API
 
+def test_getting_conversations_requires_login():
+    with client() as c:
+        assert c.get("/conversations/default").status_code == 401
+
+
+def test_getting_conversations_returns_the_stores_rows():
+    row = {
+        "id": 1, "surface": "web", "role_name": "Coach",
+        "started_at": "2026-09-02T10:00:00+00:00", "ended_at": "2026-09-02T10:05:00+00:00",
+        "turns": 2, "messages": [{"role": "user", "text": "Привіт", "emotion": None}],
+    }
+    with client(store=FakeStore(conversations=[row])) as c:
+        _login(c)
+        r = c.get("/conversations/default")
+    assert r.status_code == 200
+    assert r.json() == [row]
+
+
+def test_getting_usage_requires_login():
+    with client() as c:
+        assert c.get("/usage/default").status_code == 401
+
+
+def test_getting_usage_returns_the_stores_rows():
+    row = {
+        "turns": 3, "audio_seconds": 12.5, "prompt_tokens": 100,
+        "completion_tokens": 40, "tts_chars": 220,
+        "created_at": "2026-09-02T10:00:00+00:00",
+    }
+    with client(store=FakeStore(usage=[row])) as c:
+        _login(c)
+        r = c.get("/usage/default")
+    assert r.status_code == 200
+    assert r.json() == [row]
+
+
 def test_deleting_conversations_requires_login():
     with client() as c:
         assert c.delete("/conversations/default").status_code == 401

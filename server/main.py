@@ -274,10 +274,23 @@ def create_app(
         await app.state.store.forget(device_id)
         return {"status": "ok"}
 
+    @app.get("/conversations/{device_id}", dependencies=[Depends(require_login)])
+    async def list_conversations(device_id: str) -> list[dict]:
+        return await app.state.store.conversation_rows(device_id)
+
     @app.delete("/conversations/{device_id}", dependencies=[Depends(require_login)])
     async def clear_conversations(device_id: str) -> dict:
         await app.state.store.delete_conversations(device_id)
         return {"status": "ok"}
+
+    # Journal (Task 5): the two rows Store has always recorded but no route
+    # ever returned. Login-gated like every other settings/history route in
+    # this file - the device's own bearer token has no business reading back
+    # a transcript of what was said to it, so this deliberately does not use
+    # require_token_or_login the way /memory does.
+    @app.get("/usage/{device_id}", dependencies=[Depends(require_login)])
+    async def list_usage(device_id: str) -> list[dict]:
+        return await app.state.store.usage_rows(device_id)
 
     @app.get("/roles", dependencies=[Depends(require_login)])
     async def list_roles() -> list[dict]:
@@ -429,7 +442,7 @@ def create_app(
     )
     _API_PREFIXES = (
         "login", "logout", "me", "roles", "settings", "memory",
-        "conversations", "healthz", "ws",
+        "conversations", "usage", "healthz", "ws",
     )
     if _DIST.is_dir():
         app.mount("/assets", StaticFiles(directory=_DIST / "assets"), name="assets")

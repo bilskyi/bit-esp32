@@ -5,6 +5,7 @@ import { SessionContext, useSession, useSessionState } from './api'
 import Chat from './Chat.tsx'
 import Connections from './Connections.tsx'
 import Devices from './Devices.tsx'
+import Journal from './Journal.tsx'
 import Knowledge from './Knowledge.tsx'
 import Login from './Login.tsx'
 import Personality from './Personality.tsx'
@@ -79,6 +80,8 @@ function SignedIn() {
         <Connections />
       ) : section === 'dev' ? (
         <Devices turn={turn} notifyUnauthorized={notifyUnauthorized} />
+      ) : section === 'act' ? (
+        <Journal onNavigate={setSection} notifyUnauthorized={notifyUnauthorized} />
       ) : (
         <SectionPlaceholder section={section} />
       )}

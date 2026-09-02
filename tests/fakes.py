@@ -101,6 +101,7 @@ class FakeStore:
     def __init__(
         self, facts: list[str] | None = None, standing: list[str] | None = None,
         store_conversations: bool = True, retention_days: int = 90,
+        conversations: list[dict] | None = None, usage: list[dict] | None = None,
     ) -> None:
         self.facts = {"default": list(facts or [])}
         self.standing = {"default": list(standing or [])}
@@ -114,6 +115,17 @@ class FakeStore:
         self.deleted_conversations_for: list[str] = []
         self._store_conversations = store_conversations
         self._retention_days = retention_days
+        # Seeded rows for the two Task 5 read endpoints - "default" is the
+        # one device_id every test (and the app itself) actually uses, same
+        # convention as self.facts/self.standing above.
+        self._conversations = {"default": list(conversations or [])}
+        self._usage = {"default": list(usage or [])}
+
+    async def conversation_rows(self, device_id: str, limit: int = 50) -> list[dict]:
+        return list(self._conversations.get(device_id, []))[:limit]
+
+    async def usage_rows(self, device_id: str, limit: int = 50) -> list[dict]:
+        return list(self._usage.get(device_id, []))[:limit]
 
     async def app_settings(self) -> dict:
         return {
