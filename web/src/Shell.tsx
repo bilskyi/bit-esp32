@@ -371,7 +371,10 @@ function Shell({ section, onSectionChange, connection, state, children }: ShellP
                 <SectionIcon id={s.id} />
                 <span className="t">{s.label}</span>
                 <span className="slot">
-                  {count !== null && <span className="cnt">{count}</span>}
+                  {/* A zero reads as broken next to a section that simply has nothing
+                  in it yet, and the rule is to omit a count rather than render a
+                  placeholder. Only a real, non-zero figure earns a badge. */}
+              {count ? <span className="cnt">{count}</span> : null}
                   <span className="keys">
                     <span className="kbd">G</span>
                     <span className="kbd">{s.key.toUpperCase()}</span>
