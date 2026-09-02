@@ -72,14 +72,8 @@ h3 { font-size: 13px; font-weight: 500 }
   border: 1px solid var(--border); border-radius: 6px; background: var(--panel);
   color: var(--text-3); font-size: 12px; width: 100%;
 }
-.cmdk:hover, .cmdk:focus-within { background: var(--panel-hover); border-color: var(--border-strong); color: var(--text-2) }
+.cmdk:hover, .cmdk:focus-visible { background: var(--panel-hover); border-color: var(--border-strong); color: var(--text-2) }
 .cmdk svg { width: 13px; height: 13px; flex: none }
-.cmdk input {
-  border: 0; background: none; width: 100%; min-width: 0; height: 100%; padding: 0;
-  font-size: 12px; color: var(--text);
-}
-.cmdk input:focus { outline: none }
-.cmdk input::placeholder { color: var(--text-3) }
 .kbd {
   font-family: var(--f); font-size: 11px; font-weight: 500; line-height: 1; color: var(--text-3);
   border: 1px solid var(--border-strong); border-radius: 3px;
@@ -295,6 +289,19 @@ input[readonly] { font-family: var(--m); font-size: 12px; color: var(--text-2) }
 .home-two > .live { margin-top: 4px }
 .home-two > .live .screen { display: block; padding: 5px }
 .home-two > .live .screen:hover { border-color: var(--accent) }
+/* When there is nothing waiting for review (the common, honest-empty case -
+   a fresh account, or one where every fact already predates nothing), the
+   .note card this grid's grid-row math assumes never renders. Without this,
+   the live screen would stay pinned to row 2, leaving row 1 of its column
+   empty rather than closing the gap. */
+.home-two.no-note > .live { grid-row: 1 }
+/* Face.tsx's own markup (see its header) is reused here as the "live
+   screen" grp's content instead of the mockup's raw <canvas> - a button
+   wrapping it needs the same block-level, edge-to-edge, left-aligned
+   behaviour .row already gives its own buttons, plus the mockup's own
+   hover cue on the screen itself. */
+.home-live { display: block; width: 100%; text-align: left }
+.home-live:hover .face-stage { border-color: var(--accent) }
 .stack { display: flex; flex-direction: column; gap: 16px; min-width: 0 }
 .kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 6px; overflow: hidden }
 .kv > div { background: var(--panel); padding: 6px 10px; min-width: 0 }

@@ -1,10 +1,11 @@
-import { useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import './app.css'
 import { SessionContext, useSession, useSessionState } from './api'
 import Chat from './Chat.tsx'
 import Connections from './Connections.tsx'
 import Devices from './Devices.tsx'
+import Home from './Home.tsx'
 import Journal from './Journal.tsx'
 import Knowledge from './Knowledge.tsx'
 import Login from './Login.tsx'
@@ -21,55 +22,40 @@ function SessionProvider({ children }: { children: ReactNode }) {
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>
 }
 
-const SECTION_LABEL: Record<Section, string> = {
-  home: 'Головна',
-  talk: 'Розмова',
-  know: 'Знання',
-  conn: 'Зʼєднання',
-  dev: 'Пристрої',
-  pers: 'Характер',
-  act: 'Журнал',
-}
-
-/** Task 1 builds the shell only - every section is a placeholder until its
- * own task ports it for real (see the plan's per-task file list). This
- * shows the section's name and says, plainly, that it is not there yet; it
- * never invents content a later task would have to contradict. */
-function SectionPlaceholder({ section }: { section: Section }) {
-  return (
-    <section className="view">
-      <div className="wrap">
-        <div className="head">
-          <div className="hl">
-            <h1>{SECTION_LABEL[section]}</h1>
-            <p className="prose">Я ще переношу цей розділ у новий вигляд.</p>
-          </div>
-        </div>
-      </div>
-    </section>
-  )
-}
-
 // Rendered only once the session is signed in, and torn down the moment it
 // is not. useTurn() is called here - one level above the sections - rather
 // than inside whichever one is showing, so switching sections never drops
 // the socket or the transcript, and signing out actually closes the socket
 // instead of leaving it open against a cookie that no longer exists.
 //
-// Default section is 'talk' rather than 'home' for now: Розмова is the only
-// section this rebuild has actually ported so far (Task 2), and the shots
-// harness (web/tools/shots.mjs) logs in and immediately waits for
-// `.chat-composer` - it would time out against Головна's placeholder, which
-// has no composer until Task 6 gives it one. Task 6 is the right place to
-// move this back to 'home', once landing there also has something real to
-// show.
+// Default section is 'home' - the client's own decision (see Task 6's
+// brief): the app opens on the home that greets you, not straight into a
+// transcript. Task 2 had briefly moved this to 'talk' because Головна had
+// no composer of its own yet to satisfy the shots harness's own wait for
+// one; Task 6 gave it a real one (Home.tsx), so this reverts that.
 function SignedIn() {
-  const [section, setSection] = useState<Section>('talk')
+  const [section, setSection] = useState<Section>('home')
   const turn = useTurn()
   const { notifyUnauthorized } = useSession()
+  // Home.tsx mounts this input; Shell.tsx's ⌘K handler and its own "cmdk"
+  // launcher button have no access to Home's DOM, so App.tsx - the one
+  // place both are reachable from - hands them a way to reach it instead of
+  // either keeping a second, disconnected field of its own (Task 1's own
+  // stand-in) or Home reaching up into Shell.
+  const homeAskInputRef = useRef<HTMLInputElement>(null)
+
+  const focusHomeAsk = useCallback(() => {
+    setSection('home')
+    // Home may not be mounted yet this tick (switching away from another
+    // section unmounts it entirely - see the ternary below), so the ref is
+    // not necessarily attached the instant this runs. A short delay after
+    // the section switch is exactly what the approved mockup's own
+    // focusAsk() does for the same handoff (60ms, after its own show()).
+    setTimeout(() => homeAskInputRef.current?.focus(), 60)
+  }, [])
 
   return (
-    <Shell section={section} onSectionChange={setSection} connection={turn.connection} state={turn.state}>
+    <Shell section={section} onSectionChange={setSection} connection={turn.connection} state={turn.state} onFocusAsk={focusHomeAsk}>
       {section === 'talk' ? (
         <Chat turn={turn} onNavigate={setSection} />
       ) : section === 'know' ? (
@@ -83,7 +69,7 @@ function SignedIn() {
       ) : section === 'act' ? (
         <Journal onNavigate={setSection} notifyUnauthorized={notifyUnauthorized} />
       ) : (
-        <SectionPlaceholder section={section} />
+        <Home turn={turn} onNavigate={setSection} notifyUnauthorized={notifyUnauthorized} askInputRef={homeAskInputRef} />
       )}
     </Shell>
   )

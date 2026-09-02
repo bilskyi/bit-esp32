@@ -12,7 +12,7 @@
 // socket owned above the tabs"), and just passes the two fields down. This
 // file never invents a connection state of its own.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Unauthorized, useSession } from './api'
 import { memoryApi, rolesApi } from './settingsApi'
@@ -241,15 +241,19 @@ interface ShellProps {
   onSectionChange: (section: Section) => void
   connection: Connection
   state: ConversationState
+  /** Switches to Головна and focuses its real ask control - App.tsx owns
+   * both the section state and a ref to that input (Home.tsx is the one
+   * mounting it), so this shell only ever calls through to it rather than
+   * keeping a stand-in field of its own. See App.tsx's focusHomeAsk. */
+  onFocusAsk: () => void
   children: ReactNode
 }
 
-function Shell({ section, onSectionChange, connection, state, children }: ShellProps) {
+function Shell({ section, onSectionChange, connection, state, onFocusAsk, children }: ShellProps) {
   const { username, signOut, notifyUnauthorized } = useSession()
   const [signingOut, setSigningOut] = useState(false)
   const [theme, setTheme] = useState<Theme | null>(readSavedTheme)
   const counts = useCounts(notifyUnauthorized)
-  const askRef = useRef<HTMLInputElement>(null)
 
   // The DOM attribute is the only thing this effect touches - no React
   // state is set here, so there is nothing for react/set-state-in-effect to
@@ -274,13 +278,6 @@ function Shell({ section, onSectionChange, connection, state, children }: ShellP
     }
   }, [dark])
 
-  const focusAsk = useCallback(() => {
-    const el = askRef.current
-    if (!el) return
-    el.focus()
-    el.select()
-  }, [])
-
   // ⌘K focuses the ask field; "g" then one of h/t/k/c/d/p/a switches
   // section - the same two shortcuts the mockup defines, ported as real
   // listeners rather than a command palette (none exists, none is implied).
@@ -290,7 +287,7 @@ function Shell({ section, onSectionChange, connection, state, children }: ShellP
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault()
-        focusAsk()
+        onFocusAsk()
         return
       }
       const tag = (event.target as HTMLElement | null)?.tagName?.toLowerCase()
@@ -319,7 +316,7 @@ function Shell({ section, onSectionChange, connection, state, children }: ShellP
       document.removeEventListener('keydown', onKeyDown)
       clearTimeout(timer)
     }
-  }, [focusAsk, onSectionChange])
+  }, [onFocusAsk, onSectionChange])
 
   const handleSignOut = async () => {
     setSigningOut(true)
@@ -343,19 +340,15 @@ function Shell({ section, onSectionChange, connection, state, children }: ShellP
           </span>
         </div>
 
-        <form className="cmdk" onSubmit={(event) => event.preventDefault()}>
+        {/* A launcher, not a second input - Task 1's own stand-in field
+            lived here only because Головна had no ask control of its own
+            yet. Now that it does (Home.tsx), this matches the mockup's own
+            <button class="cmdk"> exactly: it just gets you there. */}
+        <button type="button" className="cmdk" onClick={onFocusAsk}>
           <SearchIcon />
-          <input
-            ref={askRef}
-            type="text"
-            placeholder="Спитати або знайти"
-            aria-label="Спитати асистента"
-            onKeyDown={(event) => {
-              if (event.key === 'Escape') event.currentTarget.blur()
-            }}
-          />
+          Спитати або знайти
           <span className="kbd">⌘K</span>
-        </form>
+        </button>
 
         <nav className="nav" aria-label="Розділи">
           <p className="lab">Розділи</p>
@@ -365,6 +358,7 @@ function Shell({ section, onSectionChange, connection, state, children }: ShellP
               <button
                 key={s.id}
                 type="button"
+                data-section={s.id}
                 aria-current={section === s.id ? 'page' : undefined}
                 onClick={() => onSectionChange(s.id)}
               >
@@ -456,6 +450,7 @@ function Shell({ section, onSectionChange, connection, state, children }: ShellP
           <button
             key={s.id}
             type="button"
+            data-section={s.id}
             aria-current={section === s.id ? 'page' : undefined}
             onClick={() => onSectionChange(s.id)}
           >
