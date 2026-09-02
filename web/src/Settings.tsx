@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useId, useState } from 'react'
 import { ApiError, Unauthorized, useSession } from './api'
-import Memory from './Memory.tsx'
 import RoleEditor from './RoleEditor.tsx'
 import { appSettingsApi, rolesApi, surfacesApi } from './settingsApi'
 import type { AppSettings, Role, Surface } from './settingsApi'
@@ -14,13 +13,14 @@ function describeError(err: unknown, fallback: string): string {
   return err instanceof ApiError ? err.detail : fallback
 }
 
-/** The Settings tab: which role each surface uses, the role editor, memory,
- * and recording/retention. Everything here follows one rule instead of the
- * usual optimistic-update pattern: every mutation re-reads its section from
- * the server rather than patching local state, because these are small,
- * rare writes and a stale role list (someone else's edit, a role that no
- * longer exists) is exactly how a person ends up editing the wrong thing.
- * Memory.tsx keeps that same rule for its own list, independently. */
+/** The Settings tab: which role each surface uses, the role editor, and
+ * recording/retention. Memory now lives in its own section, Knowledge.tsx
+ * (see the rebuild plan). Everything here still follows one rule instead of
+ * the usual optimistic-update pattern: every mutation re-reads its section
+ * from the server rather than patching local state, because these are
+ * small, rare writes and a stale role list (someone else's edit, a role
+ * that no longer exists) is exactly how a person ends up editing the wrong
+ * thing. */
 function Settings() {
   const { notifyUnauthorized } = useSession()
 
@@ -242,11 +242,6 @@ function Settings() {
             />
           </div>
         )}
-      </section>
-
-      <section className="settings-section">
-        <h2 className="settings-section-title">Memory</h2>
-        <Memory notifyUnauthorized={notifyUnauthorized} />
       </section>
 
       <section className="settings-section">

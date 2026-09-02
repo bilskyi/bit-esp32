@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import './app.css'
 import { SessionContext, useSession, useSessionState } from './api'
 import Chat from './Chat.tsx'
+import Knowledge from './Knowledge.tsx'
 import Login from './Login.tsx'
 import Shell from './Shell.tsx'
 import type { Section } from './Shell.tsx'
@@ -61,10 +62,17 @@ function SectionPlaceholder({ section }: { section: Section }) {
 function SignedIn() {
   const [section, setSection] = useState<Section>('talk')
   const turn = useTurn()
+  const { notifyUnauthorized } = useSession()
 
   return (
     <Shell section={section} onSectionChange={setSection} connection={turn.connection} state={turn.state}>
-      {section === 'talk' ? <Chat turn={turn} onNavigate={setSection} /> : <SectionPlaceholder section={section} />}
+      {section === 'talk' ? (
+        <Chat turn={turn} onNavigate={setSection} />
+      ) : section === 'know' ? (
+        <Knowledge notifyUnauthorized={notifyUnauthorized} />
+      ) : (
+        <SectionPlaceholder section={section} />
+      )}
     </Shell>
   )
 }
