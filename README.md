@@ -46,7 +46,7 @@ For the real pipeline, put a Groq key in `.env` and drop `PROVIDER_MODE`.
 uv run pytest
 ```
 
-398 tests, no network, no hardware, under ten seconds.
+404 tests, no network, no hardware, under ten seconds.
 
 The web app has its own, deliberately narrow suite — 31 tests for logic a
 browser check cannot falsify (the socket hook's cancel accounting, the audio
@@ -56,10 +56,11 @@ resampler, the role patch payload, the face's bit unpacking):
 npm --prefix web test
 ```
 
-Layout is checked by driving a real headless browser at five widths in both
-colour schemes, which measures the things a screenshot alone will not tell
-you and fails on the two that actually shipped - an input collapsed to one
-character wide, and a face wider than the conversation beside it:
+Layout is checked by driving a real headless browser over **both** Головна and
+Розмова at five widths in both colour schemes - twenty combinations - which
+measures the things a screenshot alone will not tell you and fails on the two
+that actually shipped once: an input collapsed to one character wide, and a
+face wider than the conversation beside it:
 
 ```bash
 uv run python scripts/create_account.py --username shot --password shotpass123
@@ -157,6 +158,23 @@ either door:
 `RELEVANT_FACTS_LIMIT` (default 6) caps how many auto facts reach the prompt
 per turn. `EMBEDDING_CACHE_DIR` should point at the same Railway volume the
 database uses, or every redeploy re-downloads the model.
+
+## The web app
+
+Seven sections, one assistant. **Талк** streams a reply a sentence at a time,
+with a per-turn inspector showing which remembered facts were retrieved and at
+what cosine score, plus the exact prompt that was assembled. **Знання** is what
+it knows. **Характер** is its personality — saved personas, one active per
+surface, an optional pinned mood. **Журнал** reads the recorded conversations
+and per-session usage. **Зʼєднання** and **Пристрої** exist and say plainly
+what they cannot do yet.
+
+That last part is deliberate. The design showed twelve indexed documents, a
+connected calendar, and a device reporting free heap and uptime. **None of
+that has a backend**, so none of it is rendered: no file list, no fake
+connection, no invented telemetry. Each section says so in the assistant's own
+voice and says what changes when it exists. A figure appears only if the
+server really returns it.
 
 ## Running the web app
 

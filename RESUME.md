@@ -16,7 +16,52 @@ face" below.
 
 ---
 
-## The playground — DEPLOYED 2 Sep
+## The playground — REBUILT AND DEPLOYED 3 Sep
+
+The UI was rebuilt from scratch in a design the client approved after six
+competing directions. The short history, so nobody re-opens it: three
+device-centric directions were rejected because they made the ESP32 the
+subject rather than the assistant - my brief's own first line caused that.
+Three ecosystem directions followed; the client chose one frame, then said the
+style was still wrong and named Linear/Raycast as the reference. Rebuilt in
+that language, then subtracted after "слишком нагружено": Головна went from 8
+bordered regions to 3 and 90 text elements to 46, with the type scale
+untouched. `docs/design-brief.md` carries the reframed brief and both pinned
+decisions.
+
+**Seven sections**: Головна, Розмова, Знання, Зʼєднання, Пристрої, Характер,
+Журнал. The landing screen is a home that greets you - the client's own
+decision over opening into a transcript or a command bar.
+
+**Two endpoints were added** to make Журнал real: `GET /conversations/{id}`
+and `GET /usage/{id}`, both login-gated. `conversation_rows` and `usage_rows`
+had been recording in production since 2 Sep and were never exposed.
+
+**What is deliberately absent.** Документи, Зʼєднання and a device's health
+have no backend, so nothing about them is rendered - no file list, no fake
+calendar, no invented heap or uptime. Each says so in her voice. The rule that
+outranks fidelity to the design: a figure appears only if the server returns
+it.
+
+**The one piece of real product logic**: Головна's waiting card counts
+auto-extracted facts older than the earliest conversation on record, and
+disappears when none qualify. It was first written against the earliest
+conversation *or usage* row, which could never fire - usage is logged for every
+session including the strangers', so the baseline predated every fact. On the
+real volume it now finds 9. Note it over-counts slightly by intent: the two
+2 Sep facts predate that day's first *recorded* conversation, so they are
+flagged too. The copy says only what it measured - `device_id` is "default"
+for everyone, so the app cannot know whose a fact is.
+
+Verified on production 3 Sep: the device's socket answered with **no trace
+frame** (`state, emotion, state, reply, done`), the layout harness is clean
+across twenty combinations, and Головна shows real figures - 19 questions,
+8,407 tokens, 9 facts and 2 instructions.
+
+Counts: **404 pytest, 35 vitest.** Image built and smoke-tested before deploy.
+Rollback point: deployment `58b8567f`.
+
+## The playground — earlier record, 2 Sep
 
 Live at https://voice-server-production-e023.up.railway.app — sign in as
 `bilskyi`. Deployed with `railway up` (there is no git remote, so uploads are
