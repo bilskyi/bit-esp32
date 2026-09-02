@@ -16,7 +16,57 @@ face" below.
 
 ---
 
-## The playground — backend AND frontend built 1 Sep, NOT deployed
+## The playground — DEPLOYED 2 Sep
+
+Live at https://voice-server-production-e023.up.railway.app — sign in as
+`bilskyi`. Deployed with `railway up` (there is no git remote, so uploads are
+the deploy path) from the two-stage Dockerfile; `builder = "nixpacks"` and the
+`startCommand` are both gone.
+
+Verified against production, not inferred:
+- **The device still works.** Its bearer socket answered a real Groq question
+  and got `state, emotion, state, reply, done` with **no trace frame**. That
+  was the rollback question and the answer was no.
+- The browser socket asked `Як мене звати?` and got `Laaa Тебе звати Саша.` -
+  correct, with the standing instruction applied - plus a trace: role
+  `Web default`, emotion `curious`, 355 prompt tokens, 325 ms.
+- `/` serves the app; `face-frames.json` arrives **gzipped at 38,063 bytes**.
+- The account was created inside the container with
+  `railway ssh --service voice-server "python scripts/create_account.py ..."`,
+  against the volume, then login → `/me` → `/roles` → `/settings/app` all work.
+- `SESSION_SECRET_KEY` set (64 hex chars). `DB_PATH=/data/voice.db` and
+  `EMBEDDING_CACHE_DIR=/data/fastembed_cache` were already correct.
+  `SESSION_COOKIE_SECURE` deliberately unset, so it defaults True on HTTPS.
+- Rollback point if ever needed: deployment `76d4f57d`.
+
+**What the inspector showed on its first real question, worth knowing:** the
+six auto facts it retrieved scored 0.24 down to 0.10 and none of them was the
+name. The answer came from the standing instructions, which are injected in
+full every turn rather than ranked. Ranked retrieval contributed nothing to
+that answer - which is exactly the kind of thing this panel exists to reveal.
+
+### The volume's 10 facts, and an open question about them
+
+    2026-08-27  auto   User prefers communicating in Russian
+    2026-08-27  auto   User also understands and uses Ukrainian
+    2026-08-28  auto   User communicates in Ukrainian and Russian
+    2026-08-28  auto   User appreciates humor and jokes
+    2026-08-28  auto   User speaks Ukrainian and Russian
+    2026-08-28  auto   User is interested in learning programming
+    2026-08-28  auto   User asks for facts about space, elephants, machines, and jungles
+    2026-09-01  user   меня зовут саша
+    2026-09-01  user   user's name is "Sasha"
+    2026-09-01  user   always start speaking with "Laaa"
+
+An earlier note in this file says the seven 27-28 Aug facts arrived from real
+traffic that was "none of them mine". Read now, they do not obviously look
+like a stranger's - they describe someone who speaks Ukrainian and Russian,
+likes jokes and is learning programming. **Nothing has been deleted.** Whether
+they are yours from your own bench testing on those two days, or somebody
+else's, is a question only you can answer, and the memory editor in Settings
+is where to act on it.
+
+## The playground — how it was built (1 Sep)
 
 **There is an app now.** Sign in, ask a question, watch the reply arrive a
 sentence at a time, open an inspector under any answer to see which remembered
