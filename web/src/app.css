@@ -29,7 +29,12 @@
 }
 .login-card > button[type='submit']:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover) }
 .login-card > button[type='submit']:disabled { opacity: .6; cursor: not-allowed }
-.field label, .field legend { display: block; font-size: 11px; letter-spacing: .02em; color: var(--text-3); margin-bottom: 2px; padding: 0 }
+/* :not(.flab) so this plain-label default (login's own .field usage, which
+   never needed a trailing hint) does not outrank .flab's own display:flex
+   below - both are one class deep, and .field label would otherwise win on
+   the extra element selector wherever a later section (Характер, Пристрої)
+   nests a .flab label inside a .field for a label-plus-counter row. */
+.field label:not(.flab), .field legend:not(.flab) { display: block; font-size: 11px; letter-spacing: .02em; color: var(--text-3); margin-bottom: 2px; padding: 0 }
 fieldset.field { border: 0; margin: 0; padding: 0 }
 input:disabled, textarea:disabled, select:disabled { opacity: .6 }
 

@@ -150,7 +150,10 @@ export interface Fact {
 // connects the socket with ("?device=default") and server/main.py defaults
 // to when no `device` query param is given. Memory and conversations are
 // namespaced by device_id on the server, but this project has exactly one.
-const DEVICE_ID = 'default'
+// Exported (additively - every other caller here still uses it privately)
+// so Devices.tsx can show the real id instead of a second copy of the
+// literal.
+export const DEVICE_ID = 'default'
 
 export const rolesApi = {
   list: (): Promise<Role[]> => api.get('/roles'),
