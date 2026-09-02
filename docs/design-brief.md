@@ -13,64 +13,69 @@ mood board. The client has already rejected the current design in these words:
 **side navigation** and something **more modern**. Take that seriously: the
 brief is not "tidy up", it is "give this a point of view".
 
-## What the product actually is
+## What the product actually is — read this twice
 
-A voice companion. A physical ESP32-C3 device sits on a desk: a microphone, a
-speaker, a button, and a **128×64 one-bit OLED showing a pair of animated
-eyes** — its face. You hold the button, speak, and it answers aloud in
-Ukrainian, Russian or English, streaming each sentence as soon as it is ready
-because latency is the whole engineering argument of the project. It remembers
-durable facts about its owner in a database and ranks them by embedding
-similarity to whatever you just asked.
+**This is one person's personal assistant.** Not a dashboard for a gadget.
+The owner calls it his JARVIS and means it: a single assistant he talks to
+from wherever he is, that knows him, remembers what he has told it, can read
+documents he gives it, can reach into services he has connected, and speaks
+through whatever hardware happens to be nearby.
 
-This web app is the **playground** for that device: where you talk to the same
-assistant by typing, watch what it is doing internally, and configure its
-personality. The app and the device are deliberately *one assistant* sharing
-one memory — not two products.
+**An earlier version of this brief got this wrong and produced three rejected
+designs.** It said "this web app is the playground for that device", so all
+three made a 128×64 OLED the hero of the page and the assistant a feature of
+it. The correction, in the client's words: *"this should be a full ecosystem
+for everything, not just the ESP32. Yes, I must be able to add devices and
+configure that, but first and foremost this is my personal JARVIS."*
 
-The audience is exactly one person: the engineer who built the device. They
-are technical, they read numbers, and they want to see the machine working.
-This is an instrument, not a consumer chat app — but it should feel like a
-well-made instrument, not a debug dump.
+So: **the assistant is the subject. Devices are a managed resource** — one
+section among several, the way a phone's Bluetooth screen is a section and
+not the phone's identity.
 
-## The screens, and the real content in them
+### The assistant
 
-**1. Sign in.** One account. Username, password, one generic failure line
-(the server deliberately does not say which field was wrong).
+It has a personality you can edit and switch (several saved personas, one
+active per surface, an optional pinned mood). It answers in Ukrainian,
+Russian or English, detecting which you used. It remembers durable facts
+about you and retrieves them by embedding similarity, and it shows its work:
+which facts it reached for, how strongly, and the exact prompt it assembled.
+Answers stream a sentence at a time.
 
-**2. Chat** — the main surface.
-- A transcript of turns. A question from the person, then the assistant's
-  reply. Replies arrive **one sentence at a time**, visibly. Text is usually
-  Ukrainian or Russian, sometimes English, 1–6 sentences.
-- **The device's face**, live: the same pixel eyes the OLED shows, driven by
-  the connection state (`idle` / `listening` / `thinking` / `speaking`) and by
-  an emotion the model tags every reply with (one of nine: neutral, happy,
-  excited, curious, confused, surprised, sad, annoyed, sleepy).
-- **An inspector under every answer** — the reason this app exists. Collapsed,
-  it is one line of figures: `emotion happy · 335 ms reply · 330 tok in ·
-  6 facts`. Expanded it shows:
-  - the **retrieved facts with their cosine similarity scores**, best first,
-    e.g. `Саша — 0.2410`, `Uses a mock LLM for local testing — 0.9227`. The
-    *gap* between scores is the informative thing.
-  - the **fully assembled system prompt** actually sent to the model —
-    typically 300–500 words of rules plus remembered facts. Long by design.
-  - the rest: role name, surface, tokens in and out, speech-to-text
-    milliseconds when the question was spoken.
-- A composer: a text box, a **press-and-hold "speak" control** mirroring the
-  device's own button, and send.
+### What it reaches into — most of this is not built yet, and the design must
+### leave room for it rather than bolt it on later
 
-**3. Settings.**
-- **Roles.** The assistant's personality as editable records. Each has a name,
-  a persona prompt (up to 2000 chars), a max-sentence count, whether markdown
-  is allowed, which of three languages it may use, and an optional **pinned
-  mood** from those same nine. Two roles are built in and cannot be renamed or
-  deleted. Each of the two surfaces — the device, and this browser — points at
-  one role, so they can differ.
-- **Memory.** A list of what the assistant remembers. Each row: the text, a
-  tag saying whether the assistant extracted it itself or the person typed it
-  as a standing instruction, and the date it arrived. Rows can be deleted.
-  Two destructive actions behind typed confirmation.
-- **Recording.** Whether conversations are stored, and for how many days.
+- **Memory** — facts it extracted from conversations, plus standing
+  instructions the owner typed. Exists today.
+- **Documents** — the owner wants to hand it PDFs, notes, exported chats
+  with friends, and have it answer from them. Real retrieval over uploaded
+  material. Not built.
+- **Connections** — MCP servers and integrations, added by the owner with a
+  connect button and configured per connection: a calendar it can schedule
+  into, whatever else he wires up. Not built. This is the largest missing
+  piece and the design must have an honest home for it.
+- **Devices** — today one ESP32-C3 with a mic, speaker, button and a 128×64
+  one-bit OLED showing animated eyes; the owner wants to add more and
+  configure each. A device has a name, a state, health, an assigned
+  personality, and its own screen. Not a fleet console — a small number of
+  personal objects.
+- **Activity** — who has been talking to it, what was asked, cost against a
+  free-tier budget, latency. Conversations are recorded; nothing charts them
+  yet.
+
+### The surfaces
+
+The same assistant, one memory, several ways in: this web app on a laptop and
+a phone, and the desk device by voice. A person switching between them is
+continuing one conversation with one assistant, not using two products.
+
+## What the front door should feel like
+
+Opening this app should feel like arriving at *your assistant* — able to talk
+to it immediately — with everything it can do and everything it knows one
+move away. It should not feel like a settings screen for a microcontroller,
+and it should not feel like a generic AI chat wrapper either: the reason this
+exists is that it is *his*, it knows him, and he can see and change how it
+thinks.
 
 ## Hard constraints — a direction that breaks one of these is unusable
 
