@@ -902,6 +902,74 @@ static void test_zero_progress_restores_the_ordinary_face(void) {
           "cancel did not restore the face");
 }
 
+// ---------------------------------------------------------------- resting
+
+// The face lets go of the last thing it felt after 45 seconds. What it lets
+// go *into* is a setting now, not a constant.
+//
+// init_ready, not face_init: the power-on sequence owns face_tick until it
+// hands over (see boot_through above), so a face still booting never reaches
+// the idle-decay ladder at all - every one of these would compare two frames
+// of the same boot animation and find them equal no matter what resting was
+// set to.
+static void test_the_resting_expression_is_what_idle_decays_to(void) {
+    face_t f;
+    init_ready(&f, 0);
+    face_set_resting(&f, FACE_EMO_HAPPY);
+    face_set_state(&f, FACE_ST_IDLE, 0);
+    face_set_emotion(&f, FACE_EMO_ANNOYED, 1000);
+
+    face_tick(&f, 50000);   // past the 45 s decay, short of the 90 s sleepy
+    uint8_t happy[FACE_FB_BYTES];
+    memcpy(happy, face_framebuffer(&f), FACE_FB_BYTES);
+
+    face_t g;
+    init_ready(&g, 0);
+    face_set_resting(&g, FACE_EMO_NEUTRAL);
+    face_set_state(&g, FACE_ST_IDLE, 0);
+    face_set_emotion(&g, FACE_EMO_ANNOYED, 1000);
+    face_tick(&g, 50000);
+
+    CHECK(memcmp(happy, face_framebuffer(&g), FACE_FB_BYTES) != 0,
+          "resting on happy and resting on neutral render the same");
+}
+
+static void test_a_fresh_face_rests_neutral(void) {
+    face_t f;
+    init_ready(&f, 0);
+    face_set_state(&f, FACE_ST_IDLE, 0);
+    face_tick(&f, 50000);
+    uint8_t untold[FACE_FB_BYTES];
+    memcpy(untold, face_framebuffer(&f), FACE_FB_BYTES);
+
+    face_t g;
+    init_ready(&g, 0);
+    face_set_resting(&g, FACE_EMO_NEUTRAL);
+    face_set_state(&g, FACE_ST_IDLE, 0);
+    face_tick(&g, 50000);
+
+    CHECK(memcmp(untold, face_framebuffer(&g), FACE_FB_BYTES) == 0,
+          "a face nobody configured does not rest neutral");
+}
+
+static void test_an_out_of_range_resting_emotion_is_ignored(void) {
+    face_t f;
+    init_ready(&f, 0);
+    face_set_resting(&f, (face_emotion_t)99);
+    face_set_state(&f, FACE_ST_IDLE, 0);
+    face_tick(&f, 50000);
+    uint8_t got[FACE_FB_BYTES];
+    memcpy(got, face_framebuffer(&f), FACE_FB_BYTES);
+
+    face_t g;
+    init_ready(&g, 0);
+    face_set_state(&g, FACE_ST_IDLE, 0);
+    face_tick(&g, 50000);
+
+    CHECK(memcmp(got, face_framebuffer(&g), FACE_FB_BYTES) == 0,
+          "nonsense from NVS changed the resting face");
+}
+
 // -------------------------------------------------------------------- main
 
 int main(void) {
@@ -932,6 +1000,9 @@ int main(void) {
         {"the reset countdown looks nothing like listening", test_the_reset_countdown_looks_nothing_like_listening},
         {"the countdown is monotonic", test_the_countdown_is_monotonic},
         {"zero progress restores the ordinary face", test_zero_progress_restores_the_ordinary_face},
+        {"the resting expression is what idle decays to", test_the_resting_expression_is_what_idle_decays_to},
+        {"a fresh face rests neutral", test_a_fresh_face_rests_neutral},
+        {"an out-of-range resting emotion is ignored", test_an_out_of_range_resting_emotion_is_ignored},
     };
 
     for (size_t i = 0; i < sizeof(tests) / sizeof(tests[0]); i++) {

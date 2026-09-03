@@ -92,6 +92,7 @@ typedef struct {
     // -- what the owner told us
     face_state_t state;
     face_emotion_t emotion;
+    face_emotion_t resting;   // what idle decays to, FACE_EMO_NEUTRAL unless told
     bool button;
     uint8_t reset_pct;   // 0-100, how far through the hold-to-reset gesture
 
@@ -166,6 +167,11 @@ void face_feed_energy(face_t *f, uint16_t rms);
 // not counting, and setting zero must leave no trace - releasing the button
 // cancels and nothing was lost.
 void face_set_reset_progress(face_t *f, uint8_t percent, uint32_t now_ms);
+
+// Which pose the face relaxes into when a conversation is over, and what it
+// wakes up as. Set from the device's settings; out of range is ignored, so a
+// corrupt byte in NVS cannot leave the face rendering nothing.
+void face_set_resting(face_t *f, face_emotion_t e);
 
 // Advance the animation to now_ms and render into f->fb. Call at ~25 fps.
 void face_tick(face_t *f, uint32_t now_ms);
