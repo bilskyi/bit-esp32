@@ -58,7 +58,11 @@ typedef struct {
 
     // -- private
     bool a_was, b_was;
-    bool a_used, b_used;  // this press already fired as a hold
+    bool a_used, b_used;  // this press is finished - it may do nothing more
+    // this press predates an open flip: its clock was restarted so it can
+    // still finish an honest hold, but it carries no record of time spent
+    // under the old meaning, so it must not be allowed to look like a tap
+    bool a_no_tap, b_no_tap;
     uint32_t a_at, b_at;
     uint32_t last_input;
 } settings_t;

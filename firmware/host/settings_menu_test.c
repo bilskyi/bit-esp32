@@ -336,6 +336,45 @@ static void test_a_partway_press_does_not_borrow_pre_flip_time(void) {
     CHECK(!s.open, "A never closed the menu after a full exit-hold measured from the flip");
 }
 
+// set_open()'s restart lets a press that predates the flip still finish an
+// honest hold - but the release path's tap check reads that same restarted
+// clock, with no memory of how long the button was down before the flip.
+// A press held for about half a second while the menu was closed and
+// released shortly after B's hold opens it must not read as a deliberate
+// quick tap.
+static void test_a_press_that_predates_an_opening_flip_does_not_tap(void) {
+    settings_t s = fresh();
+    uint32_t t = run(&s, false, true, SETTINGS_OPEN_MS - 500, 1000);  // B most of the way there
+    CHECK(!s.open, "setup failed: the menu opened before A joined");
+
+    t = run(&s, true, true, 40, t);  // A presses down here, roughly 500 ms before the flip
+    CHECK(!s.open, "setup failed: the menu opened as soon as A joined");
+
+    uint32_t flip_at = 0;
+    for (int i = 0; i < 60 && !s.open; i++) {
+        t += 40;
+        settings_tick(&s, true, true, t);
+        if (s.open) flip_at = t;
+    }
+    CHECK(flip_at != 0, "setup failed: B's hold never opened the menu");
+
+    const uint8_t page_before = s.page;
+    const uint8_t vol_before = s.step[SETTINGS_PAGE_VOLUME];
+
+    t = run(&s, false, false, 120, t);  // release A well inside the tap window
+    CHECK(s.page == page_before,
+          "a press that predates the flip advanced the page to %u", s.page);
+    CHECK(s.step[SETTINGS_PAGE_VOLUME] == vol_before,
+          "a press that predates the flip changed a value");
+
+    // The bar is on this press, not on A itself: a clean press afterward
+    // must tap normally.
+    t = run(&s, true, false, 120, t);
+    run(&s, false, false, 120, t);
+    CHECK(s.page == (uint8_t)((page_before + 1) % SETTINGS_PAGES),
+          "A stopped tapping after one press was barred from tapping");
+}
+
 static void test_the_gain_table_is_monotonic_and_ends_exactly(void) {
     CHECK(settings_volume_gain(0) == 0, "step 0 is not silent: %d",
           (int)settings_volume_gain(0));
@@ -429,6 +468,7 @@ int main(void) {
     test_opening_while_push_to_talk_is_held_stays_open();
     test_a_fresh_press_at_the_flip_is_honoured();
     test_a_partway_press_does_not_borrow_pre_flip_time();
+    test_a_press_that_predates_an_opening_flip_does_not_tap();
     test_the_gain_table_is_monotonic_and_ends_exactly();
     test_the_contrast_table_is_monotonic_and_tops_out_where_init_does();
     test_every_label_is_short_ascii_and_distinct();

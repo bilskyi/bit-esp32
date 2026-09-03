@@ -108,30 +108,42 @@ static void bump_value(settings_t *s) {
     }
 }
 
-// The only place s->open is assigned. hold_target() depends on it, so the
-// instant it changes, every button currently down is holding time that was
-// measured against a target that no longer applies - one that only just
-// became applicable.
+// The only place s->open is assigned - other than settings_init()'s
+// memset(), which is construction zeroing a struct, not a way in or out of
+// the menu, so it is not a bypass of this rule even though it also touches
+// the field. hold_target() depends on s->open, so the instant it changes,
+// every button currently down is holding time that was measured against a
+// target that no longer applies - one that only just became applicable.
 //
 // A held duration that already meets or exceeds the newly applicable target
-// is demonstrably stale: that press is spent, exactly as if it had just
-// fired a gesture of its own, and does nothing more until it is released
-// and pressed again. A held duration that falls short has earned nothing
-// under the new meaning - rather than let it sit at partial credit (which
-// would let it borrow time from before the flip and fire a shorter gesture
-// than the one actually running under the new meaning), its clock restarts
-// from this instant, so the gesture it is now part of begins honestly, at
-// the moment the new meaning began. A newly applicable target of 0 can
-// never be met, so it always restarts - harmless, and it keeps this branch
-// simple rather than adding a case for "can't fire anyway."
+// is demonstrably stale: that press is spent (a_used/b_used), exactly as if
+// it had just fired a gesture of its own, and does nothing more until it is
+// released and pressed again. A held duration that falls short has earned
+// nothing under the new meaning - rather than let it sit at partial credit
+// (which would let it borrow time from before the flip and fire a shorter
+// gesture than the one actually running under the new meaning), its clock
+// restarts from this instant, so the gesture it is now part of begins
+// honestly, at the moment the new meaning began. A newly applicable target
+// of 0 can never be met, so it always restarts - harmless, and it keeps
+// this branch simple rather than adding a case for "can't fire anyway."
+//
+// A restarted press may still finish a hold - that is the point of
+// restarting it - but it must never complete as a tap: the release path's
+// tap check only sees the restarted clock, with no memory of time spent
+// under the old meaning, so a press held for half a second before the menu
+// existed and released shortly after it opens would otherwise look exactly
+// like a deliberate quick tap. a_no_tap/b_no_tap record that distinction
+// (used forbids everything; no_tap forbids only a tap) and are cleared on
+// the next press, alongside used, so this bars exactly the remainder of the
+// physical press that carried it - not the button.
 //
 // This is what keeps an exit-hold's close from being undone in the same
 // tick by a neighbour's stale rest, and an open-hold's open from being
 // undone on the next tick by push-to-talk's stale hold - without also
-// discarding a press that has barely started or started on the very tick
-// of the flip. A fourth way in or out of the menu must come through here to
-// inherit the rule rather than reimplement it - s->open must not be
-// assigned anywhere else in this file.
+// discarding a press that has barely started, started on the very tick of
+// the flip, or predates the flip and is released just after it. A fourth
+// way in or out of the menu must come through here to inherit the rule
+// rather than reimplement it.
 static void set_open(settings_t *s, bool new_open, bool a_down, bool b_down, uint32_t now_ms) {
     if (s->open == new_open) return;
     s->open = new_open;
@@ -142,6 +154,7 @@ static void set_open(settings_t *s, bool new_open, bool a_down, bool b_down, uin
             s->a_used = true;
         } else {
             s->a_at = now_ms;
+            s->a_no_tap = true;
         }
     }
     if (b_down && !s->b_used) {
@@ -150,6 +163,7 @@ static void set_open(settings_t *s, bool new_open, bool a_down, bool b_down, uin
             s->b_used = true;
         } else {
             s->b_at = now_ms;
+            s->b_no_tap = true;
         }
     }
 }
@@ -166,6 +180,7 @@ bool settings_tick(settings_t *s, bool a_down, bool b_down, uint32_t now_ms) {
     const bool edges[2] = {a_down, b_down};
     bool *was[2] = {&s->a_was, &s->b_was};
     bool *used[2] = {&s->a_used, &s->b_used};
+    bool *no_tap[2] = {&s->a_no_tap, &s->b_no_tap};
     uint32_t *at[2] = {&s->a_at, &s->b_at};
 
     for (int i = 0; i < 2; i++) {
@@ -175,6 +190,7 @@ bool settings_tick(settings_t *s, bool a_down, bool b_down, uint32_t now_ms) {
         if (edges[i] && !*was[i]) {  // press
             *at[i] = now_ms;
             *used[i] = false;
+            *no_tap[i] = false;
             s->last_input = now_ms;
         } else if (edges[i] && *was[i]) {  // still held
             const uint32_t held = now_ms - *at[i];
@@ -192,7 +208,7 @@ bool settings_tick(settings_t *s, bool a_down, bool b_down, uint32_t now_ms) {
             }
         } else if (!edges[i] && *was[i]) {  // release
             const uint32_t held = now_ms - *at[i];
-            if (!*used[i] && s->open && was_a_tap(held, target)) {
+            if (!*used[i] && !*no_tap[i] && s->open && was_a_tap(held, target)) {
                 if (is_a) {
                     s->page = (uint8_t)((s->page + 1) % SETTINGS_PAGES);
                 } else {
