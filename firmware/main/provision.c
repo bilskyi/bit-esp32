@@ -55,12 +55,37 @@ static const char PAGE_HEAD[] =
     "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
     "<title>Voice setup</title>\n"
     "<style>\n"
-    "body{font-family:sans-serif;max-width:26em;margin:2em auto;padding:0 1em}\n"
-    "fieldset{margin-bottom:1em}\n"
-    "label{display:block;margin:0.6em 0}\n"
-    "input[type=text],input[type=password]{width:100%;box-sizing:border-box}\n"
+    ":root{color-scheme:light dark}\n"
+    "body{font-family:-apple-system,BlinkMacSystemFont,\"Segoe UI\",Roboto,sans-serif;"
+    "max-width:26em;margin:0 auto;padding:2em 1.25em;background:#f4f5f7;color:#1c1e21}\n"
+    "h1{font-size:1.35em;margin:0 0 .2em}\n"
+    ".sub{color:#6b7280;margin:0 0 1.5em;font-size:.92em}\n"
+    "fieldset{border:1px solid #e2e4e8;border-radius:12px;margin:0 0 1.25em;"
+    "padding:.9em 1.1em 1.15em;background:#fff}\n"
+    "legend{font-weight:600;padding:0 .4em;color:#374151}\n"
+    "label{display:block;margin:.9em 0}\n"
+    ".net{border:1px solid #e2e4e8;border-radius:8px;padding:.7em .8em;margin:.5em 0}\n"
+    ".net input{accent-color:#2563eb;margin-right:.5em}\n"
+    ".rssi{float:right;color:#9ca3af;font-size:.85em}\n"
+    ".hint,.notice{color:#6b7280;font-size:.88em}\n"
+    "input[type=text],input[type=password]{width:100%;box-sizing:border-box;"
+    "padding:.55em .6em;border:1px solid #d1d5db;border-radius:8px;"
+    "font-size:1em;margin-top:.35em}\n"
+    "button{width:100%;padding:.75em;border:0;border-radius:8px;"
+    "background:#2563eb;color:#fff;font-size:1.05em;font-weight:600}\n"
+    "button:active{background:#1d4ed8}\n"
+    "a{color:#2563eb}\n"
+    "@media (prefers-color-scheme:dark){\n"
+    "body{background:#161718;color:#e5e7eb}\n"
+    "fieldset{background:#1f2023;border-color:#2b2d31}\n"
+    "legend{color:#c7cbd1}\n"
+    ".net{border-color:#2b2d31}\n"
+    "input[type=text],input[type=password]{background:#161718;color:#e5e7eb;"
+    "border-color:#3a3d42}\n"
+    "}\n"
     "</style></head><body>\n"
     "<h1>Voice setup</h1>\n"
+    "<p class=\"sub\">Pick your network, add the password, save.</p>\n"
     "<form method=\"POST\" action=\"/save\">\n"
     "<fieldset><legend>Network</legend>\n";
 
@@ -76,13 +101,14 @@ static const char PAGE_HEAD[] =
 // Nothing else is happening at that moment, and a page that takes a moment to
 // arrive complete beats one that arrives instantly and empty.
 static const char PAGE_AFTER_LIST[] =
-    "<p>Only 2.4&nbsp;GHz networks appear here - this device has no "
-    "5&nbsp;GHz radio.</p>\n"
-    "<p><a href=\"/\">Scan again</a></p>\n"
+    "<p class=\"hint\">Only 2.4&nbsp;GHz networks appear here - this device "
+    "has no 5&nbsp;GHz radio. <a href=\"/\">Scan again</a></p>\n"
     "</fieldset>\n"
-    "<label>Password<br>\n"
+    "<fieldset><legend>Password</legend>\n"
+    "<label>\n"
     "<input type=\"password\" name=\"pass\" maxlength=\"" STR(PL_PASS_MAX) "\">\n"
     "</label>\n"
+    "</fieldset>\n"
     "<fieldset><legend>Server</legend>\n"
     "<label>Server URI<br>\n"
     "<input type=\"text\" name=\"uri\" maxlength=\"" STR(PL_URI_MAX) "\" disabled value=\"";
@@ -97,8 +123,8 @@ static const char PAGE_TAIL[] =
     "</fieldset>\n"
     "<button type=\"submit\">Save</button>\n"
     "</form>\n"
-    "<p>If this page stops responding, the device's own screen has the "
-    "answer.</p>\n"
+    "<p class=\"notice\">If this page stops responding, the device's own "
+    "screen has the answer.</p>\n"
     "</body></html>\n";
 
 // Escapes into dst, stopping cleanly rather than emitting a partial entity
@@ -497,30 +523,37 @@ static void send_network_list(httpd_req_t *req) {
 
     switch (scan_networks(recs, &n)) {
         case SCAN_BUSY:
-            httpd_resp_sendstr_chunk(req, "<p>Busy trying the last network. Reload in a moment.</p>\n");
+            httpd_resp_sendstr_chunk(req, "<p class=\"notice\">Busy trying the last network. Reload in a moment.</p>\n");
             return;
         case SCAN_FAILED:
-            httpd_resp_sendstr_chunk(req, "<p>The scan failed. Reload to try again.</p>\n");
+            httpd_resp_sendstr_chunk(req, "<p class=\"notice\">The scan failed. Reload to try again.</p>\n");
             return;
         case SCAN_OK:
             break;
     }
 
     if (n == 0) {
-        httpd_resp_sendstr_chunk(req, "<p>No networks in range.</p>\n");
+        httpd_resp_sendstr_chunk(req, "<p class=\"notice\">No networks in range.</p>\n");
         return;
     }
 
     char esc[PL_SSID_MAX * 6 + 1];
-    char rssi[16];
+    // <span class="rssi"> (20) + "-128" (4) + " dBm" (4) + </span> (7) + '\0'
+    // (1) = 36. Was 16, sized for the old " (%d dBm)" text this replaced;
+    // snprintf()'s return value is the full length it would have written,
+    // and httpd_resp_send_chunk() below sends exactly that many bytes out of
+    // rssi[] regardless of how much of it actually fit - too small here
+    // means an out-of-bounds read, the same class of bug the sanitizer build
+    // exists to catch.
+    char rssi[40];
     for (uint16_t i = 0; i < n; i++) {
         // ssid[33] is null-terminated by the driver even at the full 32 bytes.
         html_escape((const char *)recs[i].ssid, esc, sizeof(esc));
-        httpd_resp_sendstr_chunk(req, "<label><input type=\"radio\" name=\"ssid\" value=\"");
+        httpd_resp_sendstr_chunk(req, "<label class=\"net\"><input type=\"radio\" name=\"ssid\" value=\"");
         httpd_resp_sendstr_chunk(req, esc);
-        httpd_resp_sendstr_chunk(req, "\" required> ");
+        httpd_resp_sendstr_chunk(req, "\" required>");
         httpd_resp_sendstr_chunk(req, esc);
-        const int len = snprintf(rssi, sizeof(rssi), " (%d dBm)", (int)recs[i].rssi);
+        const int len = snprintf(rssi, sizeof(rssi), "<span class=\"rssi\">%d dBm</span>", (int)recs[i].rssi);
         httpd_resp_send_chunk(req, rssi, len);
         httpd_resp_sendstr_chunk(req, "</label>\n");
     }
@@ -862,7 +895,13 @@ esp_err_t provision_start(void) {
     strncpy((char *)ap.ap.ssid, ap_name, sizeof(ap.ap.ssid) - 1);
     ap.ap.ssid_len = strlen(ap_name);
     ap.ap.channel = 1;
-    ap.ap.max_connection = 2;
+    // 4, not 2: an open network with no captive-portal auth draws more than
+    // just the phone it is meant for - some phones and most "connect to open
+    // WiFi automatically" settings will join anything unlocked in range
+    // without asking anyone. Two slots meant one such guest was enough to
+    // shut the real user out; four is still nothing this device's memory
+    // notices during provisioning, when neither audio nor TLS is running.
+    ap.ap.max_connection = 4;
     ap.ap.authmode = WIFI_AUTH_OPEN;
 
     // 7. APSTA throughout, and esp_wifi_connect() is deliberately not

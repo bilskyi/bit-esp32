@@ -190,14 +190,15 @@ static volatile bool s_abort_playback = false;
 // question. Whether sound is coming out is a fact; what the state machine
 // believes is an opinion.
 static volatile bool s_playing = false;
-// Set when a reply is cancelled, cleared by the "done" that closes it.
+// Set when a reply is cancelled, cleared by the "speaking" that opens the next
+// one - not by the cancelled reply's own "done", which arrives too late to be
+// a boundary. See the handler for why.
 //
 // Resetting the play buffer only discards what has already arrived. The server
 // runs up to playback_lead_s ahead of real time - four seconds - so the rest of
 // a cancelled reply is still in flight, and without this it lands in the buffer
 // a moment later, the amp comes back on, and the device carries on talking
-// after being told to stop. The server sends "done" at the end of every reply
-// including a cancelled one, so it is exactly the right boundary.
+// after being told to stop.
 static volatile bool s_discard_audio = false;
 static volatile uint32_t s_discarded_bytes = 0;
 // When the socket last went away, for the reconnect supervisor.
@@ -453,7 +454,21 @@ static inline void amp_enable(bool on) { gpio_set_level(PIN_MUTE, on ? 1 : 0); }
 
 static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
+        // provision_start() brings the station interface up too - Task 5's
+        // scan and trial need it - and says so explicitly: "esp_wifi_connect()
+        // is deliberately not called" there. This handler used to ignore that
+        // and connect anyway, because WIFI_EVENT_STA_START does not say who
+        // asked for the station to start. The result was the station
+        // hammering the old, now-unreachable network in the background for
+        // the entire time the access point was up - on the same radio that
+        // was supposed to be free for esp_wifi_scan_start() and for the AP's
+        // own beacons. That is what made /scan intermittently report "busy"
+        // (ESP_ERR_WIFI_STATE, ready to try the last network in the middle
+        // of a scan) and what most likely explains a captive-portal page that
+        // sometimes loads and sometimes times out.
+        if (!provision_is_active()) {
+            esp_wifi_connect();
+        }
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED_BIT);
         const wifi_event_sta_disconnected_t *d = (const wifi_event_sta_disconnected_t *)data;
@@ -464,6 +479,11 @@ static void wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
             // the value of trialling before saving.
             s_trial_reason = d->reason;
             xEventGroupSetBits(s_wifi_events, WIFI_TRIAL_DONE_BIT);
+            return;
+        }
+        if (provision_is_active()) {
+            // Same reasoning as WIFI_EVENT_STA_START above: nothing here
+            // should be trying to rejoin the old network while setup is up.
             return;
         }
         ESP_LOGW(TAG, "wifi dropped, reconnecting (reason %d)", (int)d->reason);
@@ -1222,13 +1242,35 @@ static void audio_out_task(void *arg) {
                          (unsigned long)s_play_dropped);
             }
         } else if (s_reply_finished) {
-            // The reply finished without producing a single byte of audio -
-            // a TTS failure, most often. Nothing was playing, so the branch
-            // above never runs, and without this the device would sit in
-            // THINKING forever and silently ignore every button press.
+            // A "done" with nothing playing. Which reply it closes decides
+            // whether this is a rescue or a fault, and the flag does not say.
+            //
+            // The rescue: a reply finished without producing a single byte of
+            // audio - a TTS failure, most often. Nothing was playing, so the
+            // branch above never runs, and without this the device would sit
+            // in THINKING forever and silently ignore every button press.
+            //
+            // The fault: the device is not in a reply at all, so the "done"
+            // closes one that is already over - the reply the user just
+            // interrupted, or an utterance the server declined to answer. The
+            // server sends "done" for those too, and it lands *after* the mic
+            // has started on the next question: measured at 0.3 s twice and
+            // 7 s twice. Forcing ST_IDLE then takes the state out from under
+            // ST_LISTENING, and "end" is only ever sent from ST_LISTENING - so
+            // the question is recorded, the release sends nothing, and the
+            // server waits its full sixty seconds while the user hears
+            // nothing at all. That is what the 28 Aug log caught: a start
+            // accepted 0.19 s after a cancel, 0.22 s of audio, no "end".
+            //
+            // Clear it either way. Leaving a stale flag raised only moves the
+            // damage to the moment the device next reaches THINKING.
             s_reply_finished = false;
-            s_state = ST_IDLE;
-            ESP_LOGW(TAG, "idle (reply produced no audio)");
+            if (s_state == ST_THINKING || s_state == ST_SPEAKING) {
+                s_state = ST_IDLE;
+                ESP_LOGW(TAG, "idle (reply produced no audio)");
+            } else {
+                ESP_LOGI(TAG, "stale done ignored in state %d", (int)s_state);
+            }
         }
     }
 }
@@ -1302,6 +1344,37 @@ static uint8_t tap_count(tap_counter_t *c, bool down, TickType_t now) {
     }
     c->was_down = down;
     return c->taps;
+}
+
+// Watches for the same five-tap gesture while wifi_connect() below is still
+// blocked waiting for a network. net_task is where the gesture normally
+// lives, but it is not created until wifi_connect() returns - so a device
+// that cannot reach its saved network had no way out at all: the wait has
+// no timeout by design, and nothing was listening for the one thing that
+// was supposed to end it early. That is the bug behind "it just sits there
+// with its eyes shut and won't go into setup."
+//
+// Scoped tightly: created just before wifi_connect(), deleted right after it
+// returns. It does not set WIFI_PROVISION_BIT and rely on wifi_connect()
+// waking up on its own - esp_restart() below makes that moot, and racing
+// app_main's wake-up against this task's own restart would risk falling
+// through to ws_start() with no network for one extra boot cycle before the
+// NVS request took effect. A clean reboot sidesteps that race rather than
+// handling it.
+static void boot_gesture_task(void *arg) {
+    tap_counter_t taps = {0};
+    while (true) {
+        const TickType_t now = xTaskGetTickCount();
+        const uint8_t n = tap_count(&taps, s_button_down, now);
+        s_face_reset_pct = (n >= RESET_TAPS_VISIBLE) ? (uint8_t)((n * 100u) / RESET_TAPS) : 0;
+        if (n >= RESET_TAPS) {
+            ESP_LOGW(TAG, "five taps while stuck connecting; restarting into provisioning");
+            config_request_provisioning();
+            vTaskDelay(pdMS_TO_TICKS(100));  // let the log line reach the console
+            esp_restart();
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));  // fast enough not to miss a tap
+    }
 }
 
 static void net_task(void *arg) {
@@ -1601,7 +1674,14 @@ void app_main(void) {
         }
     }
 
+    // See boot_gesture_task: net_task does not exist yet to catch the reset
+    // gesture, and wifi_connect() waits with no timeout, so this is the only
+    // window where the button would otherwise be undetectable.
+    TaskHandle_t boot_gesture = NULL;
+    xTaskCreate(boot_gesture_task, "boot_gesture", 2048, NULL, 4, &boot_gesture);
     wifi_connect(cfg.ssid, cfg.pass);
+    vTaskDelete(boot_gesture);
+
     ws_start(cfg.uri);
 
     xTaskCreate(audio_in_task, "audio_in", 4096, NULL, 5, NULL);
