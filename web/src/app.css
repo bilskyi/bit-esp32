@@ -240,6 +240,41 @@ input[type=text], input[type=password], textarea, select {
   border-radius: 6px; padding: 0 8px; height: 28px; font-size: 13px;
 }
 textarea { height: auto; min-height: 76px; padding: 7px 8px; font-family: var(--m); font-size: 12px; line-height: 1.5; resize: vertical }
+/* A file input, in this app's own clothes.
+ *
+ * ::file-selector-button can be styled but its *label* cannot: the browser
+ * writes "Choose File" in the browser's language, which in an otherwise
+ * Ukrainian interface is a visible seam nothing in CSS can close. So the
+ * real input is clipped out of sight and a <label> is the visible trigger -
+ * clicking a label opens the picker for free.
+ *
+ * Clipped, not display:none and not visibility:hidden: either of those takes
+ * the input out of the focus order, and then the control is unreachable by
+ * keyboard. This way it still focuses, and :focus-visible below draws the
+ * ring on the label the person can actually see. */
+.filepick { display: flex; align-items: center; gap: 8px; min-width: 0 }
+.filepick input[type=file] {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap; border: 0;
+}
+/* `.field label:not(.flab)` near the top of this file is (0,2,1) and sets
+ * display:block, padding:0 and font-size:11px on every label inside a
+ * .field. It beat a plain `.filepick .pickbtn` (0,2,0) on specificity, which
+ * stripped this button's horizontal padding and pushed its text out past its
+ * own border - measured at padding:0px, display:block. Naming the element
+ * and the ancestor puts it at (0,3,1). */
+.field .filepick label.pickbtn {
+  flex: none; height: 28px; padding: 0 10px; border-radius: 6px; cursor: pointer;
+  display: inline-flex; align-items: center; font-size: 12px; margin: 0;
+  border: 1px solid var(--border); background: var(--panel); color: var(--text);
+}
+.field .filepick label.pickbtn:hover { background: var(--panel-hover) }
+.field .filepick input[type=file]:focus-visible + label.pickbtn { outline: 2px solid var(--accent); outline-offset: 1px }
+.field .filepick input[type=file]:disabled + label.pickbtn { opacity: .4; cursor: not-allowed }
+.filepick .pickname {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; color: var(--text-2);
+}
 select { height: 26px; padding: 0 6px; font-size: 12px }
 input[type=text]:focus, input[type=password]:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent) }
 input[readonly] { font-family: var(--m); font-size: 12px; color: var(--text-2) }

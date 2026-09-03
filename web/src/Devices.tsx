@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { ApiError, Unauthorized } from './api'
 import Face from './Face.tsx'
+import Firmware from './Firmware.tsx'
 import { DEVICE_ID, rolesApi, surfacesApi } from './settingsApi'
 import type { Role, Surface } from './settingsApi'
 import type { Turn, TurnValue } from './useTurn.ts'
@@ -44,13 +45,18 @@ function serverSocketUrl(): string {
 /** Пристрої: the one device this app knows about, told exactly as far as
  * the server can back it up and no further. What is real: `device_id`
  * ("default"), the persona its esp32 surface runs (GET/PUT
- * /settings/surfaces, the same call Personality.tsx's "Яка де" uses), and
- * the live screen - Face.tsx playing the same state/emotion stream Chat.tsx
+ * /settings/surfaces, the same call Personality.tsx's "Яка де" uses), the
+ * live screen - Face.tsx playing the same state/emotion stream Chat.tsx
  * drives its own preview from, decoded from the same face-frames.json the
- * firmware's own eyes are exported from. What is not real, and does not
- * appear here: a device registry, a heartbeat, reported firmware, free
- * heap, uptime, or an add-device flow that could register anything - see
- * the section below the fold for why "add a device" is prose, not a form. */
+ * firmware's own eyes are exported from - and, since over-the-air updates
+ * landed, whether the device is connected and what firmware version it
+ * reports. Those last two come from GET /firmware/device, backed by the
+ * `hello` frame the firmware now sends on every connect.
+ *
+ * What is still not real, and does not appear here: free heap, uptime, the
+ * time it was last seen, a device registry that outlives a connection, or
+ * an add-device flow that could register anything - see the section below
+ * the fold for why "add a device" is prose, not a form. */
 function Devices({ turn, notifyUnauthorized }: DevicesProps) {
   const [roles, setRoles] = useState<Role[] | null>(null)
   const [surfaces, setSurfaces] = useState<Record<Surface, Role> | null>(null)
@@ -145,9 +151,15 @@ function Devices({ turn, notifyUnauthorized }: DevicesProps) {
               <div className="ph">
                 <h2>Робочий стіл</h2>
                 <span className="pill">ESP32-C3</span>
-                <span className="pill" title="Немає heartbeat - нічого ще не звітує стан">
+                {/* Deliberately not driven by `online` below. That is this
+                    browser's own socket, not the device's, and a pill here
+                    saying "на звʼязку" because the *browser* is connected
+                    would be the page's most confident lie. Whether the
+                    device is connected is a real answer now, and it is in
+                    the Прошивка panel, from GET /firmware/device. */}
+                <span className="pill" title="Стан пристрою - у панелі «Прошивка» нижче">
                   <span className="dot off" aria-hidden="true" />
-                  стан невідомий
+                  див. Прошивку
                 </span>
                 <span className="cnt">device_id: {DEVICE_ID}</span>
               </div>
@@ -203,18 +215,7 @@ function Devices({ turn, notifyUnauthorized }: DevicesProps) {
                       </p>
                     </div>
 
-                    <div className="grp" style={{ marginTop: 12 }}>
-                      <p className="lab" style={{ marginBottom: 2 }}>
-                        Здоровʼя пристрою
-                      </p>
-                      <div className="empty" style={{ padding: '8px 0' }}>
-                        <p className="prose" style={{ fontSize: 12 }}>
-                          Прошивку, аптайм, вільну память і час останнього виходу на звʼязок
-                          сьогодні нічого не звітує — немає ні heartbeat, ні реєстру пристроїв. Я
-                          не показую тут цифр, яких ніхто мені не присилав.
-                        </p>
-                      </div>
-                    </div>
+                    <Firmware notifyUnauthorized={notifyUnauthorized} />
 
                     <div className="grp" style={{ marginTop: 12 }}>
                       <p className="lab" style={{ marginBottom: 2 }}>
