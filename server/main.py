@@ -19,6 +19,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from server.accounts import Accounts
 from server.config import Settings
+from server.firmware import DeviceRegistry, register_firmware_routes
 from server.memory.store import Store
 from server.providers.edge_tts import EdgeTTS
 from server.providers.embeddings import FastEmbedEmbedder
@@ -202,6 +203,12 @@ def create_app(
 
     app = FastAPI(title="voice-companion", lifespan=lifespan)
     app.state.settings = settings
+    # Which surfaces are connected right now, and nothing more - no
+    # heartbeat, no uptime, no rows that outlive a connection. Enough to push
+    # firmware at the device and to answer "what is it running", which is
+    # what the health block on the Пристрої page needed in order to stop
+    # saying that nothing reports anything.
+    app.state.devices = DeviceRegistry()
     # Nothing was compressed before this. Starlette's FileResponse and
     # StaticFiles never compress, so the face frames went over the wire as
     # 1.2 MB of base64 - which quietly voided the reason base64 was kept in
@@ -229,6 +236,8 @@ def create_app(
         if request.session.get("user"):
             return
         raise HTTPException(status_code=401, detail="unauthorized")
+
+    register_firmware_routes(app, require_login)
 
     @app.get("/healthz")
     async def healthz() -> dict:
@@ -379,6 +388,7 @@ def create_app(
             return
         await websocket.accept()
 
+        link = app.state.devices.register(surface, websocket)
         device_id = websocket.query_params.get("device", "default")
         role = await app.state.roles.active_for(surface)
         session = Session(
@@ -412,6 +422,11 @@ def create_app(
                 except json.JSONDecodeError:
                     log.warning("ignoring malformed control frame")
                     continue
+                # Before the session dispatch: `hello` and every `ota_*`
+                # frame belong to the firmware relay, and the chain below
+                # would drop them into "ignoring control message".
+                if app.state.devices.on_frame(surface, control):
+                    continue
                 kind = control.get("type")
                 if kind == "start":
                     await session.on_start(control.get("codec", "pcm16"))
@@ -426,6 +441,7 @@ def create_app(
         except WebSocketDisconnect:
             pass
         finally:
+            app.state.devices.drop(surface, link)
             try:
                 await session.finish()
             except Exception:
@@ -442,7 +458,7 @@ def create_app(
     )
     _API_PREFIXES = (
         "login", "logout", "me", "roles", "settings", "memory",
-        "conversations", "usage", "healthz", "ws",
+        "conversations", "usage", "healthz", "ws", "firmware",
     )
     if _DIST.is_dir():
         app.mount("/assets", StaticFiles(directory=_DIST / "assets"), name="assets")
