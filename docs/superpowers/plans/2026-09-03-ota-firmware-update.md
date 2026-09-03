@@ -21,6 +21,38 @@ under `firmware/host/`.
 **Spec:** `docs/superpowers/specs/2026-09-03-ota-firmware-update-design.md`.
 Read it first. Every "why" is there; this document is the "how".
 
+## Status: implemented, unflashed
+
+All nine tasks are done and committed. What was verified, and how:
+
+| Checked | Evidence |
+|---|---|
+| Pure logic | `firmware/host && make test` from clean: four test binaries, plain and ASan, 0 failures |
+| Header offsets | `ol_check_image()` run against the real `build/voice_capture.bin` (`ok`) and against `bootloader.bin`, which is correctly refused as having no application descriptor |
+| Firmware builds | `idf.py -DSKETCH=voice build`, exit 0, no warnings, `0x110c10` of `0x1f0000` — 45% of the slot free. `capture` still builds, so the bring-up sketches are untouched |
+| Partition table | read back off the built image: two 1984K slots, `nvs` unmoved at `0x9000`, and the flash command names `0xf000 ota_data_initial.bin` and `0x20000` for the app |
+| Server | 441 tests, six consecutive full-suite runs, no flakes; ruff clean |
+| Whole path, no board | a real uvicorn against `scripts/fake_device.py --await-ota`: 1,117,200 bytes, `bytes match`, `ota_ready`, and the push saw `{"done": true, "outcome": "ota_ready"}` |
+| Web | 56 vitest tests, `tsc -b` clean, bundle builds, and the repo's own shots harness reports no layout problems across ten viewport/scheme combinations |
+
+**Not done, and each is somebody's decision rather than an oversight:**
+
+- **The cable flash.** Nothing here has touched the board. That is step 2 of
+  the order of operations, and steps 4 and 5 after it — an update actually
+  landing, and rollback actually firing — cannot be done from a laptop.
+- **The first git tag.** Which version number this is belongs to whoever owns
+  the release. Until then `git describe` gives a bare hash.
+- **`GITHUB_REPO`.** Empty in `web/src/firmwareApi.ts`, because there is no
+  remote yet. The panel says "не налаштовано" rather than inventing one.
+
+**Where the plan and the code differ** — recorded in the spec's own
+"Two things that changed during implementation", and worth repeating here:
+the web panel is its own file (`web/src/Firmware.tsx`) rather than a block
+inside `Devices.tsx`; `ota_note_error()` was added so `voice_main.c` does not
+have to own an error string; the rollback deadline is a task rather than an
+`esp_timer`; and the server tests use a fake socket rather than a real
+TestClient websocket, for the reason in that file's own docstring.
+
 ## Global Constraints
 
 - **Target:** ESP32-C3, 4 MB flash, ESP-IDF 5.3.2. `chip_id` of a valid image
