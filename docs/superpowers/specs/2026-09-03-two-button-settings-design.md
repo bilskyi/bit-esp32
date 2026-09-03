@@ -324,13 +324,24 @@ device would have come up muted, at the dimmest contrast, every time.
 Seeding before the task exists removes the window rather than tolerating it,
 and it means the brightness is right on the first frame drawn.
 
-**Nothing but `face_task` may see the buttons while the menu is open.**
-`net_task` reads the button through a gate that is false whenever the menu is
-up. Without it every press that walks the carousel is also push-to-talk, and
-the one-second exit hold sends a whole utterance to the server every time
-someone closes the menu by hand — a Groq call and a round trip on the link
-that is this project's blocking problem, for nothing. The same gate is why
-`A` cannot interrupt a reply from inside the menu, above.
+**Nothing outside `face_task` may act on a button *edge* while the menu is
+open.** `net_task` reads the button through a gate that is false whenever the
+menu is up. Without it every press that walks the carousel is also
+push-to-talk, and the one-second exit hold sends a whole utterance to the
+server every time someone closes the menu by hand — a Groq call and a round
+trip on the link that is this project's blocking problem, for nothing. The
+same gate is why `A` cannot interrupt a reply from inside the menu, above.
+
+**`audio_in_task` is exempt, and must stay exempt.** It reads the raw button
+as a level, not an edge, and it is already bounded by `ST_LISTENING` — a
+state only `net_task` can enter, through the gate, so with the menu open it
+can only ever be an utterance that is already closing. Gating it would add a
+second mask latched independently of the first, and the divergence that
+matters is the one where the microphone stops feeding while `net_task` still
+believes the utterance is live: an `end` sent on silence, and an STT call
+spent on nothing. The rule above is about edges for this reason, and a future
+change that "corrects" the inconsistency by gating it would truncate the end
+of every question asked while the menu opens.
 
 The tap counters that drive the five-tap gesture read through the same gate
 until Task 7 deletes them, because four presses walk the carousel round and a
@@ -338,10 +349,13 @@ fifth would otherwise reboot the device into provisioning.
 
 ## The boot order does not change, and that is the point
 
-`face_task` is created at `app_main` line 34 and `button_task` at line 52.
-`wifi_connect()`, which waits for a network with no timeout, is line 112.
+`face_task` is created early in `app_main` and `button_task` right after it;
+`wifi_connect()`, which waits for a network with no timeout, comes much later.
 The menu therefore works in the window where the device is stuck looking for a
 network — which is the entire reason `boot_gesture_task` exists.
+
+Stated as an ordering rather than as line numbers on purpose: an earlier draft
+counted lines, and this work moved every one of them.
 
 So `boot_gesture_task` is deleted, along with the `xTaskCreate` /
 `vTaskDelete` pair around `wifi_connect()`.
@@ -378,10 +392,11 @@ in the same visit are lost. Deliberate — that page exists to redo the network,
 and carrying a flash write into a restart path buys nothing — but it is the
 one place where a change made in the menu does not survive.
 
-**Settings opened while listening.** Not reachable in practice, because
-listening requires `A` held and this gesture is `B` alone, but if `A` is
-released mid-hold the menu opens and the utterance ends normally through the
-existing path. Nothing special is needed.
+An earlier draft of this section called that case "not reachable in practice,
+because listening requires `A` held and this gesture is `B` alone". That
+premise was never true — nothing stops a hand holding both — and the case is
+not only reachable but ordinary. It is covered above, and the gate is what
+makes it end cleanly rather than by accident.
 
 **The face is asleep when `B` is held.** `face_set_button()` is fed the first
 button only, so today nothing about `B` reaches `face.c`. It is fed the second
