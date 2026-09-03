@@ -6,10 +6,13 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_random.h"
+#include "esp_system.h"
 #include "esp_wifi.h"
 #include "lwip/sockets.h"
 
 #include "config_store.h"
+#include "ota.h"
+#include "ota_logic.h"
 #include "provision_logic.h"
 
 static const char *TAG = "prov";
@@ -123,6 +126,43 @@ static const char PAGE_TAIL[] =
     "</fieldset>\n"
     "<button type=\"submit\">Save</button>\n"
     "</form>\n"
+    // Outside the form above on purpose: this one does not navigate. A normal
+    // submit would replace the page, and the device restarts the moment the
+    // upload lands, so the result would never be drawn. It posts the file as
+    // a raw body rather than multipart/form-data - parsing a multipart
+    // envelope in C to recover one field would be more code than the whole
+    // handler that receives it.
+    "<fieldset><legend>Firmware</legend>\n"
+    "<label>Firmware file (.bin)\n"
+    "<input type=\"file\" id=\"fw\" accept=\".bin\">\n"
+    "</label>\n"
+    "<label>Code\n"
+    "<input type=\"text\" id=\"fwcode\" maxlength=\"" STR(PL_CODE_LEN) "\" "
+    "pattern=\"[0-9]{4}\" inputmode=\"numeric\" autocomplete=\"off\">\n"
+    "</label>\n"
+    "<button type=\"button\" id=\"fwgo\">Update</button>\n"
+    "<p class=\"hint\" id=\"fwmsg\">The device restarts by itself when this "
+    "finishes. Do not cut the power.</p>\n"
+    "</fieldset>\n"
+    "<script>\n"
+    "var g=document.getElementById('fwgo'),m=document.getElementById('fwmsg');\n"
+    "g.onclick=function(){\n"
+    " var f=document.getElementById('fw').files[0];\n"
+    " var c=document.getElementById('fwcode').value;\n"
+    " if(!f){m.textContent='Pick a .bin first.';return;}\n"
+    " g.disabled=true;\n"
+    " var x=new XMLHttpRequest();\n"
+    " x.open('POST','/firmware?code='+encodeURIComponent(c));\n"
+    " x.upload.onprogress=function(e){if(e.lengthComputable)"
+    "m.textContent='Sending '+Math.round(e.loaded*100/e.total)+'%';};\n"
+    " x.onload=function(){m.textContent=x.status===200?'Written. Restarting.':"
+    "('Refused: '+x.responseText);g.disabled=x.status===200;};\n"
+    " x.onerror=function(){m.textContent="
+    "'Connection closed, which is what a finished update looks like. "
+    "Check the screen.';};\n"
+    " x.send(f);\n"
+    "};\n"
+    "</script>\n"
     "<p class=\"notice\">If this page stops responding, the device's own "
     "screen has the answer.</p>\n"
     "</body></html>\n";
@@ -790,6 +830,127 @@ static void dns_task(void *arg) {
 // just the wildcard redirect, which only helps a phone's captive-portal
 // probe find the page a little sooner. GET / and POST /save are not this:
 // see register_or_fail() below.
+
+// ----------------------------------------------------- firmware, over the AP
+//
+// The path that works when the server is dead and the enclosure is shut.
+// Everything about it is the provisioning page's second job rather than a
+// mode of its own: same access point, same httpd, same unlock code. Both
+// states mean "the device is out of service and you are configuring it".
+//
+// 4 KB is one flash sector's worth per recv, and static rather than on the
+// stack: HTTPD_DEFAULT_CONFIG() gives its task 4096 bytes in total.
+#define PROV_FW_CHUNK 4096
+
+// Per stalled read, not for the whole upload. A megabyte over a weak AP link
+// legitimately takes minutes, so one deadline for the transfer would refuse
+// the slow-but-working case - which is most of the cases this path exists
+// for. What must not happen is a client that stops sending holding the one
+// httpd task forever, and a per-stall allowance covers exactly that.
+#define PROV_FW_STALL_MS 20000
+
+static esp_err_t firmware_refuse(httpd_req_t *req, httpd_err_code_t code, const char *why) {
+    ota_abort();
+    xSemaphoreTake(s_screen_lock, portMAX_DELAY);
+    s_screen.status = SS_STATUS_WAITING;
+    xSemaphoreGive(s_screen_lock);
+    ESP_LOGW(TAG, "firmware upload refused: %s", why);
+    httpd_resp_send_err(req, code, why);
+    // ESP_OK, not ESP_FAIL, for the same reason save_post_handler uses it:
+    // this is a bad request, not a handler fault, and ESP_OK closes the
+    // socket cleanly instead of tearing the connection down as an error.
+    return ESP_OK;
+}
+
+static esp_err_t firmware_post_handler(httpd_req_t *req) {
+    s_last_request = xTaskGetTickCount();
+
+    // The same gate as the server URI, and for a stronger reason: replacing
+    // the firmware is more dangerous than retargeting the URI, not less. The
+    // code is fresh from esp_random() each session and only visible on the
+    // panel, so this path - like the URI field - needs a device with a
+    // screen attached.
+    char query[48] = {0};
+    char code[PL_CODE_LEN + 1] = {0};
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        httpd_query_key_value(query, "code", code, sizeof(code));
+    }
+    if (!pl_unlock_check(&s_unlock, code)) {
+        // Not firmware_refuse(): nothing has been started yet, and calling
+        // ota_abort() on a transfer that does not exist would be tidy-looking
+        // noise. Also leaves the screen alone.
+        ESP_LOGW(TAG, "firmware upload refused: wrong or spent code");
+        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "wrong code");
+        return ESP_OK;
+    }
+
+    if (req->content_len == 0) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "empty upload");
+        return ESP_OK;
+    }
+
+    xSemaphoreTake(s_screen_lock, portMAX_DELAY);
+    s_screen.status = SS_STATUS_FLASHING;
+    xSemaphoreGive(s_screen_lock);
+
+    if (ota_begin((uint32_t)req->content_len) != ESP_OK) {
+        return firmware_refuse(req, HTTPD_400_BAD_REQUEST, ota_last_error());
+    }
+
+    static char buf[PROV_FW_CHUNK];
+    size_t left = req->content_len;
+    TickType_t last_progress = xTaskGetTickCount();
+
+    while (left > 0) {
+        const size_t want = left < sizeof(buf) ? left : sizeof(buf);
+        const int r = httpd_req_recv(req, buf, want);
+
+        if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+            const uint32_t stalled =
+                (uint32_t)(xTaskGetTickCount() - last_progress) * portTICK_PERIOD_MS;
+            if (stalled >= PROV_FW_STALL_MS) {
+                return firmware_refuse(req, HTTPD_408_REQ_TIMEOUT, "upload stalled");
+            }
+            // A phone that is merely slow has not left. Keep the access point
+            // up for it - see the s_last_request note below.
+            s_last_request = xTaskGetTickCount();
+            continue;
+        }
+        if (r <= 0) {
+            return firmware_refuse(req, HTTPD_400_BAD_REQUEST, "upload cut short");
+        }
+
+        if (ota_write(buf, (size_t)r) != ESP_OK) {
+            return firmware_refuse(req, HTTPD_400_BAD_REQUEST, ota_last_error());
+        }
+
+        left -= (size_t)r;
+        last_progress = xTaskGetTickCount();
+
+        // The line this handler cannot work without. provision_idle_expired()
+        // measures from s_last_request, and PROV_AP_IDLE_MS is five minutes
+        // "since the last HTTP request" - but a single long POST produces no
+        // requests at all while it runs. Stamped only on entry, a megabyte
+        // over a weak link would have the access point torn down from under
+        // it, in the middle of writing to the flash. Per chunk, not per
+        // request.
+        s_last_request = last_progress;
+    }
+
+    if (ota_end() != ESP_OK) {
+        return firmware_refuse(req, HTTPD_400_BAD_REQUEST, ota_last_error());
+    }
+
+    // Best-effort: the reply usually loses the race with the restart, which
+    // is why the page treats a dropped connection as success rather than as
+    // an error.
+    httpd_resp_sendstr(req, "written; restarting");
+    ESP_LOGW(TAG, "firmware written from the setup page; restarting into it");
+    vTaskDelay(pdMS_TO_TICKS(500));
+    esp_restart();
+    return ESP_OK;
+}
+
 static void register_or_warn(httpd_handle_t s, const httpd_uri_t *u) {
     const esp_err_t err = httpd_register_uri_handler(s, u);
     if (err != ESP_OK) {
@@ -942,7 +1103,7 @@ esp_err_t provision_start(void) {
 
     // 9. Registered in this order on purpose: matching stops at the first
     // hit, so the specific handlers must be added before the wildcard. All
-    // five are attempted regardless of earlier failures, so the log shows
+    // six are attempted regardless of earlier failures, so the log shows
     // the full picture in one shot; index/save's results are what decide
     // whether this start succeeds.
     static const httpd_uri_t index_uri = {
@@ -953,6 +1114,8 @@ esp_err_t provision_start(void) {
         .uri = "/status", .method = HTTP_GET, .handler = status_get_handler};
     static const httpd_uri_t scan_uri = {
         .uri = "/scan", .method = HTTP_GET, .handler = scan_get_handler};
+    static const httpd_uri_t firmware_uri = {
+        .uri = "/firmware", .method = HTTP_POST, .handler = firmware_post_handler};
     static const httpd_uri_t redirect_uri = {
         .uri = "/*", .method = HTTP_GET, .handler = redirect_get_handler};
     bool required_handlers_ok = true;
@@ -960,6 +1123,10 @@ esp_err_t provision_start(void) {
     if (register_or_fail(s_httpd, &save_uri) != ESP_OK) required_handlers_ok = false;
     register_or_warn(s_httpd, &status_uri);
     register_or_warn(s_httpd, &scan_uri);
+    // Warn rather than fail: a device whose firmware form did not register is
+    // still provisionable, and this path is the fallback for when the server
+    // is gone - not the reason provisioning exists.
+    register_or_warn(s_httpd, &firmware_uri);
     register_or_warn(s_httpd, &redirect_uri);
     if (!required_handlers_ok) {
         // The AP would be up and the page unreachable behind it - the

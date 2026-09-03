@@ -176,6 +176,11 @@ static void test_every_status_has_distinct_text(void) {
         CHECK(ta != NULL && ta[0] != '\0', "status %d has no text", a);
         CHECK(strlen(ta) <= SS_COLS, "status %d is %zu cols, panel fits %d",
               a, strlen(ta), SS_COLS);
+        // The switch in ss_status_text() has a default:, so a value added to
+        // the enum and forgotten there compiles silently and falls through to
+        // "unknown" - which is non-empty and unlike every other status, so
+        // every check above would pass on it. This is the one that does not.
+        CHECK(strcmp(ta, "unknown") != 0, "status %d has no text of its own", a);
         for (int b = a + 1; b < SS_STATUS_COUNT; b++) {
             CHECK(strcmp(ta, ss_status_text((ss_status_t)b)) != 0,
                   "status %d and %d read the same", a, b);

@@ -150,6 +150,7 @@ const char *ss_status_text(ss_status_t status) {
         case SS_STATUS_NOT_FOUND: return "network not found";
         case SS_STATUS_TIMED_OUT: return "timed out";
         case SS_STATUS_LEAVING: return "leaving setup...";
+        case SS_STATUS_FLASHING: return "writing firmware";
         default: return "unknown";
     }
 }
