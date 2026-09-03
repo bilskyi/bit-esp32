@@ -201,11 +201,20 @@ the screen you are looking at.
 `Calm`, `Happy`, `Curious`, `Excited`, mapping to `FACE_EMO_NEUTRAL`,
 `FACE_EMO_HAPPY`, `FACE_EMO_CURIOUS` and `FACE_EMO_EXCITED`.
 
-**This is not new geometry.** `face.c:916` already hard-codes a return to
+**This is not new geometry.** `face.c` already hard-codes a return to
 `FACE_EMO_NEUTRAL` after 45 seconds of idle, on the way to sleepy at 90 and
-asleep at 180. The setting replaces that constant, plus the two matching ones
-at `face.c:710` and `:723` that decide what the face wakes up as. Nine poses
-are already tuned in `EMO_POSE`; this chooses which one is home.
+asleep at 180. The setting replaces that constant and the matching default in
+`face_init()`. Nine poses are already tuned in `EMO_POSE`; this chooses which
+one is home.
+
+The third candidate — `f->cur = EMO_POSE[FACE_EMO_NEUTRAL]` in `face_init()` —
+is deliberately left alone. An earlier draft of this section said the setting
+also decides "what the face wakes up as", and that was wrong twice over: the
+boot animation computes its own pose and overwrites `f->cur` at handover, so
+that line never reaches the panel; and waking from idle restores whatever
+emotion the face was last told, never the resting one. Both were checked
+against the code rather than reasoned about, once the claim was challenged in
+review.
 
 The API is one function, `face_set_resting(face_t *f, face_emotion_t e)`, and
 `face.c` keeps its no-dependency rule — it is told the value, it does not read
