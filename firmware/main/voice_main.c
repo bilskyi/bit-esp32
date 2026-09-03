@@ -40,6 +40,8 @@
 
 #include "config_store.h"
 #include "face.h"
+#include "ota.h"
+#include "ota_logic.h"
 #include "provision.h"
 #include "provision_logic.h"
 #include "setup_screen.h"
@@ -201,6 +203,20 @@ static volatile bool s_playing = false;
 // after being told to stop.
 static volatile bool s_discard_audio = false;
 static volatile uint32_t s_discarded_bytes = 0;
+// The outcome of an update, and whether this connection has introduced
+// itself. Both are set from ws_event and acted on in link_task, because
+// ws_event must not send: the websocket client dispatches events from its
+// own task, and calling esp_websocket_client_send_text() from inside that
+// callback would have that task take a lock it may already be holding.
+// link_task runs at 1 Hz and already owns the socket's health, so it carries
+// the two frames this feature has to send.
+typedef enum {
+    OTA_OUTCOME_NONE = 0,
+    OTA_OUTCOME_READY,
+    OTA_OUTCOME_FAILED,
+} ota_outcome_t;
+static volatile ota_outcome_t s_ota_outcome = OTA_OUTCOME_NONE;
+static volatile bool s_hello_sent = false;
 // When the socket last went away, for the reconnect supervisor.
 static volatile TickType_t s_offline_since = 0;
 
@@ -699,6 +715,41 @@ static void wifi_connect(const char *ssid, const char *pass) {
 
 // --------------------------------------------------------------- websocket
 
+// The three frames that drive an update. Called from ws_event, so it never
+// sends anything - see s_ota_outcome above.
+static void handle_ota_frame(ol_frame_t frame, const char *body, size_t len) {
+    switch (frame) {
+        case OL_FRAME_BEGIN: {
+            // Not while there is a conversation in progress. The transfer
+            // holds the socket's receive path for as long as the flash takes,
+            // and a reply arriving mid-write would land in the wrong place.
+            if (s_state != ST_IDLE) {
+                ota_note_error("busy talking");
+                ESP_LOGW(TAG, "refusing an update in state %d", (int)s_state);
+                s_ota_outcome = OTA_OUTCOME_FAILED;
+                return;
+            }
+            uint32_t size = 0;
+            if (!ol_field_u32(body, len, "size", &size)) {
+                ota_note_error("ota_begin carried no usable size");
+                s_ota_outcome = OTA_OUTCOME_FAILED;
+                return;
+            }
+            if (ota_begin(size) != ESP_OK) s_ota_outcome = OTA_OUTCOME_FAILED;
+            break;
+        }
+        case OL_FRAME_END:
+            s_ota_outcome = ota_end() == ESP_OK ? OTA_OUTCOME_READY : OTA_OUTCOME_FAILED;
+            break;
+        case OL_FRAME_ABORT:
+            ESP_LOGW(TAG, "update abandoned by the server");
+            ota_abort();
+            break;
+        case OL_FRAME_OTHER:
+            break;
+    }
+}
+
 // Control frames are matched by substring rather than parsed. The server sends
 // exactly two shapes - {"type": "state", "value": ...} and {"type": "done"} -
 // and the vocabularies do not overlap, so a full JSON parser would be weight
@@ -720,6 +771,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
                      (unsigned long)s_dropped_blocks,
                      (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
             s_state = ST_IDLE;
+            s_hello_sent = false;  // a fresh connection introduces itself again
             break;
         case WEBSOCKET_EVENT_ERROR:
             // The client fills data_ptr with a readable description of what
@@ -734,6 +786,23 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
             break;
         case WEBSOCKET_EVENT_DATA:
             s_last_activity = xTaskGetTickCount();
+
+            // Any frame at all from the server proves the radio, TLS, the
+            // token and the protocol in one go, which is the whole definition
+            // of an image worth keeping. Idempotent and cheap, so calling it
+            // on every frame is the intended use - see ota.h.
+            ota_mark_valid("frame from the server");
+
+            if (e->op_code == 0x02 && ota_active()) {
+                // Firmware, not speech. Blocking here is the backpressure:
+                // this task stops draining the socket while the flash is
+                // busy, which is what TCP's window is for.
+                if (ota_write(e->data_ptr, (size_t)e->data_len) != ESP_OK) {
+                    s_ota_outcome = OTA_OUTCOME_FAILED;
+                }
+                break;
+            }
+
             if (e->op_code == 0x02 && s_discard_audio) {
                 // The tail of a reply the user already interrupted. Dropping it
                 // here rather than in audio_out_task matters: this send blocks
@@ -753,6 +822,16 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
                     s_play_dropped += (uint32_t)e->data_len - queued;
                 }
             } else if (e->op_code == 0x01) {  // text: control
+                // The update frames first, and parsed properly rather than
+                // matched as substrings. The vocabulary below is the
+                // server's own and cannot collide by accident; an update can,
+                // because {"type":"text","value":"ota_begin"} is an ordinary
+                // frame carrying a spoken sentence.
+                const ol_frame_t of = ol_frame_type(e->data_ptr, e->data_len);
+                if (of != OL_FRAME_OTHER) {
+                    handle_ota_frame(of, e->data_ptr, e->data_len);
+                    break;
+                }
                 // Emotion first, and only inside a frame that says it is one.
                 // Scanning every text frame for every emotion name would be
                 // asking for a collision the day a new state is added.
@@ -1036,6 +1115,42 @@ static void face_task(void *arg) {
 #define RECONNECT_AFTER_MS 15000
 #define REBOOT_AFTER_MS 90000
 
+// The two frames this feature sends, both from link_task and never from
+// ws_event - see s_ota_outcome for why. Called once a second while the
+// socket is up, which is soon enough for an announcement and for an outcome
+// that ends in a reboot anyway.
+static void ota_link_service(void) {
+    if (!s_hello_sent) {
+        char hello[96];
+        const int n = snprintf(hello, sizeof(hello),
+                               "{\"type\":\"hello\",\"version\":\"%s\"}",
+                               ota_running_version());
+        if (n > 0 && esp_websocket_client_send_text(s_ws, hello, n, SEND_TIMEOUT) >= 0) {
+            s_hello_sent = true;
+        }
+    }
+
+    const ota_outcome_t outcome = s_ota_outcome;
+    if (outcome == OTA_OUTCOME_NONE) return;
+    s_ota_outcome = OTA_OUTCOME_NONE;
+
+    if (outcome == OTA_OUTCOME_READY) {
+        static const char ready[] = "{\"type\":\"ota_ready\"}";
+        esp_websocket_client_send_text(s_ws, ready, sizeof(ready) - 1, SEND_TIMEOUT);
+        ESP_LOGW(TAG, "restarting into the new image");
+        vTaskDelay(pdMS_TO_TICKS(200));  // let the frame leave before the link dies
+        esp_restart();
+    }
+
+    // ota_last_error() is always one of a fixed set of literals, none of
+    // which carries a quote - see ota.h.
+    char failed[160];
+    const int n = snprintf(failed, sizeof(failed),
+                           "{\"type\":\"ota_failed\",\"reason\":\"%s\"}",
+                           ota_last_error());
+    if (n > 0) esp_websocket_client_send_text(s_ws, failed, n, SEND_TIMEOUT);
+}
+
 static void link_task(void *arg) {
     while (true) {
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -1044,6 +1159,7 @@ static void link_task(void *arg) {
 
         if (esp_websocket_client_is_connected(s_ws)) {
             s_offline_since = 0;
+            ota_link_service();
             continue;
         }
 
@@ -1055,7 +1171,13 @@ static void link_task(void *arg) {
 
         const uint32_t down_ms = (uint32_t)(now - s_offline_since) * portTICK_PERIOD_MS;
 
-        if (down_ms > REBOOT_AFTER_MS) {
+        // Not while the running image is still on trial. In that state this
+        // restart is not a retry, it is a rollback: the bootloader would
+        // take the image back for being ninety seconds late, and a router
+        // that reboots slowly is not grounds for undoing an update. The
+        // ten-minute deadline in ota.c governs instead, and reconnecting
+        // below keeps trying in the meantime.
+        if (down_ms > REBOOT_AFTER_MS && !ota_pending_verify()) {
             ESP_LOGE(TAG, "offline for %lu s, restarting", (unsigned long)(down_ms / 1000));
             esp_restart();
         }
@@ -1569,6 +1691,12 @@ static void net_task(void *arg) {
 }
 
 void app_main(void) {
+    // First, before anything that could hang. See ota.h: everything below
+    // this line is something that can fail to return, and a deadline armed
+    // after the hang is not a deadline. Costs nothing on an image that was
+    // flashed over the cable - that one has no otadata entry to read.
+    ota_boot_guard();
+
     ESP_ERROR_CHECK(nvs_flash_init());
 
     // Deliberately quiet on the hot path. The console is USB Serial/JTAG and
@@ -1636,6 +1764,12 @@ void app_main(void) {
     const bool asked = config_take_provisioning_request();
     if (pl_decide(config_is_provisioned(&cfg), asked, false) == PL_MODE_PROVISION) {
         if (provision_start() == ESP_OK) {
+            // Suspended, never satisfied. An image that broke NVS reading
+            // would land here, and letting provisioning mark it good would
+            // delete the firmware that worked - see ota.h. Resuming grants a
+            // fresh full deadline, so somebody part-way through setup does
+            // not lose the window they never had.
+            ota_deadline_suspend(true);
             // Four ways out: a successful trial plus its grace window, five
             // minutes with nobody using the page, the same five taps that got
             // here, or provisioning stopping on its own. Only the first is the
@@ -1665,6 +1799,7 @@ void app_main(void) {
                 vTaskDelay(pdMS_TO_TICKS(20));  // fast enough not to miss a tap
             }
             provision_stop();
+            ota_deadline_suspend(false);
             config_load(&cfg);  // pick up whatever was just saved
         } else {
             // Nothing else to try. Fall through and attempt whatever is

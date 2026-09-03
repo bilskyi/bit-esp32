@@ -143,6 +143,8 @@ uint32_t ota_received(void) { return s_xfer.received; }
 uint32_t ota_expected(void) { return s_xfer.expected; }
 const char *ota_last_error(void) { return s_error; }
 
+void ota_note_error(const char *why) { fail(why); }
+
 void ota_abort(void) {
     if (s_handle != 0) {
         esp_ota_abort(s_handle);

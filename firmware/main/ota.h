@@ -98,4 +98,15 @@ uint32_t ota_expected(void);
 
 // Why the last transfer failed, for the log and for the frame sent back to
 // whoever asked for the update. Never NULL; empty when nothing has failed.
+//
+// Every string that reaches it comes from ol_step_text(), ol_verdict_text(),
+// esp_err_to_name() or ota_note_error() below - fixed literals, none of them
+// carrying a quote or a backslash. That is what lets a caller drop it
+// straight into a JSON frame without escaping it. A future reason with a
+// quote in it would break that frame, so keep them plain.
 const char *ota_last_error(void);
+
+// Records a refusal this module did not make itself - the caller declining an
+// update because the device is mid-conversation, say. Keeps the reason where
+// the rest of them live, so the frame sent back always has one.
+void ota_note_error(const char *why);
