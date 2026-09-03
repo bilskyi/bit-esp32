@@ -12,7 +12,7 @@
 #define GAUGE_H 18
 #define ROW_VALUE 33
 #define ROW_HINT 45
-#define ROW_DOTS 58
+#define ROW_DOTS 56
 #define ROW_BAR 62
 
 #define GAUGE_X 14
@@ -27,9 +27,22 @@ static void set_px(uint8_t *fb, int x, int y) {
     fb[(y / 8) * FACE_W + x] |= (uint8_t)(1u << (y % 8));
 }
 
+static void clear_px(uint8_t *fb, int x, int y) {
+    if (x < 0 || y < 0 || x >= FACE_W || y >= FACE_H) return;
+    fb[(y / 8) * FACE_W + x] &= (uint8_t)~(1u << (y % 8));
+}
+
 static void fill_rect(uint8_t *fb, int x, int y, int w, int h) {
     for (int j = 0; j < h; j++)
         for (int i = 0; i < w; i++) set_px(fb, x + i, y + j);
+}
+
+// The honest tool for "this band is about to get overlaid with something
+// self-contained" - used where a pose has already filled the panel and the
+// title or the dots are about to be drawn on top of whatever it left there.
+static void clear_rect(uint8_t *fb, int x, int y, int w, int h) {
+    for (int j = 0; j < h; j++)
+        for (int i = 0; i < w; i++) clear_px(fb, x + i, y + j);
 }
 
 // Two pixels thick, not one: the layout test samples a row inside the gauge
@@ -90,8 +103,15 @@ void settings_screen_render(uint8_t *fb, const settings_t *s) {
     if (page == SETTINGS_PAGE_EYES) {
         // The setting is a look, so the look is the gauge. face_render_pose()
         // clears the buffer itself and fills the middle of the panel; the
-        // title and the dots go in the margins it leaves.
+        // title and the dots go in the margins it leaves - except some poses
+        // reach further than others (Curious and Excited's wider eyes climb
+        // as far as the title row, on a 1-bit panel that reads as clutter
+        // sitting behind the word). Both margins are cleared before anything
+        // is drawn over them, so the overlay never depends on how far a
+        // particular pose happened to reach.
         face_render_pose(fb, face_emotion_pose(settings_eyes_emotion(s->step[SETTINGS_PAGE_EYES])));
+        clear_rect(fb, 0, ROW_TITLE, FACE_W, SS_GLYPH_H);
+        clear_rect(fb, 0, ROW_DOTS, FACE_W, DOT_SIZE);
     } else {
         memset(fb, 0, FACE_FB_BYTES);
     }
