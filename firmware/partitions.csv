@@ -1,11 +1,30 @@
-# Custom table because the default gives the app 1 MB and TLS does not fit.
+# Two app slots, because a sealed enclosure has no USB port.
 #
-# The build without TLS is already 940 KB - 10% headroom. Adding the certificate
-# bundle and mbedTLS for wss:// needs a few hundred KB more. The chip carries
-# 4 MB of flash, so there is no reason to be tight: 2 MB for the app leaves
-# room for this and for whatever comes after.
+# The old table gave one `factory` partition 2 MB of the chip's 4 MB and had
+# nowhere to put a second copy of the app, which is what OTA needs: the new
+# image is written to the slot that is not running, and the bootloader is told
+# to prefer it only once it is complete and verified. `otadata` is where that
+# preference lives.
+#
+# Sizes: 0x1F0000 is 1.94 MB, and the app is 1.05 MB today - 54% of a slot,
+# 931 KB of headroom in each. The two slots end exactly at the end of flash.
+#
+# `nvs` does not move, by a single byte. Same offset, same size, so the WiFi
+# credentials and the server URI written by provisioning survive the one cable
+# flash this table costs. Moving it would mean every device has to be
+# re-provisioned to be updatable, which is the opposite of the point.
+#
+# The 56 KB gap between phy_init and ota_0 is not waste worth arguing about:
+# app partitions must begin on a 64 KB boundary (CONFIG_MMU_PAGE_SIZE=0x10000)
+# and nvs cannot be moved to close it. Reserved for growing nvs.
+#
+# This table cannot itself be changed over the air. That is what gives the
+# whole feature a deadline - see
+# docs/superpowers/specs/2026-09-03-ota-firmware-update-design.md.
 #
 # Name,     Type, SubType,  Offset,   Size
 nvs,        data, nvs,      0x9000,   0x6000
-phy_init,   data, phy,      0xf000,   0x1000
-factory,    app,  factory,  0x10000,  0x200000
+otadata,    data, ota,      0xf000,   0x2000
+phy_init,   data, phy,      0x11000,  0x1000
+ota_0,      app,  ota_0,    0x20000,  0x1F0000
+ota_1,      app,  ota_1,    0x210000, 0x1F0000

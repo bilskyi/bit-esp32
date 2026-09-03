@@ -33,3 +33,13 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # wss:// against Railway verifies the server against the bundled root CAs.
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y
+
+# A new image gets one chance to prove itself before the bootloader takes it
+# back. Without this the bootloader marks a fresh OTA image valid the moment
+# it boots, and a build that boots but cannot reach the server would be the
+# last thing a sealed device ever ran.
+#
+# What "proved" means is not "it booted": see ota.h. And note this project's
+# task watchdog does not panic (CONFIG_ESP_TASK_WDT_PANIC unset), so a hang
+# does not reboot on its own - ota.c carries its own deadline for that.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
