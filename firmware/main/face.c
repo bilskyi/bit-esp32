@@ -758,6 +758,12 @@ void face_set_emotion(face_t *f, face_emotion_t emotion, uint32_t now_ms) {
     f->last_activity = now_ms;  // a fresh emotion means the conversation is alive
 }
 
+// No now_ms, unlike the setters around it - deliberately. Those report
+// something happening at a moment (a fresh emotion, a press, a countdown
+// tick) and the moment matters to the animation. This is a preference loaded
+// once from settings, with nothing for the clock to do; giving it a now_ms
+// to match the others would invite a caller to believe it touches timing
+// when it does not.
 void face_set_resting(face_t *f, face_emotion_t e) {
     if (e >= FACE_EMO_COUNT) return;
     f->resting = e;

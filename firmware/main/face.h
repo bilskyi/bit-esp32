@@ -168,9 +168,10 @@ void face_feed_energy(face_t *f, uint16_t rms);
 // cancels and nothing was lost.
 void face_set_reset_progress(face_t *f, uint8_t percent, uint32_t now_ms);
 
-// Which pose the face relaxes into when a conversation is over, and what it
-// wakes up as. Set from the device's settings; out of range is ignored, so a
-// corrupt byte in NVS cannot leave the face rendering nothing.
+// Which pose the face settles into on its own, after the idle period, on the
+// way to sleepy and then asleep - a resting face rather than a blank one. Set
+// from the device's settings; out of range is ignored, so a corrupt byte in
+// NVS cannot leave the face rendering nothing.
 void face_set_resting(face_t *f, face_emotion_t e);
 
 // Advance the animation to now_ms and render into f->fb. Call at ~25 fps.
