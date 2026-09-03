@@ -47,7 +47,7 @@ void config_load(device_config_t *out) {
     if (h != 0) nvs_close(h);
 
     ESP_LOGI(TAG, "ssid \"%s\", uri \"%s\", vol %u, bright %u, eyes %u", out->ssid,
-             out->uri, (unsigned)out->volume, (unsigned)out->screen, (unsigned)out->eyes);
+             out->uri, out->volume, out->screen, out->eyes);
 }
 
 static esp_err_t save_pair(const char *k1, const char *v1, const char *k2, const char *v2) {
