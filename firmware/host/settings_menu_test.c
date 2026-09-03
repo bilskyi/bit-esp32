@@ -274,6 +274,68 @@ static void test_opening_while_push_to_talk_is_held_stays_open(void) {
     CHECK(s.open, "releasing A closed the menu; it should take a fresh exit-hold");
 }
 
+// The two cases above are only safe to fix by spending a button outright
+// because in both of them the held duration genuinely already exceeds the
+// newly applicable target. A button that has barely started - or starts on
+// the very tick of the flip - must not pay the same price: it gets a clean
+// restart of its own gesture instead. This drives B's open-gesture to the
+// exact tick it fires, with A's first-ever press landing on that identical
+// tick, and checks that A still gets to run an ordinary exit-hold from
+// there.
+static void test_a_fresh_press_at_the_flip_is_honoured(void) {
+    settings_t s = fresh();
+    // One tick short of B's own threshold, so the very next tick both fires
+    // the open and is A's first press - the same settings_tick() call sees
+    // both events.
+    uint32_t t = run(&s, false, true, SETTINGS_OPEN_MS, 1000);
+    CHECK(!s.open, "setup failed: B already opened the menu");
+
+    t = run(&s, true, true, 40, t);  // this tick: B opens, A presses for the first time
+    CHECK(s.open, "setup failed: B's hold did not open the menu");
+
+    // A's press has zero held time as of the flip - a full, ordinary
+    // exit-hold from here should complete normally.
+    run(&s, true, true, SETTINGS_EXIT_MS + 200, t);
+    CHECK(!s.open, "A's fresh press at the flip was spent instead of honoured");
+    CHECK(s.save_requested, "A's exit-hold closed the menu without asking for a save");
+}
+
+// The other half of the same rule: a press that had *some* time on the
+// clock before the flip, but not enough to already meet the new target,
+// must not carry that time over. It needs a full SETTINGS_EXIT_MS measured
+// from the flip, not "whatever is left" after subtracting what it had
+// already banked. Finds the flip tick itself, since hand-computing it to
+// the millisecond is exactly the kind of arithmetic this test exists to not
+// have to trust.
+static void test_a_partway_press_does_not_borrow_pre_flip_time(void) {
+    settings_t s = fresh();
+    uint32_t t = run(&s, false, true, SETTINGS_OPEN_MS - 700, 1000);  // B most of the way there
+    CHECK(!s.open, "setup failed: the menu opened before A joined");
+
+    t = run(&s, true, true, 40, t);  // A presses down here, roughly 700 ms before the flip
+    CHECK(!s.open, "setup failed: the menu opened as soon as A joined");
+
+    uint32_t flip_at = 0;
+    for (int i = 0; i < 60 && !s.open; i++) {
+        t += 40;
+        settings_tick(&s, true, true, t);
+        if (s.open) flip_at = t;
+    }
+    CHECK(flip_at != 0, "setup failed: B's hold never opened the menu");
+
+    while (t < flip_at + 300) {  // a naive "target minus pre-flip credit" would be enough by now
+        t += 40;
+        settings_tick(&s, true, true, t);
+    }
+    CHECK(s.open, "A's exit-hold fired early, borrowing time from before the flip");
+
+    while (t < flip_at + SETTINGS_EXIT_MS + 200) {  // a full exit-hold measured from the flip
+        t += 40;
+        settings_tick(&s, true, true, t);
+    }
+    CHECK(!s.open, "A never closed the menu after a full exit-hold measured from the flip");
+}
+
 static void test_the_gain_table_is_monotonic_and_ends_exactly(void) {
     CHECK(settings_volume_gain(0) == 0, "step 0 is not silent: %d",
           (int)settings_volume_gain(0));
@@ -365,6 +427,8 @@ int main(void) {
     test_a_dead_hold_does_not_reopen_the_menu_after_the_idle_timeout();
     test_closing_while_the_other_button_rests_does_not_reopen();
     test_opening_while_push_to_talk_is_held_stays_open();
+    test_a_fresh_press_at_the_flip_is_honoured();
+    test_a_partway_press_does_not_borrow_pre_flip_time();
     test_the_gain_table_is_monotonic_and_ends_exactly();
     test_the_contrast_table_is_monotonic_and_tops_out_where_init_does();
     test_every_label_is_short_ascii_and_distinct();
