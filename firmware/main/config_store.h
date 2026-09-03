@@ -8,6 +8,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 
@@ -17,6 +18,14 @@ typedef struct {
     char ssid[PL_SSID_MAX + 1];
     char pass[PL_PASS_MAX + 1];
     char uri[PL_URI_MAX + 1];
+
+    // The settings the two buttons change. Step indices, not values: the
+    // lookup tables in settings_menu.c can be retuned without migrating what
+    // is already written here. Absent keys read as the defaults below, so a
+    // device flashed with this firmware behaves exactly like the last one.
+    uint8_t volume;  // 0-5, default 5 (unity, today's behaviour)
+    uint8_t screen;  // 0-3, default 3 (0xcf, what ssd1306.c writes at init)
+    uint8_t eyes;    // 0-3, default 0 (calm)
 } device_config_t;
 
 // Reads NVS, filling anything absent from secrets.h. Never fails: a corrupt or
@@ -28,6 +37,10 @@ void config_load(device_config_t *out);
 // provisioning may erase a working network.
 esp_err_t config_save_wifi(const char *ssid, const char *pass);
 esp_err_t config_save_uri(const char *uri);
+
+// Written once when the settings menu closes, not on every press: walking the
+// volume page in a circle is six presses and would otherwise be six writes.
+esp_err_t config_save_settings(uint8_t volume, uint8_t screen, uint8_t eyes);
 
 bool config_is_provisioned(const device_config_t *c);
 
