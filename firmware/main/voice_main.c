@@ -999,7 +999,22 @@ static void face_task(void *arg) {
         // The menu is driven from here because this task already ticks at a
         // fixed 40 ms and already owns the panel. 40 ms against a 25 ms
         // debounce and a 1 s hold has room to spare.
-        settings_tick(&s_settings, s_button_down, s_button_b_down, t);
+        //
+        // Except while provisioning. That screen is showing an access point
+        // name, an address and a code that someone is copying into a phone,
+        // and the menu would cover all three. The gesture is starved of
+        // input rather than the menu hidden at the moment it would be drawn:
+        // a menu that opened behind the setup screen and then appeared when
+        // provisioning ended would be worse than either, and hiding it would
+        // also leave B meaning two things at once once Task 7 gives that
+        // screen its own B hold for the way out.
+        //
+        // Starved, not skipped, so the machine keeps ticking: a menu that was
+        // already open when provisioning started still has its twenty-second
+        // idle timeout, and that is what closes it.
+        const bool menu_input = !provision_is_active();
+        settings_tick(&s_settings, s_button_down && menu_input,
+                      s_button_b_down && menu_input, t);
 
         // Brightness is applied as it changes rather than on the way out, so
         // the value can be judged by looking at it. Only on a change: the
@@ -1466,13 +1481,53 @@ static void boot_gesture_task(void *arg) {
 static void net_task(void *arg) {
     static uint8_t chunk[1024];
     bool held = false;
+    // The remainder of a press that belonged to the settings menu. See the
+    // gate at the top of the loop.
+    bool masked = false;
     tap_counter_t taps_in = {0};
     TickType_t press_start = 0;
 
     TickType_t busy_since = 0;
 
     while (true) {
-        const bool down = s_button_down;
+        // What this task is allowed to see of the button, which is not the
+        // same thing as what the button is doing.
+        //
+        // The menu is worked with A as much as with B - A walks the pages, a
+        // one-second A hold closes it - and every one of those is also a
+        // push-to-talk press. Ungated, walking the carousel spends a
+        // start/cancel round trip per page, and closing the menu by hand
+        // sends a full second of room tone to be transcribed: a Groq STT call
+        // and a round trip on the link that is this project's blocking
+        // problem, every single time anyone changes a setting.
+        //
+        // Two things beyond "no press while the menu is open" have to be
+        // true, and the latch is what makes the second of them true.
+        //
+        // Opening the menu part-way through an utterance arrives here as a
+        // release, so the question ends through the path that already exists
+        // and the server gets its "end" rather than being left waiting. That
+        // is what the design asks for and it is better than a cancel.
+        //
+        // And the press that closed the menu is still physically down at the
+        // moment the menu goes away. Without the latch it would arrive here
+        // as a fresh press edge and start recording the instant someone
+        // finished the gesture that means "I am done". So the mask outlives
+        // the menu and is only lifted by an actual release: exactly the
+        // remainder of that one physical press is discarded, not the button.
+        //
+        // A menu opened and closed entirely inside one send stall - this task
+        // can sit in esp_websocket_client_send_bin for up to SEND_TIMEOUT -
+        // is never observed here at all. That case degrades to the behaviour
+        // before the menu existed: no edge is seen, so nothing starts, and
+        // the utterance already in flight ends normally on release.
+        const bool raw = s_button_down;
+        if (s_settings.open) {
+            masked = true;
+        } else if (!raw) {
+            masked = false;
+        }
+        const bool down = raw && !masked;
         const TickType_t now = xTaskGetTickCount();
 
         const uint8_t taps = tap_count(&taps_in, down, now);
