@@ -1239,12 +1239,24 @@ static void audio_in_task(void *arg) {
         // second question stays three seconds instead of growing to twenty-two
         // and burying the uplink in audio nobody asked for.
         //
-        // Deliberately the raw button, not button_outside_menu(): this is a
-        // level test guarded by ST_LISTENING, and the only way that state is
-        // reached with the menu up is an utterance net_task is already about
-        // to end. The audio recorded in that gap belongs to the question and
-        // the release path flushes it into it, so masking here would trim the
-        // end off a question that is closing properly.
+        // Deliberately the raw button, not button_outside_menu(). This is the
+        // one reader outside the menu that is not gated, so the reason has to
+        // be the strong one rather than the obvious one.
+        //
+        // A mask here would be a *second* mask, latched independently of
+        // net_task's. The two can disagree - they are lifted by whichever
+        // loop next sees the button released, and these loops do not run
+        // together - and a disagreement in this direction stops the
+        // microphone feeding while net_task still believes the utterance is
+        // live. It then sends "end" on silence and spends an STT call on
+        // nothing, which is the very cost the gate was added to avoid.
+        //
+        // The obvious reason is real but small: this is a level test guarded
+        // by ST_LISTENING, the only way that state is reached with the menu
+        // up is an utterance net_task is already about to end, and the audio
+        // in that gap belongs to the question the release path is flushing.
+        // In the ordinary path that gap is one 10 ms iteration; it is only
+        // large when net_task is stuck in a send.
         if (s_state != ST_LISTENING || !s_button_down) continue;
 
         const size_t n = got / sizeof(int32_t) / 2;
@@ -1883,12 +1895,22 @@ void app_main(void) {
             // net_task does not exist yet - it is created once the radio is
             // up, which is after this returns.
             tap_counter_t taps_out = {0};
-            // The menu cannot open while this screen is up - face_task starves
-            // the gesture of input for exactly as long as provision_is_active()
-            // - so there is nothing here for the mask to discard. It is used
-            // anyway so that all three tap counters read the button the same
-            // way; one of the three reading it differently is a trap for
-            // whoever changes this next.
+            // The menu cannot *open* while this screen is up - face_task
+            // starves the gesture of input for exactly as long as
+            // provision_is_active() - so there is nothing here for the mask to
+            // discard, with one exception: a menu that was already open when
+            // provisioning started. That needs B held from power-on and is
+            // very likely unreachable, since provisioning begins well inside
+            // the two seconds the hold takes, but it was never ruled out. In
+            // that case the mask is live and the five taps out of setup are
+            // blocked until the menu's own twenty-second timeout closes it.
+            // Self-correcting, and not worth code - but the next person
+            // deciding whether this mask can be deleted needs to know it is
+            // not decorative.
+            //
+            // It is used at all so that all three tap counters read the button
+            // the same way; one of the three reading it differently is a trap
+            // for whoever changes this next.
             menu_mask_t mask = {0};
             uint8_t shown = 0;
             while (provision_is_active() && !provision_complete() && !provision_idle_expired()) {
