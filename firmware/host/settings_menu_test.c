@@ -189,6 +189,39 @@ static void test_a_closed_menu_ignores_button_a(void) {
     CHECK(!s.save_requested, "holding A asked for a save");
 }
 
+// A hold on a button bound to nothing where the menu currently is - B on a
+// value page - produces no edge for as long as it lasts, so it was possible
+// for the idle timeout to close the menu out from under a hold that never
+// released, and then reopen it one tick later because the same stale press
+// duration immediately re-satisfied the open threshold. This drives such a
+// hold straight through the idle window and well past it, watching for
+// exactly one close and no unexplained reopen.
+static void test_a_dead_hold_does_not_reopen_the_menu_after_the_idle_timeout(void) {
+    settings_t s = fresh();
+    uint32_t t = run(&s, false, true, 2200, 1000);  // open
+    t = run(&s, false, false, 200, t);              // release, page = VOLUME
+    const uint8_t before = s.step[SETTINGS_PAGE_VOLUME];
+
+    int closes = 0;
+    int opens = 0;
+    bool was_open = s.open;
+    for (uint32_t elapsed = 0; elapsed < SETTINGS_IDLE_MS * 2; elapsed += 40) {
+        t += 40;
+        settings_tick(&s, false, true, t);  // B held throughout, never released
+        if (was_open && !s.open) closes++;
+        if (!was_open && s.open) opens++;
+        was_open = s.open;
+    }
+    CHECK(closes == 1, "the menu closed %d times during one continuous hold", closes);
+    CHECK(opens == 0, "the menu reopened on its own during the same held press");
+    CHECK(!s.open, "the menu ended up open under a button that never released");
+
+    run(&s, false, false, 200, t);  // finally release B
+    CHECK(s.step[SETTINGS_PAGE_VOLUME] == before,
+          "a dead hold through the timeout changed volume to %u",
+          s.step[SETTINGS_PAGE_VOLUME]);
+}
+
 static void test_the_gain_table_is_monotonic_and_ends_exactly(void) {
     CHECK(settings_volume_gain(0) == 0, "step 0 is not silent: %d",
           (int)settings_volume_gain(0));
@@ -277,6 +310,7 @@ int main(void) {
     test_twenty_seconds_of_silence_closes_and_saves();
     test_a_press_postpones_the_timeout();
     test_a_closed_menu_ignores_button_a();
+    test_a_dead_hold_does_not_reopen_the_menu_after_the_idle_timeout();
     test_the_gain_table_is_monotonic_and_ends_exactly();
     test_the_contrast_table_is_monotonic_and_tops_out_where_init_does();
     test_every_label_is_short_ascii_and_distinct();

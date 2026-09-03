@@ -134,7 +134,6 @@ bool settings_tick(settings_t *s, bool a_down, bool b_down, uint32_t now_ms) {
             const uint32_t held = now_ms - *at[i];
             if (target && !*used[i] && held >= target) {
                 *used[i] = true;
-                s->hold_pct = 0;
                 s->last_input = now_ms;
                 if (!s->open) {
                     s->open = true;
@@ -167,13 +166,31 @@ bool settings_tick(settings_t *s, bool a_down, bool b_down, uint32_t now_ms) {
         const uint32_t target = hold_target(s, i == 0);
         if (target == 0) continue;
         const uint32_t held = now_ms - *at[i];
-        const uint32_t share = (held * 100u) / target;
-        if (share >= SETTINGS_WARN_PCT) pct = (uint8_t)(share > 100 ? 100 : share);
+        // Once held reaches target the share is 100% regardless of how much
+        // further it grows, so clamping here loses nothing - and it is what
+        // keeps held * 100u from overflowing uint32_t on a hold somewhere
+        // past the twelve-hour mark. Not reachable given the targets in this
+        // file (at most SETTINGS_OPEN_MS), but cheap enough to make
+        // impossible rather than merely unlikely.
+        const uint32_t capped = (held < target) ? held : target;
+        const uint32_t share = (capped * 100u) / target;
+        if (share >= SETTINGS_WARN_PCT) pct = (uint8_t)share;
     }
     s->hold_pct = pct;
 
     if (s->open && (uint32_t)(now_ms - s->last_input) > SETTINGS_IDLE_MS) {
         close_and_save(s);
+        // A button that is down right now produced no edge for as long as
+        // it has been held - that is exactly how it went unnoticed until
+        // the timeout - so hold_target() is about to answer differently
+        // than it did a moment ago (closed now asks only B to open). Spend
+        // this press before that new answer can act on it, or the same
+        // continuous hold reopens the menu one tick later. A real hold that
+        // is meant to do something always finishes in at most
+        // SETTINGS_OPEN_MS against this SETTINGS_IDLE_MS timer, so it is
+        // never the one caught here.
+        if (a_down) s->a_used = true;
+        if (b_down) s->b_used = true;
     }
 
     return before.open != s->open || before.page != s->page ||
