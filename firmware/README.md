@@ -188,8 +188,122 @@ is the pop.
 | Tone is there but distorted or thin | Wrong slot width, or `AMPLITUDE` raised near full scale. |
 | Tail of the tone is clipped off | `DRAIN_MS` too short for your DMA configuration. |
 
-## Not yet implemented
+---
 
-Step 4: WiFi, the WebSocket client, the ring buffer, and the three-task split
-(`audio_in` / `net` / `audio_out`). Both halves above become tasks there; the
-mute rule and the `>> 16` shift carry over unchanged.
+# Updating over the air
+
+The enclosure is meant to be sealed, so `idf.py flash` stops being an answer
+to anything. Two paths replace that cable, because they fail for different
+reasons and a shut box needs both. The design and every "why" is in
+`docs/superpowers/specs/2026-09-03-ota-firmware-update-design.md`.
+
+## One last flash over the cable, and it cannot be skipped
+
+`partitions.csv` cannot be changed over the air — changing it is what makes
+over-the-air updates possible in the first place. The app moved from
+`0x10000` to `0x20000`, `otadata` appeared at `0xf000`, and the bootloader
+changed too because rollback is compiled into it. All three go over USB, once:
+
+```bash
+cd firmware
+idf.py -DSKETCH=voice build
+idf.py -p /dev/cu.usbmodem* flash monitor
+```
+
+`nvs` keeps its offset and size to the byte, so WiFi credentials and the
+server URI survive this. The device does not have to be provisioned again.
+
+**Do this, prove both paths work, prove rollback fires, and only then seal the
+box.** In that order. Steps four and five below on a sealed box are not tests,
+they are the thing the tests were meant to prevent.
+
+1. Flash over the cable — bootloader, partition table, app.
+2. Confirm the device still talks.
+3. Confirm an update lands, **on the open board**, both paths.
+4. Confirm rollback fires, with a deliberately broken image, **on the open
+   board**.
+5. Seal it.
+
+## Path 1 — through the server
+
+The device already holds an authenticated `wss://`. Firmware goes down that
+same socket: no second TLS session, which matters because there is roughly
+30 KB of free heap once `wss://` is up and a handshake wants tens of KB
+transiently.
+
+From the web app: **Пристрої → Прошивка**, pick the `.bin`, press *Оновити*.
+By hand:
+
+```bash
+curl -b cookies -X POST http://your-server/firmware/push \
+     --data-binary @firmware/build/voice_capture.bin
+```
+
+The server stores nothing; it relays. Progress comes back as newline-delimited
+JSON, then a final outcome.
+
+To exercise the whole path with no board in the room:
+
+```bash
+uv run python scripts/fake_device.py --await-ota \
+    --expect firmware/build/voice_capture.bin
+```
+
+## Path 2 — through the access point, when the server is gone
+
+Provisioning mode has a second job. Enter it the usual way, join the device's
+access point, open `http://192.168.4.1/`, and the page has a **Firmware**
+section below the network form: pick the `.bin`, type the four-digit code from
+the panel, press *Update*.
+
+Two consequences worth knowing. The code only ever appears on the OLED, so
+this path needs a device with a screen — the same limitation the server-URI
+field already has. And the page treats a dropped connection as success,
+because the device restarts the moment it has committed the image and the
+reply usually loses that race.
+
+## Rollback: what "good" means
+
+The bootloader marks a freshly booted OTA image `PENDING_VERIFY`. If it
+reboots without saying otherwise, the previous image comes back.
+
+**An image is good once a round trip to the server has happened** — the socket
+opened *and* a frame came back down it. Not "it booted", and not "WiFi
+connected": neither of those proves the token or the protocol.
+
+- Entering provisioning **suspends** the ten-minute deadline rather than
+  satisfying it. An image that broke NVS reading would otherwise declare
+  itself good from inside provisioning and delete the firmware that worked.
+- `link_task`'s ninety-second offline reboot is suppressed while an image is
+  unproven, because in that state the reboot *is* a rollback and a slow router
+  is not grounds for undoing an update.
+- The deadline is a task at priority 10, not an `esp_timer`. This project's
+  task watchdog does not panic (`CONFIG_ESP_TASK_WDT_PANIC` is unset), so a
+  hang does not reboot on its own, and a task above the audio tasks still gets
+  the CPU when something below it spins without yielding.
+
+Honest about the false positive: update while the router happens to be down
+and healthy firmware is rolled back for the router's sin. The price is
+updating again; the alternative leaves a sealed box with nothing to save it.
+
+## Failure signatures
+
+| What you see | Almost always means |
+|---|---|
+| `not an ESP firmware image` | That is not a `.bin` — a release archive, or the `.elf`. Use `build/voice_capture.bin`. |
+| `built for another chip` | An ESP32/S3/C6 build. `chip_id` at offset `0x0C` has to be 5. |
+| `no application descriptor` | A real ESP image with no `esp_app_desc` — almost always `bootloader.bin`, which is not the thing to send. |
+| `firmware for another project` | A `.bin` from a different `project()`. Note `voice_capture2` would be refused too: the name is compared over its terminator. |
+| `no second app partition` | The board is still running the old single-`factory` table. It has to be flashed over the cable first. |
+| `larger than the partition` | Over 1.94 MB. Nothing here should be close; check you are not sending a merged flash image. |
+| `busy talking` | Somebody was mid-conversation. Try again when the device is idle. |
+| `fewer bytes than promised` | The transfer was cut short. The partition is untouched and the running image is unaffected — just retry. |
+| `the image did not verify` | Bytes were corrupted in flight. Retry; if it repeats, the flash itself is suspect. |
+| Update lands, then the old version comes back | Rollback fired: the new image never reached the server within ten minutes. Check WiFi and `DEVICE_TOKEN` in the image you sent. |
+| The AP upload dies part-way, every time, at the same place | Not the upload. `PROV_AP_IDLE_MS` tearing the access point down — the idle marker is refreshed per chunk precisely to stop this, so if it happens the refresh is not running. |
+| `writing firmware` on the panel, forever | The upload stalled. It gives up after twenty seconds without progress and returns the screen to `waiting`. |
+
+## What still cannot be updated this way
+
+The bootloader and the partition table. Both are read before any of this code
+runs, which is exactly why the flash above is not optional.

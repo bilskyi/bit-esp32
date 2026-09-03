@@ -424,6 +424,30 @@ which is the failure mode this section exists to catch.
 7. **Version strings were going to be compared.** `git describe` output has no
    total order. Two strings side by side, and a button that is always enabled.
 
+8. **The release row had no repository to read.** This design says the web app
+   shows the latest GitHub release beside the running version. There is no
+   GitHub remote: `git remote -v` is empty. Building a row that reports on a
+   repository which does not exist is exactly the thing this project refuses
+   to do everywhere else, so `GITHUB_REPO` in `web/src/firmwareApi.ts` is
+   empty and the panel says "не налаштовано" until it is filled in. The
+   function that reads a release is written and tested; only the constant is
+   missing, and that is the honest state rather than a gap.
+
 Also caught: the AP idle timeout would have torn the access point down in the
 middle of a slow upload, because a single long POST is indistinguishable from
 five minutes of nobody doing anything.
+
+## Two things that changed during implementation
+
+Recorded because the spec above still describes them the old way in places.
+
+- **The panel is `web/src/Firmware.tsx`, not a block inside `Devices.tsx`.**
+  That file was already carrying persona, the live screen and the joining
+  instructions; this adds a file picker, two kinds of progress and a poll
+  loop. `Devices.tsx` renders `<Firmware />` and keeps its own size.
+
+- **`ota_note_error()` exists.** Refusing an update because the device is
+  mid-conversation is a decision `voice_main.c` makes, but the reason has to
+  reach `ota_last_error()` so the frame sent back carries one. Rather than
+  give `voice_main.c` an error string of its own - the footprint rule above -
+  the reason is recorded through the module that owns all the others.

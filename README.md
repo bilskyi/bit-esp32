@@ -88,6 +88,27 @@ frames are JSON control messages.
 | server → device | `{"type":"emotion","value":"curious"}` | drives the face, ahead of the first word |
 | server → browser | `{"type":"reply","value":"<sentence>"}` | a typed question streams back as text, one sentence at a time — no TTS spent on something already being read |
 | server → browser | `{"type":"trace","value":{…}}` | what the turn actually did: active role, retrieved facts with their similarity scores, the assembled prompt, token counts, per-stage timings |
+| device → server | `{"type":"hello","version":"v0.3.0"}` | on every connect. `esp_app_get_description()->version`, which is `git describe` output |
+| server → device | `{"type":"ota_begin","size":1117200,"version":"v0.3.0"}` | a firmware image follows. `size` is mandatory: `esp_ota_begin(OTA_SIZE_UNKNOWN)` erases the whole 1.94 MB partition up front instead of lazily by sector |
+| server → device | binary | the image, in 4096-byte frames — the device's own receive buffer size |
+| server → device | `{"type":"ota_end"}` | that was all of it: verify and commit |
+| server → device | `{"type":"ota_abort"}` | never mind, discard it |
+| device → server | `{"type":"ota_ready"}` | committed, restarting into it |
+| device → server | `{"type":"ota_failed","reason":"..."}` | refused, and why |
+
+**Binary frames mean firmware while a transfer is running, and reply audio the
+rest of the time.** There is no second socket and no second TLS session: the
+board has roughly 30 KB of free heap once `wss://` is up, and a handshake wants
+tens of KB transiently. `ota_active()` in the firmware is the switch.
+
+The update frames are the only ones the device parses properly rather than
+matching as substrings. The server's own vocabulary cannot collide by accident;
+an update can, because `{"type":"text","value":"ota_begin"}` is an ordinary
+frame carrying a spoken sentence. See `firmware/main/ota_logic.c`.
+
+There is no `sha256` in the protocol on purpose. Both `esp_ota_end()` and
+`esp_ota_set_boot_partition()` run `esp_image_verify()`, which checks the
+SHA-256 the image carries in its own last 32 bytes.
 
 The `trace` frame goes **only** to a connection authorised by a session cookie.
 The device never receives it: it has about 55 KB of free heap mid-conversation
@@ -285,6 +306,14 @@ device token.
 | `GET` | `/settings/app` | `{"store_conversations", "retention_days"}` |
 | `PUT` | `/settings/app` | change either |
 | `DELETE` | `/conversations/{device_id}` | drop recorded transcripts, keeping facts |
+| `GET` | `/firmware/device` | `{"online", "version"}` — from the live socket and the `hello` frame on it, so it is empty the moment the device disconnects. Not a device registry: no heartbeat, no uptime, no rows that outlive a connection |
+| `POST` | `/firmware/push` | send a `.bin` to the device. Raw body, streamed to it over the socket it already holds. 409 with no device connected or a push already running, 400 for a file that is not firmware for this project on this chip, 413 for something far too large. Answers with newline-delimited JSON progress and a final `{"done": true, "outcome": ...}` |
+
+`/firmware/push` **stores nothing**. No volume, no bucket, no disk — the file
+passes through. Releases live on GitHub, the browser downloads them from there,
+and the device never talks to GitHub at all, so nobody running their own copy
+of this server has to depend on anybody else's. See
+`docs/superpowers/specs/2026-09-03-ota-firmware-update-design.md`.
 
 Create the account with `uv run python scripts/create_account.py`, and set
 `SESSION_SECRET_KEY` before deploying — left empty, the app signs cookies with
@@ -298,6 +327,7 @@ discards the cookie silently, `/login` returns 200 and everything after it 401s.
 ```
 server/
   main.py              FastAPI app, /ws endpoint, auth
+  firmware.py          live-socket registry and the firmware relay
   session.py           per-connection state machine and pipeline
   context.py           prompt assembly under the token budget
   sentences.py         incremental sentence segmentation
