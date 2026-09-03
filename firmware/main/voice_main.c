@@ -42,6 +42,8 @@
 #include "face.h"
 #include "provision.h"
 #include "provision_logic.h"
+#include "settings_menu.h"
+#include "settings_screen.h"
 #include "setup_screen.h"
 #include "secrets.h"
 #include "ssd1306.h"
@@ -52,6 +54,13 @@
 #define PIN_DOUT GPIO_NUM_7
 #define PIN_MUTE GPIO_NUM_10
 #define PIN_BUTTON GPIO_NUM_3
+// The second button, wired to ground exactly like the first.
+//
+// GPIO 20 is U0RXD, and it is free only because the console is not on UART0 -
+// CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y. On a board with a CP2102 or CH340
+// bridge this pin is driven by the bridge and a button on it would fight an
+// output. It is not a strapping pin, so a press during reset is harmless.
+#define PIN_BUTTON_B GPIO_NUM_20
 // Onboard LED. Verified on this board: it lights when the pin is driven LOW.
 //
 // GPIO 8 is a strapping pin, which is why the spec warns against using it.
@@ -178,6 +187,12 @@ static volatile uint32_t s_slowest_send = 0;
 static volatile TickType_t s_last_activity = 0;
 // Debounced button state, owned by button_task.
 static volatile bool s_button_down = false;
+// Debounced second button, owned by button_task alongside the first.
+static volatile bool s_button_b_down = false;
+// The settings carousel. Seeded once in app_main, before face_task exists,
+// and written only by face_task after that - which is also the only task that
+// draws, so the screen can never disagree with the state behind it.
+static settings_t s_settings;
 // Set by net_task when the user presses during a reply; audio_out acts on it.
 static volatile bool s_abort_playback = false;
 // True while the speaker is actually producing sound. Owned by audio_out_task.
@@ -414,8 +429,11 @@ static void audio_init(void) {
     ESP_ERROR_CHECK(gpio_config(&mute));
     ESP_ERROR_CHECK(gpio_set_level(PIN_MUTE, 0));  // muted before anything else
 
+    // Both buttons in one call: they want the identical mode, pull and
+    // interrupt setting, and a second config with the same body is a second
+    // place for them to drift apart.
     gpio_config_t btn = {
-        .pin_bit_mask = 1ULL << PIN_BUTTON,
+        .pin_bit_mask = (1ULL << PIN_BUTTON) | (1ULL << PIN_BUTTON_B),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -913,6 +931,14 @@ static void led_task(void *arg) {
 static void face_task(void *arg) {
     face_init(&s_face, now_ms());
 
+    // app_main seeded s_settings from NVS before this task was created, so
+    // the two settings that are visible from outside can be applied here,
+    // before the first frame is drawn, rather than a frame or two into the
+    // boot animation.
+    face_set_resting(&s_face, settings_eyes_emotion(s_settings.step[SETTINGS_PAGE_EYES]));
+    ssd1306_set_contrast(&s_panel, settings_screen_contrast(s_settings.step[SETTINGS_PAGE_SCREEN]));
+    uint8_t shown_screen_step = s_settings.step[SETTINGS_PAGE_SCREEN];
+
     face_state_t shown = FACE_ST_IDLE;
     uint32_t emotion_seq = 0;
     bool button = false;
@@ -949,7 +975,10 @@ static void face_task(void *arg) {
             face_set_emotion(&s_face, (face_emotion_t)s_face_emotion, t);
         }
 
-        const bool down = s_button_down;
+        // Either button. The face's reaction to a press is "something is
+        // being asked of me", and that is as true of the one that opens the
+        // menu as of the one that records a question.
+        const bool down = s_button_down || s_button_b_down;
         if (down != button) {
             face_set_button(&s_face, down, t);
             button = down;
@@ -967,7 +996,47 @@ static void face_task(void *arg) {
             face_feed_energy(&s_face, s_audio_level);
         }
 
-        // One task draws, and it chooses which of the two things to draw.
+        // The menu is driven from here because this task already ticks at a
+        // fixed 40 ms and already owns the panel. 40 ms against a 25 ms
+        // debounce and a 1 s hold has room to spare.
+        settings_tick(&s_settings, s_button_down, s_button_b_down, t);
+
+        // Brightness is applied as it changes rather than on the way out, so
+        // the value can be judged by looking at it. Only on a change: the
+        // contrast command is an I2C transaction, and one per frame would
+        // cost a write the flush below has spent effort avoiding.
+        if (s_settings.step[SETTINGS_PAGE_SCREEN] != shown_screen_step) {
+            shown_screen_step = s_settings.step[SETTINGS_PAGE_SCREEN];
+            ssd1306_set_contrast(&s_panel, settings_screen_contrast(shown_screen_step));
+        }
+
+        if (s_settings.wifi_requested) {
+            s_settings.wifi_requested = false;
+            ESP_LOGW(TAG, "settings: wifi setup requested, restarting into provisioning");
+            config_request_provisioning();
+            vTaskDelay(pdMS_TO_TICKS(100));  // let the log line reach the console
+            esp_restart();
+        }
+
+        if (s_settings.save_requested) {
+            s_settings.save_requested = false;
+            face_set_resting(&s_face, settings_eyes_emotion(s_settings.step[SETTINGS_PAGE_EYES]));
+            const esp_err_t serr = config_save_settings(s_settings.step[SETTINGS_PAGE_VOLUME],
+                                                        s_settings.step[SETTINGS_PAGE_SCREEN],
+                                                        s_settings.step[SETTINGS_PAGE_EYES]);
+            if (serr != ESP_OK) {
+                // The values are live and already applied; losing them at the
+                // next boot is worth less than making a reboot of it.
+                ESP_LOGW(TAG, "settings: nvs write failed (%s)", esp_err_to_name(serr));
+            } else {
+                ESP_LOGI(TAG, "settings: saved vol=%u bright=%u eyes=%u",
+                         s_settings.step[SETTINGS_PAGE_VOLUME],
+                         s_settings.step[SETTINGS_PAGE_SCREEN],
+                         s_settings.step[SETTINGS_PAGE_EYES]);
+            }
+        }
+
+        // One task draws, and it chooses which of the three things to draw.
         //
         // setup_screen.c renders into a buffer it is handed and never touches
         // the panel, so this is the only writer either way and no lock is
@@ -975,15 +1044,27 @@ static void face_task(void *arg) {
         // borrowing face_t's private one: reaching into another module's
         // state is exactly what its no-dependency rule exists to prevent.
         // 1 KB of BSS, not heap.
+        //
+        // settings_screen.c has the same contract, and shares the same
+        // buffer rather than taking a second kilobyte: the setup screen and
+        // the settings menu cannot be up at the same instant, because only
+        // one of these arms runs per frame.
         static uint8_t s_setup_fb[FACE_FB_BYTES];
         const uint8_t *fb;
-        if (provision_is_active()) {
+        if (s_settings.open) {
+            settings_screen_render(s_setup_fb, &s_settings);
+            fb = s_setup_fb;
+        } else if (provision_is_active()) {
             setup_screen_t s;
             provision_screen(&s);
             setup_screen_render(s_setup_fb, &s);
             fb = s_setup_fb;
         } else {
-            face_set_reset_progress(&s_face, s_face_reset_pct, t);
+            // The bar across the eyes is now the menu's hold, not the
+            // five-tap count: it is the warning that a hold on B is about to
+            // take the panel away from the face, given while there is still
+            // time to let go.
+            face_set_reset_progress(&s_face, s_settings.hold_pct, t);
             face_tick(&s_face, t);
             fb = face_framebuffer(&s_face);
 
@@ -1275,19 +1356,24 @@ static void audio_out_task(void *arg) {
     }
 }
 
-// Samples the button and nothing else, so its timing cannot be affected by a
-// send that is waiting on the network.
+// Samples both buttons and nothing else, so their timing cannot be affected
+// by a send that is waiting on the network. One task for two pins: the reason
+// it exists in the first place is the same for both.
 static void button_task(void *arg) {
-    bool stable = false;
-    TickType_t changed = 0;
+    struct { gpio_num_t pin; bool stable; TickType_t changed; volatile bool *out; } b[2] = {
+        {PIN_BUTTON, false, 0, &s_button_down},
+        {PIN_BUTTON_B, false, 0, &s_button_b_down},
+    };
 
     while (true) {
-        const bool down = gpio_get_level(PIN_BUTTON) == 0;
         const TickType_t now = xTaskGetTickCount();
-        if (down != stable && (now - changed) > pdMS_TO_TICKS(DEBOUNCE_MS)) {
-            stable = down;
-            changed = now;
-            s_button_down = down;
+        for (int i = 0; i < 2; i++) {
+            const bool down = gpio_get_level(b[i].pin) == 0;
+            if (down != b[i].stable && (now - b[i].changed) > pdMS_TO_TICKS(DEBOUNCE_MS)) {
+                b[i].stable = down;
+                b[i].changed = now;
+                *b[i].out = down;
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(5));
     }
@@ -1588,6 +1674,24 @@ void app_main(void) {
 
     audio_init();
 
+    // Read before the panel, not after it, and the menu is seeded here rather
+    // than inside face_task.
+    //
+    // face_task runs at a higher priority than app_main, so it starts the
+    // instant xTaskCreate returns and has drawn its first frame before the
+    // next line of this function executes. Anything it reads at startup has
+    // to be true *before* it is created, not a few milliseconds later:
+    // seeding the menu from inside face_task would have read a zeroed config
+    // every single time, and left the panel at its dimmest step and the
+    // volume at muted with no way to notice but the symptom.
+    //
+    // Doing it here also means the values still arrive on a device with no
+    // OLED, where face_task is never created at all but audio_out_task still
+    // reads the volume.
+    device_config_t cfg;
+    config_load(&cfg);
+    settings_init(&s_settings, cfg.volume, cfg.screen, cfg.eyes);
+
     // The panel is optional, and it is asked about before WiFi so there is a
     // face to watch while the radio associates.
     //
@@ -1623,9 +1727,6 @@ void app_main(void) {
 
     // Before anything that touches the radio, including provisioning.
     wifi_init_stack();
-
-    device_config_t cfg;
-    config_load(&cfg);
 
     // Two ways in: nothing is configured, or the hold-to-reset gesture asked
     // for it before restarting. Note what is deliberately absent - failing to
@@ -1665,7 +1766,11 @@ void app_main(void) {
                 vTaskDelay(pdMS_TO_TICKS(20));  // fast enough not to miss a tap
             }
             provision_stop();
-            config_load(&cfg);  // pick up whatever was just saved
+            // Pick up whatever was just saved. Deliberately not re-seeding
+            // the settings menu from it: the menu is reachable while the
+            // setup screen is up, so what is in NVS by now may be older than
+            // what is on screen, and the live state is the newer of the two.
+            config_load(&cfg);
         } else {
             // Nothing else to try. Fall through and attempt whatever is
             // configured: with no credentials that waits forever, which is at
