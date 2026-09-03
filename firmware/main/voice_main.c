@@ -189,10 +189,33 @@ static volatile TickType_t s_last_activity = 0;
 static volatile bool s_button_down = false;
 // Debounced second button, owned by button_task alongside the first.
 static volatile bool s_button_b_down = false;
-// The settings carousel. Seeded once in app_main, before face_task exists,
-// and written only by face_task after that - which is also the only task that
-// draws, so the screen can never disagree with the state behind it.
+// The settings carousel. Seeded once in app_main, before face_task exists.
+// After that face_task is its only writer here, and it is also the only task
+// that draws, so the screen can never disagree with the state behind it.
+// Task 6 adds a second writer - audio_out_task clearing beep_requested - and
+// will need its own answer to the paragraph below for the two fields it
+// shares; this one covers the one field that crosses a task boundary today.
+//
+// Deliberately not volatile. settings_tick() takes a plain settings_t *, so a
+// volatile struct could only be passed to it by casting the qualifier away at
+// every call, which buys the appearance of safety and none of it. Instead the
+// single bit that other tasks need is published separately, below: one bit,
+// one writer, and the sharing is visible in the declaration rather than
+// inferred from a struct several tasks happen to reach into.
 static settings_t s_settings;
+
+// Whether the menu is up, published by face_task for the tasks that must not
+// mistake a press meant for the menu for a question.
+//
+// volatile because net_task, boot_gesture_task and app_main read it in loops
+// they do not write it from, and without the qualifier the compiler is
+// entitled to hoist the read out of those loops. It happens not to today -
+// the address escapes to other translation units, every iteration passes
+// through an external call, the part is unicore, and the build is -Og with no
+// LTO - but not one of those reasons is recorded in the object code, and a
+// switch to -Os or IPO could take any of them away silently. The gate that
+// keeps the menu out of the conversation depends on this read being fresh.
+static volatile bool s_menu_open = false;
 // Set by net_task when the user presses during a reply; audio_out acts on it.
 static volatile bool s_abort_playback = false;
 // True while the speaker is actually producing sound. Owned by audio_out_task.
@@ -936,7 +959,16 @@ static void face_task(void *arg) {
     // before the first frame is drawn, rather than a frame or two into the
     // boot animation.
     face_set_resting(&s_face, settings_eyes_emotion(s_settings.step[SETTINGS_PAGE_EYES]));
-    ssd1306_set_contrast(&s_panel, settings_screen_contrast(s_settings.step[SETTINGS_PAGE_SCREEN]));
+    // The contrast write's result is discarded on purpose, here and in the
+    // loop, while ssd1306_flush()'s is checked and logged. Not an oversight
+    // and not a double standard: the only way this write fails is a panel
+    // that has stopped answering, and the flush a few lines below will fail
+    // in the same frame and say so - once on the way down and once on the way
+    // back, which is the whole point of the way it says it. A second error
+    // path here would report the same fact in a way that does not know it is
+    // the same fact.
+    (void)ssd1306_set_contrast(&s_panel,
+                               settings_screen_contrast(s_settings.step[SETTINGS_PAGE_SCREEN]));
     uint8_t shown_screen_step = s_settings.step[SETTINGS_PAGE_SCREEN];
 
     face_state_t shown = FACE_ST_IDLE;
@@ -1016,17 +1048,30 @@ static void face_task(void *arg) {
         settings_tick(&s_settings, s_button_down && menu_input,
                       s_button_b_down && menu_input, t);
 
+        // Publish the one bit the other tasks need, from the task that owns
+        // the state, immediately after the tick that can change it.
+        s_menu_open = s_settings.open;
+
         // Brightness is applied as it changes rather than on the way out, so
         // the value can be judged by looking at it. Only on a change: the
         // contrast command is an I2C transaction, and one per frame would
         // cost a write the flush below has spent effort avoiding.
         if (s_settings.step[SETTINGS_PAGE_SCREEN] != shown_screen_step) {
             shown_screen_step = s_settings.step[SETTINGS_PAGE_SCREEN];
-            ssd1306_set_contrast(&s_panel, settings_screen_contrast(shown_screen_step));
+            // Discarded for the reason given at the top of this task.
+            (void)ssd1306_set_contrast(&s_panel, settings_screen_contrast(shown_screen_step));
         }
 
         if (s_settings.wifi_requested) {
             s_settings.wifi_requested = false;
+            // This path does not save. Anything changed on the volume,
+            // brightness or eyes pages during this visit is lost across the
+            // restart, because leaving through the WiFi page is not leaving
+            // through the exit hold and only the exit hold raises
+            // save_requested. Defensible - you came to this page to redo the
+            // network, not to keep a volume change - but not obvious, so it
+            // is written down here and on the bench sheet rather than being
+            // discovered and filed as a bug.
             ESP_LOGW(TAG, "settings: wifi setup requested, restarting into provisioning");
             config_request_provisioning();
             vTaskDelay(pdMS_TO_TICKS(100));  // let the log line reach the console
@@ -1035,6 +1080,13 @@ static void face_task(void *arg) {
 
         if (s_settings.save_requested) {
             s_settings.save_requested = false;
+            // The commit below is a flash write, which on this part means the
+            // instruction cache is disabled for its duration: every task
+            // running from flash stalls for it, not just this one. Tens of
+            // milliseconds, once per menu close, so the cost is a dropped
+            // frame and possibly a brief audible artefact if a reply happens
+            // to be playing - worth it for a write that happens on the way
+            // out instead of on every press.
             face_set_resting(&s_face, settings_eyes_emotion(s_settings.step[SETTINGS_PAGE_EYES]));
             const esp_err_t serr = config_save_settings(s_settings.step[SETTINGS_PAGE_VOLUME],
                                                         s_settings.step[SETTINGS_PAGE_SCREEN],
@@ -1186,6 +1238,13 @@ static void audio_in_task(void *arg) {
         // directly stops recording the instant it is released, so a three
         // second question stays three seconds instead of growing to twenty-two
         // and burying the uplink in audio nobody asked for.
+        //
+        // Deliberately the raw button, not button_outside_menu(): this is a
+        // level test guarded by ST_LISTENING, and the only way that state is
+        // reached with the menu up is an utterance net_task is already about
+        // to end. The audio recorded in that gap belongs to the question and
+        // the release path flushes it into it, so masking here would trim the
+        // end off a question that is closing properly.
         if (s_state != ST_LISTENING || !s_button_down) continue;
 
         const size_t n = got / sizeof(int32_t) / 2;
@@ -1447,6 +1506,57 @@ static uint8_t tap_count(tap_counter_t *c, bool down, TickType_t now) {
     return c->taps;
 }
 
+// The button as everything outside the settings menu must see it: the
+// debounced level, minus any press the menu has taken for itself.
+//
+// The menu is worked with A as much as with B - A walks the pages, a
+// one-second A hold closes it - and to a task that reads s_button_down every
+// one of those is a press like any other. Ungated, walking the carousel
+// spends a start/cancel round trip per page, closing the menu by hand sends a
+// second of room tone to be transcribed, and five taps inside three seconds
+// reboot the device into provisioning and take the unsaved settings with it.
+//
+// Two things beyond "nothing while the menu is open" have to be true, and the
+// latch is what makes the second of them true.
+//
+// Opening the menu part-way through an utterance arrives at net_task as a
+// release, so the question ends through the path that already exists and the
+// server gets its "end" rather than being left waiting. That is what the
+// design asks for and it is better than a cancel.
+//
+// And the press that closed the menu is still physically down at the moment
+// the menu goes away. Without the latch it would arrive as a fresh press edge
+// - a start to net_task, a tap to the counters - the instant someone finished
+// the gesture that means "I am done". So the mask outlives the menu and is
+// lifted only by an actual release: exactly the remainder of that one
+// physical press is discarded, not the button.
+//
+// Each caller keeps its own instance, the way each keeps its own
+// tap_counter_t, because the mask records where one loop is in one physical
+// press and two loops are not in the same place. Each polls at 20 ms or
+// faster against a 25 ms debounce, so none can miss the release that lifts
+// it - except net_task, which can sit in a send for up to SEND_TIMEOUT. A
+// menu opened and closed entirely inside one such stall is never seen there
+// at all; that fails safe, to the behaviour from before the menu existed.
+//
+// What this deliberately does not do is give the menu the interrupt. While it
+// is open, A cannot stop a reply that is playing, because the interrupt path
+// needs the press edge this removes. The reply is audible and the way to stop
+// it is to close the menu first, which is a second's hold.
+typedef struct {
+    bool masked;
+} menu_mask_t;
+
+static bool button_outside_menu(menu_mask_t *m) {
+    const bool raw = s_button_down;
+    if (s_menu_open) {
+        m->masked = true;
+    } else if (!raw) {
+        m->masked = false;
+    }
+    return raw && !m->masked;
+}
+
 // Watches for the same five-tap gesture while wifi_connect() below is still
 // blocked waiting for a network. net_task is where the gesture normally
 // lives, but it is not created until wifi_connect() returns - so a device
@@ -1464,9 +1574,15 @@ static uint8_t tap_count(tap_counter_t *c, bool down, TickType_t now) {
 // handling it.
 static void boot_gesture_task(void *arg) {
     tap_counter_t taps = {0};
+    // This task lives across wifi_connect(), which has no timeout - so it is
+    // alive in exactly the situation where the panel starts advertising a way
+    // into setup and someone starts pressing things. The menu can be open
+    // here, and four presses round the carousel plus one would otherwise be
+    // the reset gesture.
+    menu_mask_t mask = {0};
     while (true) {
         const TickType_t now = xTaskGetTickCount();
-        const uint8_t n = tap_count(&taps, s_button_down, now);
+        const uint8_t n = tap_count(&taps, button_outside_menu(&mask), now);
         s_face_reset_pct = (n >= RESET_TAPS_VISIBLE) ? (uint8_t)((n * 100u) / RESET_TAPS) : 0;
         if (n >= RESET_TAPS) {
             ESP_LOGW(TAG, "five taps while stuck connecting; restarting into provisioning");
@@ -1481,53 +1597,19 @@ static void boot_gesture_task(void *arg) {
 static void net_task(void *arg) {
     static uint8_t chunk[1024];
     bool held = false;
-    // The remainder of a press that belonged to the settings menu. See the
-    // gate at the top of the loop.
-    bool masked = false;
+    menu_mask_t mask = {0};
     tap_counter_t taps_in = {0};
     TickType_t press_start = 0;
 
     TickType_t busy_since = 0;
 
     while (true) {
-        // What this task is allowed to see of the button, which is not the
-        // same thing as what the button is doing.
-        //
-        // The menu is worked with A as much as with B - A walks the pages, a
-        // one-second A hold closes it - and every one of those is also a
-        // push-to-talk press. Ungated, walking the carousel spends a
-        // start/cancel round trip per page, and closing the menu by hand
-        // sends a full second of room tone to be transcribed: a Groq STT call
-        // and a round trip on the link that is this project's blocking
-        // problem, every single time anyone changes a setting.
-        //
-        // Two things beyond "no press while the menu is open" have to be
-        // true, and the latch is what makes the second of them true.
-        //
-        // Opening the menu part-way through an utterance arrives here as a
-        // release, so the question ends through the path that already exists
-        // and the server gets its "end" rather than being left waiting. That
-        // is what the design asks for and it is better than a cancel.
-        //
-        // And the press that closed the menu is still physically down at the
-        // moment the menu goes away. Without the latch it would arrive here
-        // as a fresh press edge and start recording the instant someone
-        // finished the gesture that means "I am done". So the mask outlives
-        // the menu and is only lifted by an actual release: exactly the
-        // remainder of that one physical press is discarded, not the button.
-        //
-        // A menu opened and closed entirely inside one send stall - this task
-        // can sit in esp_websocket_client_send_bin for up to SEND_TIMEOUT -
-        // is never observed here at all. That case degrades to the behaviour
-        // before the menu existed: no edge is seen, so nothing starts, and
-        // the utterance already in flight ends normally on release.
-        const bool raw = s_button_down;
-        if (s_settings.open) {
-            masked = true;
-        } else if (!raw) {
-            masked = false;
-        }
-        const bool down = raw && !masked;
+        // The button, minus anything the settings menu has taken. The whole
+        // argument for the gate, and for the latch inside it, is above
+        // button_outside_menu(); the short version is that A works the menu
+        // as well as it works push-to-talk, and this task must not confuse
+        // the two.
+        const bool down = button_outside_menu(&mask);
         const TickType_t now = xTaskGetTickCount();
 
         const uint8_t taps = tap_count(&taps_in, down, now);
@@ -1801,9 +1883,17 @@ void app_main(void) {
             // net_task does not exist yet - it is created once the radio is
             // up, which is after this returns.
             tap_counter_t taps_out = {0};
+            // The menu cannot open while this screen is up - face_task starves
+            // the gesture of input for exactly as long as provision_is_active()
+            // - so there is nothing here for the mask to discard. It is used
+            // anyway so that all three tap counters read the button the same
+            // way; one of the three reading it differently is a trap for
+            // whoever changes this next.
+            menu_mask_t mask = {0};
             uint8_t shown = 0;
             while (provision_is_active() && !provision_complete() && !provision_idle_expired()) {
-                const uint8_t taps = tap_count(&taps_out, s_button_down, xTaskGetTickCount());
+                const uint8_t taps =
+                    tap_count(&taps_out, button_outside_menu(&mask), xTaskGetTickCount());
                 if (taps >= RESET_TAPS) {
                     ESP_LOGW(TAG, "five taps: leaving setup without configuring");
                     break;
@@ -1822,9 +1912,11 @@ void app_main(void) {
             }
             provision_stop();
             // Pick up whatever was just saved. Deliberately not re-seeding
-            // the settings menu from it: the menu is reachable while the
-            // setup screen is up, so what is in NVS by now may be older than
-            // what is on screen, and the live state is the newer of the two.
+            // the settings menu from it: provisioning writes the network and
+            // the server URI and never the three settings, so there is
+            // nothing new to take, and settings_init() is a construction
+            // call - it zeroes the gesture state along with the values, which
+            // is not a thing to do to a live menu.
             config_load(&cfg);
         } else {
             // Nothing else to try. Fall through and attempt whatever is
