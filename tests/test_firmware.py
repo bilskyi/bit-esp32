@@ -1,13 +1,31 @@
 """The relay that carries a firmware image to the device.
 
-The push tests run the POST on a thread. They have to: the request does not
-finish until the device has answered, and the device is this same test.
+No test here opens a real TestClient websocket and then makes an HTTP
+request, and that constraint is the whole shape of this file.
+
+Starlette's TestClient cannot reliably do both at once: its websocket
+session and its HTTP transport contend on one blocking portal, and the
+request either orphans a pooled database connection - surfacing later as
+"the garbage collector is trying to clean up non-checked-in connection",
+attributed to whatever unrelated test the collection happened to land in -
+or hangs in TestClient.__exit__ outright. Isolated by elimination: a bare
+client, a login, a websocket, and a websocket round trip are all clean; a
+websocket plus one GET is what breaks.
+
+That is a limitation of the test client, not of the app. uvicorn serves an
+upload and a websocket on one event loop without difficulty, which is what
+the end-to-end run against a real server proves (scripts/fake_device.py
+--await-ota, and the transcript in the commit that added it).
+
+So the device is a FakeWebSocket registered directly in the registry, the
+push is an ordinary HTTP request, and the registry's own behaviour is
+tested on the registry.
 """
 
 import json
 import struct
-import threading
 
+from tests.fakes import BrokenWebSocket, FakeWebSocket
 from tests.test_main import client  # noqa: F401 - see the note below
 
 # client() lives in test_main.py rather than conftest.py, and is imported
@@ -18,8 +36,9 @@ from tests.test_main import client  # noqa: F401 - see the note below
 from server.firmware import (
     CHIP_ID_ESP32C3,
     HEADER_MIN,
-    MAX_BODY,
     OTA_CHUNK,
+    DeviceLink,
+    DeviceRegistry,
     check_image,
     image_version,
 )
@@ -104,41 +123,31 @@ def test_image_version_of_an_unterminated_field_is_none():
 # ----------------------------------------------------------------- the push
 
 
+def connected(c, ws=None):
+    """Put a stand-in device in the registry and hand back its socket."""
+    fake = ws if ws is not None else FakeWebSocket()
+    link = DeviceLink(fake)
+    c.app.state.devices._links["esp32"] = link
+    return fake, link
+
+
 def login(c):
     r = c.post("/login", json={"username": "test", "password": "test123"})
     assert r.status_code == 200
 
 
-def push_on_a_thread(c, body, out):
-    def run():
-        out.append(c.post("/firmware/push", content=body))
-
-    t = threading.Thread(target=run)
-    t.start()
-    return t
-
-
-def device_frames(ws, until="ota_end", limit=200):
-    """Everything the server sends the device, up to and including `until`."""
-    texts, blob = [], bytearray()
-    for _ in range(limit):
-        message = ws.receive()
-        if message.get("bytes") is not None:
-            blob += message["bytes"]
-            continue
-        text = message.get("text")
-        if text is None:
-            continue
-        payload = json.loads(text)
-        texts.append(payload)
-        if payload.get("type") == until:
-            break
-    return texts, bytes(blob)
+def lines(response):
+    return [json.loads(line) for line in response.text.splitlines() if line.strip()]
 
 
 def test_push_requires_a_login():
     with client(device_token=TOKEN) as c:
         assert c.post("/firmware/push", content=firmware()).status_code == 401
+
+
+def test_device_endpoint_requires_a_login():
+    with client(device_token=TOKEN) as c:
+        assert c.get("/firmware/device").status_code == 401
 
 
 def test_push_with_no_device_connected_is_a_409():
@@ -152,148 +161,176 @@ def test_push_with_no_device_connected_is_a_409():
 def test_push_refuses_a_file_that_is_not_firmware():
     with client(device_token=TOKEN) as c:
         login(c)
-        with c.websocket_connect("/ws", headers=DEVICE_HEADERS) as ws:
-            bad = bytearray(firmware())
-            bad[0] = ord("P")
-            r = c.post("/firmware/push", content=bytes(bad))
-            assert r.status_code == 400
-            assert "ESP" in r.text
-            # And the device was told nothing at all: a refused file must not
-            # cost the running image its partition. Asserted directly rather
-            # than by asking the server what it thinks - if an ota_begin had
-            # gone out, it would be sitting in front of this reply.
-            ws.send_text(json.dumps({"type": "start"}))
-            assert json.loads(ws.receive_text())["value"] == "listening"
+        fake, _ = connected(c)
+        bad = bytearray(firmware())
+        bad[0] = ord("P")
+
+        r = c.post("/firmware/push", content=bytes(bad))
+
+        assert r.status_code == 400
+        assert "ESP" in r.text
+        # And the device was told nothing at all: a refused file must not cost
+        # the running image its partition.
+        assert fake.texts == []
+        assert fake.blob == b""
 
 
 def test_push_refuses_an_empty_body():
     with client(device_token=TOKEN) as c:
         login(c)
-        with c.websocket_connect("/ws", headers=DEVICE_HEADERS):
-            assert c.post("/firmware/push", content=b"").status_code == 400
+        fake, _ = connected(c)
+        assert c.post("/firmware/push", content=b"").status_code == 400
+        assert fake.texts == []
 
 
-def test_push_refuses_something_far_too_large_to_be_firmware():
+def test_push_refuses_something_far_too_large_to_be_firmware(monkeypatch):
+    # The ceiling is lowered rather than the body raised: the constant is
+    # what is under test, and four megabytes of test data is four megabytes
+    # of nothing.
+    monkeypatch.setattr("server.firmware.MAX_BODY", HEADER_MIN * 2)
     with client(device_token=TOKEN) as c:
         login(c)
-        with c.websocket_connect("/ws", headers=DEVICE_HEADERS):
-            # A valid header on the front, so the only thing wrong with it is
-            # the size - otherwise this would pass for the wrong reason.
-            oversized = firmware(size=MAX_BODY + 1)
-            r = c.post("/firmware/push", content=oversized)
-            assert r.status_code == 413
-            assert "larger" in r.text
+        fake, _ = connected(c)
+        # A valid header on the front, so size is the only thing wrong with
+        # it - otherwise this would pass for the wrong reason.
+        r = c.post("/firmware/push", content=firmware(size=HEADER_MIN * 2 + 1))
+        assert r.status_code == 413
+        assert "larger" in r.text
+        assert fake.texts == []
 
 
 def test_push_sends_begin_then_the_bytes_then_end():
     body = firmware()
     with client(device_token=TOKEN) as c:
         login(c)
-        with c.websocket_connect("/ws", headers=DEVICE_HEADERS) as ws:
-            out = []
-            t = push_on_a_thread(c, body, out)
-            texts, blob = device_frames(ws)
-            ws.send_text(json.dumps({"type": "ota_ready"}))
-            t.join(timeout=20)
+        c.app.state.devices.reply_timeout_s = 0.2
+        fake, _ = connected(c)
 
-    assert texts[0]["type"] == "ota_begin"
-    assert texts[0]["size"] == len(body)
-    assert texts[0]["version"] == "v0.2.1"
-    assert texts[-1]["type"] == "ota_end"
-    assert blob == body
+        c.post("/firmware/push", content=body)
+
+    assert fake.frames[0]["type"] == "ota_begin"
+    assert fake.frames[0]["size"] == len(body)
+    assert fake.frames[0]["version"] == "v0.2.1"
+    assert fake.frames[-1]["type"] == "ota_end"
+    assert bytes(fake.blob) == body
+    # Order matters as much as content: an image written before its begin
+    # would land in a partition nobody had opened.
+    assert fake.order[0] == "text"
+    assert fake.order[-1] == "text"
 
 
 def test_push_never_sends_a_frame_larger_than_the_devices_buffer():
     body = firmware(size=OTA_CHUNK * 2 + 5)
     with client(device_token=TOKEN) as c:
         login(c)
-        with c.websocket_connect("/ws", headers=DEVICE_HEADERS) as ws:
-            out = []
-            t = push_on_a_thread(c, body, out)
-            sizes = []
-            for _ in range(200):
-                message = ws.receive()
-                if message.get("bytes") is not None:
-                    sizes.append(len(message["bytes"]))
-                    continue
-                if message.get("text") and json.loads(message["text"])["type"] == "ota_end":
-                    break
-            ws.send_text(json.dumps({"type": "ota_ready"}))
-            t.join(timeout=20)
+        c.app.state.devices.reply_timeout_s = 0.2
+        fake, _ = connected(c)
 
-    # The device's own receive buffer is 4096 (ws_start's .buffer_size). A
-    # larger frame arrives fragmented, which still works, but there is no
-    # reason to make it and every reason not to guess.
-    assert sizes and max(sizes) <= OTA_CHUNK
-    assert sum(sizes) == len(body)
+        c.post("/firmware/push", content=body)
+
+    # The device's own receive buffer is 4096 - ws_start's .buffer_size. A
+    # larger frame arrives fragmented, which the firmware handles, but there
+    # is no reason to make one and every reason not to guess.
+    assert fake.binary_sizes == [OTA_CHUNK, OTA_CHUNK, 5]
+    assert sum(fake.binary_sizes) == len(body)
 
 
 def test_push_streams_progress_and_the_outcome():
     body = firmware()
     with client(device_token=TOKEN) as c:
         login(c)
-        with c.websocket_connect("/ws", headers=DEVICE_HEADERS) as ws:
-            out = []
-            t = push_on_a_thread(c, body, out)
-            device_frames(ws)
-            ws.send_text(json.dumps({"type": "ota_ready"}))
-            t.join(timeout=20)
+        _, link = connected(c)
+        # Answered before it is asked. put_nowait with no waiter needs no
+        # loop, and await_outcome finds it there.
+        link.replies.put_nowait({"type": "ota_ready"})
 
-    assert out and out[0].status_code == 200
-    lines = [json.loads(line) for line in out[0].text.splitlines() if line.strip()]
-    sent = [line["sent"] for line in lines if "sent" in line]
+        r = c.post("/firmware/push", content=body)
+
+    assert r.status_code == 200
+    reported = lines(r)
+    sent = [line["sent"] for line in reported if "sent" in line]
     assert sent == sorted(sent)
+    assert sent[0] == 0, "progress should start at zero, not at the first chunk"
     assert sent[-1] == len(body)
-    assert lines[-1]["done"] is True
-    assert lines[-1]["outcome"] == "ota_ready"
+    assert reported[-1] == {"done": True, "outcome": "ota_ready", "reason": ""}
 
 
 def test_push_reports_a_refusal_from_the_device():
-    body = firmware()
     with client(device_token=TOKEN) as c:
         login(c)
-        with c.websocket_connect("/ws", headers=DEVICE_HEADERS) as ws:
-            out = []
-            t = push_on_a_thread(c, body, out)
-            device_frames(ws)
-            ws.send_text(json.dumps({"type": "ota_failed", "reason": "busy talking"}))
-            t.join(timeout=20)
+        _, link = connected(c)
+        link.replies.put_nowait({"type": "ota_failed", "reason": "busy talking"})
 
-    lines = [json.loads(line) for line in out[0].text.splitlines() if line.strip()]
-    assert lines[-1]["outcome"] == "ota_failed"
-    assert lines[-1]["reason"] == "busy talking"
+        r = c.post("/firmware/push", content=firmware())
+
+    assert lines(r)[-1] == {"done": True, "outcome": "ota_failed", "reason": "busy talking"}
 
 
-def test_push_gives_up_waiting_rather_than_hanging():
-    body = firmware()
+def test_push_ignores_an_ota_frame_it_does_not_understand():
+    """A frame that is neither ready nor failed must not end the wait.
+
+    Otherwise a future firmware sending, say, ota_progress would make every
+    push report success the moment it arrived.
+    """
     with client(device_token=TOKEN) as c:
         login(c)
         c.app.state.devices.reply_timeout_s = 0.3
-        with c.websocket_connect("/ws", headers=DEVICE_HEADERS) as ws:
-            device_frames_thread = []
-            t = push_on_a_thread(c, body, device_frames_thread)
-            device_frames(ws)  # read, but never answer
-            t.join(timeout=20)
+        _, link = connected(c)
+        link.replies.put_nowait({"type": "ota_something_new"})
 
-    lines = [
-        json.loads(line) for line in device_frames_thread[0].text.splitlines() if line.strip()
-    ]
-    assert lines[-1]["outcome"] == "timeout"
+        r = c.post("/firmware/push", content=firmware())
+
+    assert lines(r)[-1]["outcome"] == "timeout"
 
 
-def test_a_second_push_while_one_is_running_is_a_409():
-    body = firmware()
+def test_push_gives_up_waiting_rather_than_hanging():
     with client(device_token=TOKEN) as c:
         login(c)
-        with c.websocket_connect("/ws", headers=DEVICE_HEADERS) as ws:
-            out = []
-            t = push_on_a_thread(c, body, out)
-            device_frames(ws)  # the first push is now waiting for a reply
-            second = c.post("/firmware/push", content=body)
-            assert second.status_code == 409
-            assert "already" in second.text
-            ws.send_text(json.dumps({"type": "ota_ready"}))
-            t.join(timeout=20)
+        c.app.state.devices.reply_timeout_s = 0.3
+        connected(c)
+
+        r = c.post("/firmware/push", content=firmware())  # nobody ever answers
+
+    assert lines(r)[-1]["outcome"] == "timeout"
+
+
+def test_a_socket_that_dies_mid_transfer_is_reported_not_raised():
+    with client(device_token=TOKEN) as c:
+        login(c)
+        fake, _ = connected(c, BrokenWebSocket())
+
+        r = c.post("/firmware/push", content=firmware())
+
+    # The response is a stream that already carried a 200 header, so the
+    # failure has to arrive inside the body rather than as a status.
+    assert r.status_code == 200
+    assert lines(r)[-1]["outcome"] == "error"
+    assert "went away" in lines(r)[-1]["reason"]
+
+
+def test_the_push_slot_is_released_after_a_failure():
+    """A transfer that died must not lock the device out of the next one."""
+    with client(device_token=TOKEN) as c:
+        login(c)
+        connected(c, BrokenWebSocket())
+        c.post("/firmware/push", content=firmware())
+        assert c.app.state.devices.pushing is False, "the slot was never released"
+
+        # And a second attempt is refused for a real reason, not for that one.
+        fake, _ = connected(c)
+        c.app.state.devices.reply_timeout_s = 0.2
+        assert c.post("/firmware/push", content=firmware()).status_code == 200
+
+
+def test_a_push_while_the_slot_is_taken_is_a_409():
+    with client(device_token=TOKEN) as c:
+        login(c)
+        connected(c)
+        # Exactly the state a push in flight leaves the registry in.
+        assert c.app.state.devices.begin_push() is True
+        r = c.post("/firmware/push", content=firmware())
+        assert r.status_code == 409
+        assert "already" in r.text
 
 
 # ------------------------------------------------------------ what it knows
@@ -302,52 +339,131 @@ def test_a_second_push_while_one_is_running_is_a_409():
 def test_device_endpoint_reports_nothing_when_nothing_is_connected():
     with client(device_token=TOKEN) as c:
         login(c)
-        r = c.get("/firmware/device")
-        assert r.json() == {"online": False, "version": None}
+        assert c.get("/firmware/device").json() == {"online": False, "version": None}
 
 
 def test_device_endpoint_reports_what_hello_said():
     with client(device_token=TOKEN) as c:
         login(c)
+        _, link = connected(c)
+        c.app.state.devices.on_frame("esp32", {"type": "hello", "version": "v0.3.0-2-gabc1234"})
+        assert c.get("/firmware/device").json() == {
+            "online": True,
+            "version": "v0.3.0-2-gabc1234",
+        }
+        assert link.version == "v0.3.0-2-gabc1234"
+
+
+# ------------------------------------------------------------- the registry
+#
+# Tested directly rather than through a websocket, for the reason in the
+# module docstring. What a real socket proves and this does not - that the
+# frames actually reach here from `/ws` - is covered by the end-to-end run
+# with scripts/fake_device.py.
+
+
+def test_registry_takes_hello_and_every_ota_frame():
+    registry = DeviceRegistry()
+    link = registry.register("esp32", FakeWebSocket())
+
+    assert registry.on_frame("esp32", {"type": "hello", "version": "v1"}) is True
+    assert link.version == "v1"
+
+    assert registry.on_frame("esp32", {"type": "ota_ready"}) is True
+    assert registry.on_frame("esp32", {"type": "ota_failed", "reason": "x"}) is True
+    assert link.replies.qsize() == 2
+
+
+def test_registry_leaves_the_sessions_own_frames_alone():
+    registry = DeviceRegistry()
+    registry.register("esp32", FakeWebSocket())
+    for frame in ({"type": "start"}, {"type": "end"}, {"type": "cancel"}, {"type": "text"}):
+        assert registry.on_frame("esp32", frame) is False, frame
+
+
+def test_registry_ignores_a_hello_with_no_usable_version():
+    registry = DeviceRegistry()
+    link = registry.register("esp32", FakeWebSocket())
+    assert registry.on_frame("esp32", {"type": "hello", "version": 7}) is True
+    assert link.version is None
+
+
+def test_registry_reports_only_the_surface_asked_for():
+    registry = DeviceRegistry()
+    registry.register("web", FakeWebSocket())
+    assert registry.get("esp32") is None, "a browser was mistaken for the device"
+    assert registry.get("web") is not None
+
+
+def test_registry_drops_only_its_own_link():
+    """A reconnect that raced a teardown has already replaced the entry, and
+    dropping it then would deregister a device that is live."""
+    registry = DeviceRegistry()
+    first = registry.register("esp32", FakeWebSocket())
+    second = registry.register("esp32", FakeWebSocket())
+    registry.drop("esp32", first)
+    assert registry.get("esp32") is second
+    registry.drop("esp32", second)
+    assert registry.get("esp32") is None
+
+
+def test_registry_push_slot_is_claimed_once_and_comes_back():
+    registry = DeviceRegistry()
+    assert registry.pushing is False
+    assert registry.begin_push() is True
+    assert registry.begin_push() is False, "a second push claimed the slot"
+    registry.end_push()
+    assert registry.begin_push() is True, "the slot did not come back"
+
+
+def test_registry_ignores_frames_for_a_surface_it_does_not_know():
+    registry = DeviceRegistry()
+    assert registry.on_frame("esp32", {"type": "hello", "version": "v1"}) is False
+
+
+# ------------------------------------------------- and through a real socket
+#
+# The one thing a fake link cannot show: that `/ws` registers it at all and
+# that main.py's loop routes `hello` to it before the session dispatch. Both
+# of these read the registry in-process rather than over HTTP, which is what
+# keeps them clear of the portal contention the module docstring describes.
+
+
+def test_the_ws_endpoint_registers_the_device_and_routes_hello():
+    with client(device_token=TOKEN) as c:
         with c.websocket_connect("/ws", headers=DEVICE_HEADERS) as ws:
-            ws.send_text(json.dumps({"type": "hello", "version": "v0.3.0-2-gabc1234"}))
-            # The hello has to be processed before the GET can see it, and the
-            # only ordering guarantee available is a round trip on the same
-            # socket - so ask for something the session answers.
+            ws.send_text(json.dumps({"type": "hello", "version": "v0.9.9"}))
+            # A round trip on the same socket is the only ordering guarantee
+            # available, so ask for something the session itself answers.
             ws.send_text(json.dumps({"type": "start"}))
             assert json.loads(ws.receive_text())["value"] == "listening"
-            r = c.get("/firmware/device")
-            assert r.json() == {"online": True, "version": "v0.3.0-2-gabc1234"}
+
+            link = c.app.state.devices.get("esp32")
+            assert link is not None, "/ws did not register the device"
+            assert link.version == "v0.9.9", "hello never reached the registry"
 
 
-def test_device_endpoint_requires_a_login():
-    with client(device_token=TOKEN) as c:
-        assert c.get("/firmware/device").status_code == 401
-
-
-def test_a_browser_connection_is_not_mistaken_for_the_device():
+def test_a_browser_connection_is_not_registered_as_the_device():
     with client(device_token=TOKEN) as c:
         login(c)
         # No bearer token, but a session cookie: _authorise_connection calls
-        # this "web", and it must not register as the thing firmware is
-        # pushed to.
+        # this "web", and it must not become the thing firmware is pushed to.
         with c.websocket_connect("/ws") as ws:
             ws.send_text(json.dumps({"type": "hello", "version": "a browser"}))
             ws.send_text(json.dumps({"type": "start"}))
             assert json.loads(ws.receive_text())["value"] == "listening"
-            assert c.get("/firmware/device").json()["online"] is False
-            assert c.post("/firmware/push", content=firmware()).status_code == 409
+
+            assert c.app.state.devices.get("esp32") is None
+            assert c.app.state.devices.get("web") is not None
 
 
 def test_the_device_going_away_deregisters_it():
     with client(device_token=TOKEN) as c:
-        login(c)
         with c.websocket_connect("/ws", headers=DEVICE_HEADERS) as ws:
-            ws.send_text(json.dumps({"type": "hello", "version": "v1"}))
             ws.send_text(json.dumps({"type": "start"}))
             assert json.loads(ws.receive_text())["value"] == "listening"
-            assert c.get("/firmware/device").json()["online"] is True
-        assert c.get("/firmware/device").json() == {"online": False, "version": None}
+            assert c.app.state.devices.get("esp32") is not None
+        assert c.app.state.devices.get("esp32") is None
 
 
 def test_an_ota_frame_does_not_reach_the_session():
@@ -355,8 +471,10 @@ def test_an_ota_frame_does_not_reach_the_session():
     they land in main.py's "ignoring control message" branch, which is
     harmless today and would silently swallow the reply this feature needs."""
     with client(device_token=TOKEN) as c:
-        login(c)
         with c.websocket_connect("/ws", headers=DEVICE_HEADERS) as ws:
             ws.send_text(json.dumps({"type": "ota_failed", "reason": "nobody asked"}))
             ws.send_text(json.dumps({"type": "start"}))
             assert json.loads(ws.receive_text())["value"] == "listening"
+
+            link = c.app.state.devices.get("esp32")
+            assert link.replies.qsize() == 1, "the frame did not reach the relay"

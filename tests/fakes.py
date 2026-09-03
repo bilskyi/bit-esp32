@@ -222,3 +222,49 @@ class SlowTTS:
             self.emitted += 1
             yield b"\x11\x22" * 8
         self.finished += 1
+
+class FakeWebSocket:
+    """A device's socket, without a device or a socket.
+
+    Exists because Starlette's TestClient cannot reliably serve an HTTP
+    request while one of its websocket sessions is open - the two contend on
+    its single blocking portal, and the request either loses a pooled
+    database connection or hangs outright. That is a limitation of the test
+    client, not of the app: uvicorn serves both on one event loop without
+    difficulty. So the firmware tests register one of these in the device
+    registry instead of opening a real session, and the whole push runs as
+    an ordinary HTTP request with nothing to contend with.
+
+    The real integration proof lives outside pytest: scripts/fake_device.py
+    against a running server.
+    """
+
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+        self.blob = bytearray()
+        self.order: list[str] = []
+
+    async def send_text(self, data: str) -> None:
+        self.texts.append(data)
+        self.order.append("text")
+
+    async def send_bytes(self, data: bytes) -> None:
+        self.blob += data
+        self.order.append(f"bytes:{len(data)}")
+
+    @property
+    def frames(self) -> list[dict]:
+        import json
+
+        return [json.loads(text) for text in self.texts]
+
+    @property
+    def binary_sizes(self) -> list[int]:
+        return [int(item.split(":", 1)[1]) for item in self.order if item.startswith("bytes:")]
+
+
+class BrokenWebSocket(FakeWebSocket):
+    """Dies the moment it is handed the first byte of an image."""
+
+    async def send_bytes(self, data: bytes) -> None:
+        raise ConnectionResetError("the device went away")

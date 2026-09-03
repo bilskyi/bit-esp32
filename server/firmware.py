@@ -211,17 +211,31 @@ def register_firmware_routes(app: FastAPI, require_login) -> None:
         if registry.pushing:
             raise HTTPException(status_code=409, detail="an update is already running")
 
-        # Before reading a byte of it. Checked on the declared length rather
-        # than on what arrived, because the point is to refuse an absurd
-        # upload without first pulling it into memory - the body is held
-        # whole, and "read it all, then object to the size" is not a check.
-        declared = request.headers.get("content-length")
-        if declared is not None and declared.isdigit() and int(declared) > MAX_BODY:
+        # Streamed, with a memory bound, and drained to the end even once it
+        # is clearly too big.
+        #
+        # Rejecting on Content-Length before reading anything looks cheaper
+        # and is a trap: responding without draining leaves the request body
+        # unread in the transport, and Starlette's own test client then
+        # deadlocks in TestClient.__exit__ waiting for its portal to shut
+        # down. A real server survives it by dropping the connection, which
+        # is not something to rely on. So: stop *keeping* the bytes past the
+        # ceiling, keep *reading* them, and refuse afterwards. Memory is
+        # bounded either way, which was the only thing the early check was
+        # buying.
+        buffered = bytearray()
+        too_big = False
+        async for chunk in request.stream():
+            if too_big:
+                continue
+            buffered += chunk
+            if len(buffered) > MAX_BODY:
+                too_big = True
+                buffered = bytearray()
+        if too_big:
             raise HTTPException(status_code=413, detail="far larger than any firmware image")
 
-        body = await request.body()
-        if len(body) > MAX_BODY:
-            raise HTTPException(status_code=413, detail="far larger than any firmware image")
+        body = bytes(buffered)
         reason = check_image(body)
         if reason is not None:
             # Refused before the device hears a word of it: a wrong file must
