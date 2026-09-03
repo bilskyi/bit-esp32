@@ -49,6 +49,9 @@ $(BUILD)/provision_logic_test: ../main/provision_logic.c ../main/provision_logic
 $(BUILD)/setup_screen_test: ../main/setup_screen.c ../main/setup_screen.h setup_screen_test.c | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ ../main/setup_screen.c setup_screen_test.c
 
+$(BUILD)/settings_menu_test: ../main/settings_menu.c ../main/settings_menu.h ../main/face.c settings_menu_test.c | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ ../main/settings_menu.c ../main/face.c settings_menu_test.c
+
 $(ASAN_BUILD)/face_test: ../main/face.c ../main/face.h face_test.c | $(ASAN_BUILD)
 	$(CC) $(ASAN_CFLAGS) -o $@ ../main/face.c face_test.c
 
@@ -58,18 +61,23 @@ $(ASAN_BUILD)/provision_logic_test: ../main/provision_logic.c ../main/provision_
 $(ASAN_BUILD)/setup_screen_test: ../main/setup_screen.c ../main/setup_screen.h setup_screen_test.c | $(ASAN_BUILD)
 	$(CC) $(ASAN_CFLAGS) -o $@ ../main/setup_screen.c setup_screen_test.c
 
-test: $(BUILD)/face_test $(BUILD)/provision_logic_test $(BUILD)/setup_screen_test
+$(ASAN_BUILD)/settings_menu_test: ../main/settings_menu.c ../main/settings_menu.h ../main/face.c settings_menu_test.c | $(ASAN_BUILD)
+	$(CC) $(ASAN_CFLAGS) -o $@ ../main/settings_menu.c ../main/face.c settings_menu_test.c
+
+test: $(BUILD)/face_test $(BUILD)/provision_logic_test $(BUILD)/setup_screen_test $(BUILD)/settings_menu_test
 	@./$(BUILD)/face_test
 	@./$(BUILD)/provision_logic_test
 	@./$(BUILD)/setup_screen_test
+	@./$(BUILD)/settings_menu_test
 ifneq ($(ASAN),0)
 test: asan
 endif
 
-asan: $(ASAN_BUILD)/face_test $(ASAN_BUILD)/provision_logic_test $(ASAN_BUILD)/setup_screen_test
+asan: $(ASAN_BUILD)/face_test $(ASAN_BUILD)/provision_logic_test $(ASAN_BUILD)/setup_screen_test $(ASAN_BUILD)/settings_menu_test
 	@./$(ASAN_BUILD)/face_test
 	@./$(ASAN_BUILD)/provision_logic_test
 	@./$(ASAN_BUILD)/setup_screen_test
+	@./$(ASAN_BUILD)/settings_menu_test
 
 preview: $(BUILD)/face_preview preview-template.html
 	@./$(BUILD)/face_preview preview-template.html $(BUILD)/face-preview.html
