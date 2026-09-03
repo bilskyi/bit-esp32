@@ -311,6 +311,31 @@ writes all three keys in one commit.
 panel. A 40 ms sampling interval against a 25 ms debounce and a 1 s hold is
 comfortable, and it means no new task and no new stack.
 
+**Where the settings are seeded from.** `config_load()` and `settings_init()`
+both run in `app_main`, before `face_task` is created — not inside
+`face_task`, which is what an earlier draft of this document implied.
+
+That draft is worth recording because it was wrong in a way reading almost
+hides: `face_task` is created at priority 2 and the main task runs at 1, so on
+this unicore part the new task preempts at `xTaskCreate` and runs until its
+first delay. A `settings_init()` inside it would have read a config the main
+task had not filled in yet — on *every* boot, not occasionally — and the
+device would have come up muted, at the dimmest contrast, every time.
+Seeding before the task exists removes the window rather than tolerating it,
+and it means the brightness is right on the first frame drawn.
+
+**Nothing but `face_task` may see the buttons while the menu is open.**
+`net_task` reads the button through a gate that is false whenever the menu is
+up. Without it every press that walks the carousel is also push-to-talk, and
+the one-second exit hold sends a whole utterance to the server every time
+someone closes the menu by hand — a Groq call and a round trip on the link
+that is this project's blocking problem, for nothing. The same gate is why
+`A` cannot interrupt a reply from inside the menu, above.
+
+The tap counters that drive the five-tap gesture read through the same gate
+until Task 7 deletes them, because four presses walk the carousel round and a
+fifth would otherwise reboot the device into provisioning.
+
 ## The boot order does not change, and that is the point
 
 `face_task` is created at `app_main` line 34 and `button_task` at line 52.
@@ -333,6 +358,25 @@ playback meaning, so this is reachable. The reply keeps playing and the menu
 opens over it; a volume change takes effect on the next block, which is the
 one case where the setting is audible on real speech instead of a tone. No
 beep is emitted while `s_playing` — the reply is the demonstration.
+
+While the menu is open, `A` cannot interrupt that reply. Interrupting needs a
+press to reach `net_task`, and `net_task` is deliberately blind to the button
+while the menu is up — otherwise every press that walks the carousel would
+also be push-to-talk, and the exit hold would send a whole spurious utterance
+to the server on every close. The reply finishes on its own, or the menu
+closes first and `A` means what it always did. That is a worse trade only if
+someone opens settings *in order to* shut the assistant up, which is what the
+press on `A` alone already does.
+
+**Settings opened while the device is recording.** Reachable, and it ends the
+utterance rather than abandoning it: the gate makes `net_task` see a release,
+which is the path that already sends `end`. The server gets the question, and
+its reply arrives to a device showing a menu.
+
+**The WiFi page reboots without saving.** Volume, brightness and eyes changed
+in the same visit are lost. Deliberate — that page exists to redo the network,
+and carrying a flash write into a restart path buys nothing — but it is the
+one place where a change made in the menu does not survive.
 
 **Settings opened while listening.** Not reachable in practice, because
 listening requires `A` held and this gesture is `B` alone, but if `A` is
