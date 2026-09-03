@@ -114,6 +114,27 @@ static void close_and_save(settings_t *s) {
     s->hold_pct = 0;
 }
 
+// A press means one thing, decided when it started, for as long as it lasts.
+// hold_target() depends on s->open, so the moment open changes - by any
+// route: an exit-hold, an open-hold, or the idle timeout - every button
+// still down is holding stale time against a target that no longer means
+// what it meant when that time started accumulating. Left alone, that stale
+// duration can satisfy the new target on the spot: a neighbour resting on a
+// value page reopens the menu in the very tick an exit-hold closed it,
+// because its target only became SETTINGS_OPEN_MS partway through that
+// tick; push-to-talk held since before the menu existed closes it again on
+// the very next tick, because its target only became SETTINGS_EXIT_MS after
+// open flipped. Spending every button that is down right now, at every
+// place open can change, closes all of those doors at once: from here a
+// spent press does nothing until it is released and pressed again. This is
+// the one place that rule lives - a fourth way in or out of the menu should
+// call this rather than reimplement it.
+static void spend_on_open_change(settings_t *s, bool open_before, bool a_down, bool b_down) {
+    if (s->open == open_before) return;
+    if (a_down) s->a_used = true;
+    if (b_down) s->b_used = true;
+}
+
 bool settings_tick(settings_t *s, bool a_down, bool b_down, uint32_t now_ms) {
     const settings_t before = *s;
 
@@ -125,6 +146,7 @@ bool settings_tick(settings_t *s, bool a_down, bool b_down, uint32_t now_ms) {
     for (int i = 0; i < 2; i++) {
         const bool is_a = (i == 0);
         const uint32_t target = hold_target(s, is_a);
+        const bool open_before = s->open;
 
         if (edges[i] && !*was[i]) {  // press
             *at[i] = now_ms;
@@ -157,6 +179,12 @@ bool settings_tick(settings_t *s, bool a_down, bool b_down, uint32_t now_ms) {
             s->last_input = now_ms;
         }
         *was[i] = edges[i];
+
+        // If this button's own action just changed open, the other button
+        // may still be mid-iteration (i == 0 runs before i == 1) or may
+        // simply be resting on whatever is currently down - either way it
+        // needs to be caught before it acts under the new meaning.
+        spend_on_open_change(s, open_before, a_down, b_down);
     }
 
     // The bar, for whichever hold is running and will actually do something.
@@ -178,20 +206,11 @@ bool settings_tick(settings_t *s, bool a_down, bool b_down, uint32_t now_ms) {
     }
     s->hold_pct = pct;
 
+    const bool open_before_idle = s->open;
     if (s->open && (uint32_t)(now_ms - s->last_input) > SETTINGS_IDLE_MS) {
         close_and_save(s);
-        // A button that is down right now produced no edge for as long as
-        // it has been held - that is exactly how it went unnoticed until
-        // the timeout - so hold_target() is about to answer differently
-        // than it did a moment ago (closed now asks only B to open). Spend
-        // this press before that new answer can act on it, or the same
-        // continuous hold reopens the menu one tick later. A real hold that
-        // is meant to do something always finishes in at most
-        // SETTINGS_OPEN_MS against this SETTINGS_IDLE_MS timer, so it is
-        // never the one caught here.
-        if (a_down) s->a_used = true;
-        if (b_down) s->b_used = true;
     }
+    spend_on_open_change(s, open_before_idle, a_down, b_down);
 
     return before.open != s->open || before.page != s->page ||
            before.hold_pct != s->hold_pct ||

@@ -222,6 +222,58 @@ static void test_a_dead_hold_does_not_reopen_the_menu_after_the_idle_timeout(voi
           s.step[SETTINGS_PAGE_VOLUME]);
 }
 
+// hold_target() answers differently depending on s->open, and A's ordinary
+// exit-hold and B's stale idle rest can both be "still held" in the very
+// same tick. If A's hold flips the menu closed first, B's already-long
+// duration must not be free to immediately reopen it under the new
+// (closed) meaning of a B hold - in the very tick that closed it.
+static void test_closing_while_the_other_button_rests_does_not_reopen(void) {
+    settings_t s = fresh();
+    uint32_t t = run(&s, false, true, 2200, 1000);  // open, page = VOLUME
+    t = run(&s, false, false, 200, t);
+    t = run(&s, true, false, 120, t);  // tap A once, off the volume page
+    t = run(&s, false, false, 120, t);
+    CHECK(s.page == SETTINGS_PAGE_SCREEN, "setup failed: on page %u", s.page);
+    const uint8_t before = s.step[SETTINGS_PAGE_SCREEN];
+
+    t = run(&s, false, true, 3000, t);  // B settles into an idle rest here
+    CHECK(s.open, "setup failed: menu closed on its own while B merely rested");
+
+    t = run(&s, true, true, 1200, t);  // an ordinary A exit-hold, B down throughout
+    CHECK(!s.open, "A's exit-hold did not close the menu with B resting");
+    CHECK(s.save_requested, "closing did not ask for a save");
+
+    t = run(&s, false, true, 500, t);  // A let go; B is still down and must stay inert
+    CHECK(!s.open, "the menu reopened under B's stale rest the instant A closed it");
+    CHECK(s.page == SETTINGS_PAGE_SCREEN,
+          "the page jumped to %u, as it would if the close reopened the menu", s.page);
+
+    run(&s, false, false, 200, t);  // finally release B
+    CHECK(s.step[SETTINGS_PAGE_SCREEN] == before,
+          "B's stale rest changed the screen setting to %u", s.step[SETTINGS_PAGE_SCREEN]);
+}
+
+// The mirror case: A already resting - as if mid push-to-talk - when B's
+// hold opens the menu. A's own iteration that tick still saw open false and
+// fired nothing, but its held duration is already stale by the time open
+// changes; without spending it there too, the very next tick finds A's
+// target now SETTINGS_EXIT_MS and its ancient held time satisfies it at
+// once, closing the menu as fast as it opened.
+static void test_opening_while_push_to_talk_is_held_stays_open(void) {
+    settings_t s = fresh();
+    uint32_t t = run(&s, true, false, 3000, 1000);  // A held, as if asking a long question
+    CHECK(!s.open, "setup failed: holding A alone opened the menu");
+
+    t = run(&s, true, true, 2200, t);  // B's full open-hold, A still down throughout
+    CHECK(s.open, "B's hold did not open the menu with A already resting");
+
+    t = run(&s, true, true, 1000, t);  // a further second - A's stale hold must not fire
+    CHECK(s.open, "the menu closed on its own under A's stale push-to-talk hold");
+
+    run(&s, false, true, 200, t);  // finally release A
+    CHECK(s.open, "releasing A closed the menu; it should take a fresh exit-hold");
+}
+
 static void test_the_gain_table_is_monotonic_and_ends_exactly(void) {
     CHECK(settings_volume_gain(0) == 0, "step 0 is not silent: %d",
           (int)settings_volume_gain(0));
@@ -311,6 +363,8 @@ int main(void) {
     test_a_press_postpones_the_timeout();
     test_a_closed_menu_ignores_button_a();
     test_a_dead_hold_does_not_reopen_the_menu_after_the_idle_timeout();
+    test_closing_while_the_other_button_rests_does_not_reopen();
+    test_opening_while_push_to_talk_is_held_stays_open();
     test_the_gain_table_is_monotonic_and_ends_exactly();
     test_the_contrast_table_is_monotonic_and_tops_out_where_init_does();
     test_every_label_is_short_ascii_and_distinct();
