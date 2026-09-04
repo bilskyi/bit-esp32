@@ -47,6 +47,23 @@ class Settings(BaseSettings):
     # well before the overall budget.
     tts_first_chunk_s: float = 7.0
 
+    # How loud the reply leaves here, in dB of make-up gain over what the
+    # voice rendered.
+    #
+    # The firmware's top volume step is unity - there is nothing left on the
+    # board to turn up - and edge-tts is quiet: measured on one utterance,
+    # peaks at -4.3 dBFS over speech whose loud parts sit 18 dB below full
+    # scale, into a 3 W amplifier and a speaker the size of a coin. Eight
+    # decibels puts the loudest tenth of a phrase at -11 dBFS and asks the
+    # limiter for 4.7 dB at the peaks, which speech carries without pumping.
+    # Lower it if a bench session says the speaker distorts before it is loud
+    # enough; 0.0 turns the stage into a passthrough.
+    tts_gain_db: float = 8.0
+    # The level no sample may exceed afterwards. One decibel of headroom
+    # rather than none: full scale leaves nothing for the ADPCM coder's own
+    # overshoot on a steep transient.
+    tts_ceiling_dbfs: float = -1.0
+
     # How far ahead of real time the reply audio may be sent.
     #
     # Synthesis runs far faster than speech, so an unpaced reply arrives as a

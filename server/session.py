@@ -14,6 +14,7 @@ from enum import Enum
 from server.context import build_messages, estimate_tokens
 from server.costs import Usage
 from server.codec import AdpcmDecoder, AdpcmEncoder
+from server.loudness import Loudness
 from server.emotion import LeadingTag, from_text, strip_tags
 from server.lang import DEFAULT, detect_language, voice_for
 from server.memory.summarise import extract_facts
@@ -311,6 +312,14 @@ class Session:
         # A spoken answer is far larger than the question - 340 KB against
         # 15 KB - so the downlink benefits more from this than the uplink did.
         encoder = AdpcmEncoder() if self._codec == "adpcm" else None
+        # Every client gets the same level. A browser has its own volume
+        # control, but a reply normalised to the ceiling is the right thing to
+        # hand it too, and one path is one thing to reason about.
+        limiter = Loudness(
+            self.settings.tts_gain_db,
+            self.settings.tts_ceiling_dbfs,
+            self.settings.sample_rate,
+        )
 
         def is_speakable(sentence: str) -> bool:
             """True if there is anything for a voice to actually say.
@@ -365,12 +374,22 @@ class Session:
                             started = True
                             limit.reschedule(loop.time() + self.settings.tts_timeout_s)
                         # Pacing counts audio, not bytes on the wire, so the
-                        # figure has to be taken before compression.
+                        # figure has to be taken before compression - and
+                        # before the limiter, which runs 20 ms behind its input
+                        # and would make the pacing lag by that much.
                         sent_bytes += len(pcm_chunk)
+                        # Before the encoder: samples clipped into 4-bit
+                        # nibbles are clipped for good, and the predictor would
+                        # chase the step. `started` is set above rather than
+                        # here for the same reason the flush below exists - a
+                        # chunk shorter than the look-ahead comes back empty,
+                        # and the first-chunk budget has to be reset by audio
+                        # arriving from the voice, not by audio leaving here.
+                        pcm_chunk = limiter.feed(pcm_chunk)
                         if encoder is not None:
                             pcm_chunk = encoder.feed(pcm_chunk)
-                            if not pcm_chunk:
-                                continue
+                        if not pcm_chunk:
+                            continue
                         await self.transport.send_bytes(pcm_chunk)
 
                         # Stay at most playback_lead_s ahead of what the device
@@ -381,6 +400,15 @@ class Session:
                         ahead = audio_sent - elapsed
                         if ahead > self.settings.playback_lead_s:
                             await asyncio.sleep(ahead - self.settings.playback_lead_s)
+
+                    # The last 20 ms of the phrase are still inside the
+                    # limiter's look-ahead. Without this they are never sent,
+                    # which is the final consonant of every sentence.
+                    tail = limiter.flush()
+                    if encoder is not None:
+                        tail = encoder.feed(tail)
+                    if tail:
+                        await self.transport.send_bytes(tail)
 
             try:
                 await render(voice)

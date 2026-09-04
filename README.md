@@ -344,6 +344,7 @@ server/
   sentences.py         incremental sentence segmentation
   lang.py              uk/ru/en detection, voice selection
   audio.py             streaming MP3 -> 16 kHz PCM, WAV wrapper
+  loudness.py          make-up gain and look-ahead limiter on reply audio
   persona.py           system prompt, assembled from a role
   roles.py             roles and which one each surface uses; rows, not wording
   accounts.py          password accounts, separate from the facts/usage store

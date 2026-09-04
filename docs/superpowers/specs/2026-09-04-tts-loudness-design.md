@@ -33,11 +33,19 @@ full scale.
 `Settings` fields, so a device that turns out to distort - or a room that
 wants more - is an `.env` change and a restart, not a reflash.
 
-Eight decibels is chosen against the numbers above: it puts the loudest tenth
-of a phrase near −10 dBFS and asks the limiter for about 4.7 dB of reduction
-at the peaks, which speech carries without audible pumping. It is the setting
-to revisit first if a bench session says the speaker distorts before it is
-loud enough.
+Eight decibels is chosen against the numbers above. Measured through the
+finished limiter, `reply.wav` comes out at:
+
+| | Before | After |
+|---|---|---|
+| Peak | −4.3 dBFS | −1.0 dBFS |
+| RMS, whole phrase | −21.9 dBFS | −15.1 dBFS |
+| RMS, loudest tenth | −17.8 dBFS | −11.0 dBFS |
+
+The applied gain ranges from 8.0 dB down to 3.3 dB, so the limiter takes back
+at most 4.7 dB at the peaks - which speech carries without audible pumping.
+Eight is the setting to revisit first if a bench session says the speaker
+distorts before it is loud enough.
 
 ## How the limiter works
 

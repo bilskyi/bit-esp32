@@ -1,8 +1,11 @@
 import asyncio
+import math
+import struct
 import time
 
 import pytest
 
+from server.codec import adpcm_to_pcm
 from server.config import Settings
 from server.session import Session, State
 from tests.fakes import FakeEmbedder, FakeLLM, FakeSTT, FakeTransport, FakeTTS, SlowTTS
@@ -60,6 +63,93 @@ async def test_reply_audio_is_sent_as_binary_frames():
     await utter(session)
     assert transport.binary
     assert all(isinstance(f, bytes) for f in transport.binary)
+
+
+# The level the reply arrives at. The device's top volume step is unity - see
+# docs/superpowers/specs/2026-09-04-tts-loudness-design.md - so a quiet voice
+# is quiet on the speaker and there is nothing on the board left to turn up.
+
+# What -1 dBFS is in counts. Computed here rather than imported from the code
+# under test.
+CEILING = int(32767 * 10 ** (-1 / 20))
+
+# FakeTTS renders two chunks of one repeated sample each, little-endian.
+RENDERED_QUIET = 0x2211
+RENDERED_LOUD = 0x4433
+
+
+class LoudVoice:
+    """A voice loud enough that the make-up gain would clip it."""
+
+    def __init__(self) -> None:
+        self.spoken: list[tuple[str, str]] = []
+
+    async def synthesise(self, text: str, voice: str):
+        self.spoken.append((text, voice))
+        yield struct.pack(
+            "<2000h",
+            *[int(20000 * math.sin(2 * math.pi * 220 * i / 16000)) for i in range(2000)],
+        )
+
+
+async def test_reply_audio_arrives_louder_than_the_voice_rendered_it():
+    tts = FakeTTS()
+    session, transport = build(tts=tts)
+    await utter(session)
+    sent = b"".join(transport.binary)
+
+    # Every sample the voice produced is still there - 32 bytes per sentence
+    # it was asked to say. The limiter looks ahead by 20 ms and each of these
+    # phrases is shorter than that, so all of it comes out of the flush at the
+    # end of the phrase: a missing flush would send nothing at all here, and
+    # would cut the last word off a real reply.
+    assert len(sent) == 32 * len(tts.spoken)
+
+    values = struct.unpack(f"<{len(sent) // 2}h", sent)
+    assert min(values) > RENDERED_QUIET, "the quiet half of the reply did not come up"
+    assert max(values) <= CEILING, "a sample came out above the ceiling"
+    assert max(values) > RENDERED_LOUD, "the loud half of the reply did not come up"
+
+
+async def test_a_reply_that_would_clip_is_turned_down_instead():
+    session, transport = build(tts=LoudVoice())
+    await utter(session)
+    values = struct.unpack_from(
+        f"<{len(b''.join(transport.binary)) // 2}h", b"".join(transport.binary)
+    )
+    assert max(abs(v) for v in values) <= CEILING
+    # And it is actually using the headroom rather than playing safe.
+    assert max(abs(v) for v in values) > CEILING - 500
+
+
+async def test_the_limiter_runs_before_the_adpcm_encoder():
+    # Same phrase down both codecs. Compressing what the limiter produced
+    # carries its level; limiting what the encoder produced would corrupt the
+    # nibbles, and the decoded peak would not land anywhere near the other
+    # path's.
+    plain, plain_transport = build(tts=LoudVoice())
+    await utter(plain)
+    expected = max(
+        abs(v)
+        for v in struct.unpack_from(
+            f"<{len(b''.join(plain_transport.binary)) // 2}h",
+            b"".join(plain_transport.binary),
+        )
+    )
+
+    session, transport = build(tts=LoudVoice())
+    await session.on_start("adpcm")
+    await session.on_audio(b"\x00\x01" * 32000)
+    await session.on_end()
+    await session.wait_for_reply()
+    decoded = adpcm_to_pcm(b"".join(transport.binary))
+    peak = max(
+        abs(v) for v in struct.unpack_from(f"<{len(decoded) // 2}h", decoded)
+    )
+    assert peak == pytest.approx(expected, rel=0.1)
+    # Stated against the ceiling as well, so this fails on a reply that was
+    # never lifted at all rather than only on the two paths disagreeing.
+    assert peak > CEILING - 2000
 
 
 async def test_done_is_sent_once_playback_finishes():
