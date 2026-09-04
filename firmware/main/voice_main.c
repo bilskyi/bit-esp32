@@ -1502,11 +1502,16 @@ static void audio_out_task(void *arg) {
         // says where the user stopped, not what asked for it. The argument in
         // full is at the flag's declaration.
         //
-        // Nothing here can lose a raise. face_task runs at priority 2 against
-        // this task's 5, so it cannot preempt the gap between play_beep
-        // returning and the test below; a tap during the tone lands after the
-        // clear and is therefore seen; and a tap arriving after the test is
-        // simply picked up by the next pass of the outer loop, 20 ms later.
+        // Nothing here can lose a raise, and the guarantee is the ordering
+        // rather than the scheduling: the flag is cleared *before* play_beep,
+        // so any raise from that instant onwards is still standing when the
+        // loop tests again. That holds however the two tasks happen to be
+        // scheduled against each other. face_task's priority 2 against this
+        // task's 5 means it cannot preempt the gap between play_beep returning
+        // and the test at all - but that is a second reason, not the one being
+        // relied on, so changing either priority cannot reopen the question. A
+        // tap arriving after the final test waits for the next pass of the
+        // outer loop, 20 ms later.
         //
         // Nor can it run away. Nothing in play_beep touches the flag, so every
         // extra pass costs a fresh debounced press inside the previous tone.
