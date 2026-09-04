@@ -171,9 +171,6 @@ static esp_websocket_client_handle_t s_ws;
 static volatile bool s_trial_in_progress = false;
 static volatile uint8_t s_trial_reason = 0;
 #define WIFI_TRIAL_DONE_BIT BIT1
-// Set by the hold-to-reset gesture. Only wifi_start()'s wait consumes it, and
-// only to stop waiting - it is a request to go and provision, not a state.
-#define WIFI_PROVISION_BIT BIT2
 
 typedef enum { ST_IDLE, ST_LISTENING, ST_THINKING, ST_SPEAKING } state_t;
 static volatile state_t s_state = ST_IDLE;
@@ -207,17 +204,17 @@ static volatile bool s_button_b_down = false;
 // a struct several tasks happen to reach into.
 static settings_t s_settings;
 
-// Whether the menu is up, published by face_task for the tasks that must not
-// mistake a press meant for the menu for a question.
+// Whether the menu is up, published by face_task for the one task that must
+// not mistake a press meant for the menu for a question.
 //
-// volatile because net_task, boot_gesture_task and app_main read it in loops
-// they do not write it from, and without the qualifier the compiler is
-// entitled to hoist the read out of those loops. It happens not to today -
-// the address escapes to other translation units, every iteration passes
-// through an external call, the part is unicore, and the build is -Og with no
-// LTO - but not one of those reasons is recorded in the object code, and a
-// switch to -Os or IPO could take any of them away silently. The gate that
-// keeps the menu out of the conversation depends on this read being fresh.
+// volatile because net_task reads it in a loop it does not write it from, and
+// without the qualifier the compiler is entitled to hoist the read out of that
+// loop. It happens not to today - the address escapes to other translation
+// units, every iteration passes through an external call, the part is unicore,
+// and the build is -Og with no LTO - but not one of those reasons is recorded
+// in the object code, and a switch to -Os or IPO could take any of them away
+// silently. The gate that keeps the menu out of the conversation depends on
+// this read being fresh.
 static volatile bool s_menu_open = false;
 
 // Unity in Q15. settings_menu.h guarantees this is exactly what the top
@@ -320,11 +317,6 @@ static volatile uint8_t s_face_emotion = FACE_EMO_NEUTRAL;
 // counts as the conversation being alive.
 static volatile uint32_t s_face_emotion_seq = 0;
 static volatile bool s_face_startle = false;
-// How far through the hold-to-reset gesture the button is, 0-100. Owned by
-// net_task, read by face_task, the same shape as the two above. Zero means
-// not counting, and face.c treats zero as leaving no trace at all - releasing
-// the button has to cost nothing.
-static volatile uint8_t s_face_reset_pct = 0;
 // Mean absolute sample of the last audio block, either direction.
 static volatile uint16_t s_audio_level = 0;
 // How far boot has got. Set by the three places that already log these very
@@ -785,18 +777,17 @@ static void wifi_connect(const char *ssid, const char *pass) {
     // falling back to an access point would turn a two-minute outage into a
     // device that has stopped being a voice companion.
     //
-    // What changed is that it stops being unreachable while it waits. The
-    // hold-to-reset gesture sets WIFI_PROVISION_BIT, and without it in this
-    // wait the task holding the boot sequence never returns - so the button
-    // would be undetectable in exactly the situation that needs it.
-    const EventBits_t up = xEventGroupWaitBits(
-        s_wifi_events, WIFI_CONNECTED_BIT | WIFI_PROVISION_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
-    if (up & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "wifi up");
-        s_boot_stage = FACE_BOOT_WIFI;  // eyes half open: an IP, but no server yet
-    } else {
-        ESP_LOGW(TAG, "giving up on \"%s\": provisioning was asked for", ssid);
-    }
+    // Nothing wakes this early any more, and nothing needs to. The five-tap
+    // gesture used to set a bit here so this wait would return and the boot
+    // sequence could reach a reboot; the settings menu reboots from inside
+    // face_task instead, and a reboot does not need this wait to return.
+    // What keeps the device reachable while it sits here is that face_task and
+    // button_task are both running by now - see the note above the call to
+    // this function in app_main.
+    xEventGroupWaitBits(s_wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE,
+                        portMAX_DELAY);
+    ESP_LOGI(TAG, "wifi up");
+    s_boot_stage = FACE_BOOT_WIFI;  // eyes half open: an IP, but no server yet
 }
 
 // --------------------------------------------------------------- websocket
@@ -1099,8 +1090,8 @@ static void face_task(void *arg) {
         // input rather than the menu hidden at the moment it would be drawn:
         // a menu that opened behind the setup screen and then appeared when
         // provisioning ended would be worse than either, and hiding it would
-        // also leave B meaning two things at once once Task 7 gives that
-        // screen its own B hold for the way out.
+        // also leave B meaning two things at once, now that app_main's
+        // provisioning loop reads a B hold as the way out of that screen.
         //
         // Starved, not skipped, so the machine keeps ticking: a menu that was
         // already open when provisioning started still has its twenty-second
@@ -1207,10 +1198,11 @@ static void face_task(void *arg) {
             setup_screen_render(s_setup_fb, &s);
             fb = s_setup_fb;
         } else {
-            // The bar across the eyes is now the menu's hold, not the
-            // five-tap count: it is the warning that a hold on B is about to
-            // take the panel away from the face, given while there is still
-            // time to let go.
+            // The bar across the eyes is the menu's hold. face.c still calls
+            // it reset progress because the tap countdown is what it was
+            // drawn for; what it warns about now is that a hold on B is about
+            // to take the panel away from the face, and it is given while
+            // there is still time to let go.
             face_set_reset_progress(&s_face, s_settings.hold_pct, t);
             face_tick(&s_face, t);
             fb = face_framebuffer(&s_face);
@@ -1227,7 +1219,7 @@ static void face_task(void *arg) {
             if (off != 0 &&
                 (uint32_t)(xTaskGetTickCount() - off) * portTICK_PERIOD_MS > OFFLINE_HINT_MS) {
                 memcpy(s_setup_fb, fb, FACE_FB_BYTES);
-                ss_draw_text(s_setup_fb, 0, FACE_H - SS_GLYPH_H, "5 presses = setup");
+                ss_draw_text(s_setup_fb, 0, FACE_H - SS_GLYPH_H, "hold B: settings");
                 fb = s_setup_fb;
             }
         }
@@ -1749,58 +1741,13 @@ static void button_task(void *arg) {
     }
 }
 
-// Hold the button, stay quiet, and the device goes off to be reconfigured.
-//
-// The silence is what makes this safe. A held button is also how you ask a
-// long question, and s_audio_level already knows whether anyone is talking -
-// block_level() computes it per block and the eyes are already driven by it -
-// so gating on quiet means an ordinary question can never trigger a reset,
-// because a question is not silence.
-//
-// A stuck button cannot be told apart from a deliberate silent hold. The
-// signals are identical and no scheme distinguishes them, so it is handled by
-// cost instead: the access point times out back to the saved network, and
-// nothing is erased on the way in.
-#define RESET_TAPS 5
-#define RESET_WINDOW_MS 3000
-// The face starts showing the count from here, so the gesture cannot complete
-// without warning.
-#define RESET_TAPS_VISIBLE 3
-
 // Below this, a press was not a question - nobody says anything in a fifth of
-// a second - so the utterance is cancelled rather than ended. Without it each
-// tap of the reset gesture would run start/end and cost a Groq STT call on a
-// rate-limited tier, five per gesture, plus five round trips on the link that
-// is this project's blocking problem.
+// a second - so the utterance is cancelled rather than ended. It was added
+// when the reset gesture's taps each cost a Groq STT call; that gesture is
+// gone, and this stays for the reason that outlived it. An accidental brush
+// against the button should not spend a round trip on the link that is this
+// project's blocking problem.
 #define SHORT_PRESS_MS 200
-
-// Counting presses inside a window, in the one place both callers can share.
-//
-// There are two, and they never run at once: net_task counts them to *enter*
-// provisioning while the device is working, and app_main counts them to
-// *leave* it while it is provisioning - net_task does not exist yet at that
-// point, it is created after the radio is up. Each keeps its own instance
-// rather than sharing state, because the same run of taps must not be seen
-// by both.
-typedef struct {
-    uint8_t taps;
-    TickType_t first;
-    bool was_down;
-} tap_counter_t;
-
-// Feed it the debounced button every loop. Returns how many presses are in the
-// current run, or 0 once the window lapses.
-static uint8_t tap_count(tap_counter_t *c, bool down, TickType_t now) {
-    if (c->taps > 0 && (uint32_t)(now - c->first) * portTICK_PERIOD_MS > RESET_WINDOW_MS) {
-        c->taps = 0;
-    }
-    if (down && !c->was_down) {  // the press edge, not the hold
-        if (c->taps == 0) c->first = now;
-        c->taps++;
-    }
-    c->was_down = down;
-    return c->taps;
-}
 
 // The button as everything outside the settings menu must see it: the
 // debounced level, minus any press the menu has taken for itself.
@@ -1808,9 +1755,8 @@ static uint8_t tap_count(tap_counter_t *c, bool down, TickType_t now) {
 // The menu is worked with A as much as with B - A walks the pages, a
 // one-second A hold closes it - and to a task that reads s_button_down every
 // one of those is a press like any other. Ungated, walking the carousel
-// spends a start/cancel round trip per page, closing the menu by hand sends a
-// second of room tone to be transcribed, and five taps inside three seconds
-// reboot the device into provisioning and take the unsaved settings with it.
+// spends a start/cancel round trip per page, and closing the menu by hand
+// sends a second of room tone to be transcribed.
 //
 // Two things beyond "nothing while the menu is open" have to be true, and the
 // latch is what makes the second of them true.
@@ -1822,18 +1768,24 @@ static uint8_t tap_count(tap_counter_t *c, bool down, TickType_t now) {
 //
 // And the press that closed the menu is still physically down at the moment
 // the menu goes away. Without the latch it would arrive as a fresh press edge
-// - a start to net_task, a tap to the counters - the instant someone finished
-// the gesture that means "I am done". So the mask outlives the menu and is
-// lifted only by an actual release: exactly the remainder of that one
-// physical press is discarded, not the button.
+// - a start to net_task - the instant someone finished the gesture that means
+// "I am done". So the mask outlives the menu and is lifted only by an actual
+// release: exactly the remainder of that one physical press is discarded, not
+// the button.
 //
-// Each caller keeps its own instance, the way each keeps its own
-// tap_counter_t, because the mask records where one loop is in one physical
-// press and two loops are not in the same place. Each polls at 20 ms or
-// faster against a 25 ms debounce, so none can miss the release that lifts
-// it - except net_task, which can sit in a send for up to SEND_TIMEOUT. A
-// menu opened and closed entirely inside one such stall is never seen there
-// at all; that fails safe, to the behaviour from before the menu existed.
+// net_task is the only caller left. The other two went with the five-tap
+// gesture: one task deleted outright, and app_main's way out of provisioning
+// now reads B, which the menu cannot be holding because face_task starves it
+// of input for as long as that screen is up. The state stays a parameter
+// rather than a static inside this function because it records where one
+// loop is in one physical press, and a second reader would not be in the same
+// place - it would have to bring its own, exactly as this one does.
+//
+// net_task polls at 10 ms against a 25 ms debounce, so it cannot miss the
+// release that lifts the mask - except while it is inside a send, which can
+// take up to SEND_TIMEOUT. A menu opened and closed entirely inside one such
+// stall is never seen here at all; that fails safe, to the behaviour from
+// before the menu existed.
 //
 // What this deliberately does not do is give the menu the interrupt. While it
 // is open, A cannot stop a reply that is playing, because the interrupt path
@@ -1853,48 +1805,10 @@ static bool button_outside_menu(menu_mask_t *m) {
     return raw && !m->masked;
 }
 
-// Watches for the same five-tap gesture while wifi_connect() below is still
-// blocked waiting for a network. net_task is where the gesture normally
-// lives, but it is not created until wifi_connect() returns - so a device
-// that cannot reach its saved network had no way out at all: the wait has
-// no timeout by design, and nothing was listening for the one thing that
-// was supposed to end it early. That is the bug behind "it just sits there
-// with its eyes shut and won't go into setup."
-//
-// Scoped tightly: created just before wifi_connect(), deleted right after it
-// returns. It does not set WIFI_PROVISION_BIT and rely on wifi_connect()
-// waking up on its own - esp_restart() below makes that moot, and racing
-// app_main's wake-up against this task's own restart would risk falling
-// through to ws_start() with no network for one extra boot cycle before the
-// NVS request took effect. A clean reboot sidesteps that race rather than
-// handling it.
-static void boot_gesture_task(void *arg) {
-    tap_counter_t taps = {0};
-    // This task lives across wifi_connect(), which has no timeout - so it is
-    // alive in exactly the situation where the panel starts advertising a way
-    // into setup and someone starts pressing things. The menu can be open
-    // here, and four presses round the carousel plus one would otherwise be
-    // the reset gesture.
-    menu_mask_t mask = {0};
-    while (true) {
-        const TickType_t now = xTaskGetTickCount();
-        const uint8_t n = tap_count(&taps, button_outside_menu(&mask), now);
-        s_face_reset_pct = (n >= RESET_TAPS_VISIBLE) ? (uint8_t)((n * 100u) / RESET_TAPS) : 0;
-        if (n >= RESET_TAPS) {
-            ESP_LOGW(TAG, "five taps while stuck connecting; restarting into provisioning");
-            config_request_provisioning();
-            vTaskDelay(pdMS_TO_TICKS(100));  // let the log line reach the console
-            esp_restart();
-        }
-        vTaskDelay(pdMS_TO_TICKS(20));  // fast enough not to miss a tap
-    }
-}
-
 static void net_task(void *arg) {
     static uint8_t chunk[1024];
     bool held = false;
     menu_mask_t mask = {0};
-    tap_counter_t taps_in = {0};
     TickType_t press_start = 0;
 
     TickType_t busy_since = 0;
@@ -1907,29 +1821,6 @@ static void net_task(void *arg) {
         // the two.
         const bool down = button_outside_menu(&mask);
         const TickType_t now = xTaskGetTickCount();
-
-        const uint8_t taps = tap_count(&taps_in, down, now);
-        s_face_reset_pct = (taps >= RESET_TAPS_VISIBLE)
-                               ? (uint8_t)((taps * 100u) / RESET_TAPS)
-                               : 0;
-
-        if (taps >= RESET_TAPS) {
-            ESP_LOGW(TAG, "hold-to-reset completed; restarting into provisioning");
-            // A hold in ST_LISTENING is also an utterance in flight. Abandon it
-            // the way the interrupt path already does, so the server is not left
-            // waiting on audio that will never arrive.
-            if (esp_websocket_client_is_connected(s_ws)) {
-                esp_websocket_client_send_text(s_ws, "{\"type\":\"cancel\"}", 17, SEND_TIMEOUT);
-            }
-            xStreamBufferReset(s_mic_buf);
-            s_state = ST_IDLE;
-            s_face_reset_pct = 0;
-
-            config_request_provisioning();
-            xEventGroupSetBits(s_wifi_events, WIFI_PROVISION_BIT);
-            vTaskDelay(pdMS_TO_TICKS(100));  // let the cancel leave and the log flush
-            esp_restart();
-        }
 
         // Last-resort unwedge, measured from the last thing the server sent
         // rather than from the button press.
@@ -2029,10 +1920,10 @@ static void net_task(void *arg) {
                 while ((got = xStreamBufferReceive(s_mic_buf, chunk, sizeof(chunk), 0)) > 0) {
                     esp_websocket_client_send_bin(s_ws, (char *)chunk, got, SEND_TIMEOUT);
                 }
-                // A press too short to have said anything is not a question -
-                // it is a miss, or one tap of the reset gesture. Cancelling
-                // costs the server nothing; ending would spend an STT call on
-                // a fifth of a second of room tone, five times per gesture.
+                // A press too short to have said anything is not a question,
+                // it is a brush against the button. Cancelling costs the
+                // server nothing; ending would spend an STT call on a fifth
+                // of a second of room tone.
                 const uint32_t press_ms = (uint32_t)(now - press_start) * portTICK_PERIOD_MS;
                 if (press_ms < SHORT_PRESS_MS) {
                     esp_websocket_client_send_text(s_ws, "{\"type\":\"cancel\"}", 17, SEND_TIMEOUT);
@@ -2168,60 +2059,84 @@ void app_main(void) {
     // Before anything that touches the radio, including provisioning.
     wifi_init_stack();
 
-    // Two ways in: nothing is configured, or the hold-to-reset gesture asked
-    // for it before restarting. Note what is deliberately absent - failing to
-    // connect is not one of them. A device that knows a network waits for it,
-    // because a router rebooting is worth waiting out and an access point that
-    // appeared on its own would turn a two-minute outage into a device that
-    // had stopped being a voice companion.
+    // Two ways in: nothing is configured, or the settings menu's WiFi page
+    // asked for it before restarting. Note what is deliberately absent -
+    // failing to connect is not one of them. A device that knows a network
+    // waits for it, because a router rebooting is worth waiting out and an
+    // access point that appeared on its own would turn a two-minute outage
+    // into a device that had stopped being a voice companion.
     const bool asked = config_take_provisioning_request();
     if (pl_decide(config_is_provisioned(&cfg), asked, false) == PL_MODE_PROVISION) {
         if (provision_start() == ESP_OK) {
             // Four ways out: a successful trial plus its grace window, five
-            // minutes with nobody using the page, the same five taps that got
-            // here, or provisioning stopping on its own. Only the first is the
-            // happy one.
+            // minutes with nobody using the page, the same B hold that opens
+            // settings everywhere else, or provisioning stopping on its own.
+            // Only the first is the happy one.
             //
-            // The taps are counted here rather than in net_task because
-            // net_task does not exist yet - it is created once the radio is
-            // up, which is after this returns.
-            tap_counter_t taps_out = {0};
-            // The menu cannot *open* while this screen is up - face_task
-            // starves the gesture of input for exactly as long as
-            // provision_is_active() - so there is nothing here for the mask to
-            // discard, with one exception: a menu that was already open when
-            // provisioning started. That needs B held from power-on and is
-            // very likely unreachable, since provisioning begins well inside
-            // the two seconds the hold takes, but it was never ruled out. In
-            // that case the mask is live and the five taps out of setup are
-            // blocked until the menu's own twenty-second timeout closes it.
-            // Self-correcting, and not worth code - but the next person
-            // deciding whether this mask can be deleted needs to know it is
-            // not decorative.
+            // The hold is timed here rather than in face_task because the
+            // settings menu is not up while the setup screen is: this screen
+            // owns the panel, and SS_STATUS_LEAVING is how it says so. The two
+            // meanings of a B hold cannot collide either, because face_task
+            // starves the menu's gesture of input for exactly as long as
+            // provision_is_active() - so while this loop runs, a hold on B can
+            // only mean this.
             //
-            // It is used at all so that all three tap counters read the button
-            // the same way; one of the three reading it differently is a trap
-            // for whoever changes this next.
-            menu_mask_t mask = {0};
-            uint8_t shown = 0;
+            // A B that is already down when this screen appears is not this
+            // gesture, so nothing is timed until the button has been seen up.
+            // The menu's WiFi page reboots into provisioning after a one-second
+            // B hold, which means the press that asked for setup is very often
+            // still down when setup arrives, and inheriting it would carry
+            // someone straight back out of the screen they just asked for.
+            // Exactly that press is discarded, not the button - the same rule
+            // set_open() applies to a press that predates a change of meaning.
+            //
+            // Keeping B down after this loop breaks undoes nothing. face_task
+            // stops starving the menu the moment provision_stop() returns and
+            // reads the still-down button as a fresh press, so two more
+            // seconds of it open settings, warned by the same countdown - B
+            // meaning what it means everywhere else, not a gesture misfiring.
+            //
+            // One case cannot show the warning: a menu that was already open
+            // when provisioning started keeps the panel, because face_task
+            // draws it ahead of the setup screen, so SS_STATUS_LEAVING goes to
+            // a screen nobody can see. The hold still works and still cannot
+            // mean anything else, and the menu's own twenty-second idle timeout
+            // ends the window. It needs B held from power-on and is very likely
+            // unreachable, but it was never ruled out, so it is written down
+            // rather than assumed away.
+            TickType_t held_since = 0;
+            bool timing = false;
+            bool armed = !s_button_b_down;
+            bool warned = false;
             while (provision_is_active() && !provision_complete() && !provision_idle_expired()) {
-                const uint8_t taps =
-                    tap_count(&taps_out, button_outside_menu(&mask), xTaskGetTickCount());
-                if (taps >= RESET_TAPS) {
-                    ESP_LOGW(TAG, "five taps: leaving setup without configuring");
+                const TickType_t now = xTaskGetTickCount();
+                if (!s_button_b_down) {
+                    timing = false;
+                    armed = true;
+                } else if (armed && !timing) {
+                    timing = true;
+                    held_since = now;
+                }
+
+                const uint32_t held =
+                    timing ? (uint32_t)(now - held_since) * portTICK_PERIOD_MS : 0;
+                if (held >= SETTINGS_OPEN_MS) {
+                    ESP_LOGW(TAG, "B held: leaving setup without configuring");
                     break;
                 }
-                // Same warning the entry gesture gives, in the only place this
-                // screen has for it: a gesture that fires with no notice is
+
+                // The same warning the entry gesture gives, in the only place
+                // this screen has for it: a gesture that fires with no notice is
                 // exactly what the countdown exists to prevent.
-                if (taps >= RESET_TAPS_VISIBLE && taps != shown) {
+                const uint8_t pct = (uint8_t)((held * 100u) / SETTINGS_OPEN_MS);
+                if (pct >= SETTINGS_WARN_PCT && !warned) {
                     provision_set_status(SS_STATUS_LEAVING);
-                    shown = taps;
-                } else if (taps == 0 && shown != 0) {
+                    warned = true;
+                } else if (pct < SETTINGS_WARN_PCT && warned) {
                     provision_set_status(SS_STATUS_WAITING);
-                    shown = 0;
+                    warned = false;
                 }
-                vTaskDelay(pdMS_TO_TICKS(20));  // fast enough not to miss a tap
+                vTaskDelay(pdMS_TO_TICKS(20));
             }
             provision_stop();
             // Pick up whatever was just saved. Deliberately not re-seeding
@@ -2239,13 +2154,18 @@ void app_main(void) {
         }
     }
 
-    // See boot_gesture_task: net_task does not exist yet to catch the reset
-    // gesture, and wifi_connect() waits with no timeout, so this is the only
-    // window where the button would otherwise be undetectable.
-    TaskHandle_t boot_gesture = NULL;
-    xTaskCreate(boot_gesture_task, "boot_gesture", 2048, NULL, 4, &boot_gesture);
+    // No gesture task is needed here any more. face_task is created above as
+    // soon as the panel answers, and button_task right after it, both long
+    // before this line - so holding B opens settings even while wifi_connect()
+    // is still waiting for a network it will never find. That window, with the
+    // device stuck on a network that is not there, is the entire reason a
+    // second gesture watcher used to be created and deleted around this call.
+    //
+    // The price, said plainly because nothing else says it: a board whose OLED
+    // did not answer has no face_task, so it has no menu, and with the five
+    // taps gone it has no way into provisioning at all. Putting the way in on
+    // a screen is what costs that.
     wifi_connect(cfg.ssid, cfg.pass);
-    vTaskDelete(boot_gesture);
 
     ws_start(cfg.uri);
 

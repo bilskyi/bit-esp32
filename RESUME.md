@@ -350,12 +350,17 @@ token and `SERVER_URI`. Only that last line differs between LAN and cloud.
 | Amp data out | 7 | MAX98357A `DIN` |
 | Amp shutdown | 10 | MAX98357A `SD` |
 | Button to GND | 3 | push-to-talk |
+| Button B to GND | 20 | settings: hold 2 s |
 | Status LED | 8 | onboard, **lights on LOW** |
 | I2C SDA | 0 | SSD1306 `SDA` |
 | I2C SCL | 1 | SSD1306 `SCL` |
 
 Mic on **3V3**, amp on **5V**. The OLED takes 3V3 too. Do not use GPIO 9
 (BOOT), 18/19 (USB), 2 (strapping).
+
+GPIO 20 is U0RXD and is free only because the console is USB-Serial-JTAG. A
+board with a CP2102 or CH340 bridge cannot use it. GPIO 21 is the last free
+pin after it.
 
 GPIO 0 and 1 are the 32 kHz crystal pins, which is only a problem if the RTC
 is told to use one. `CONFIG_RTC_CLK_SRC_INT_RC=y`, so they are genuinely free.

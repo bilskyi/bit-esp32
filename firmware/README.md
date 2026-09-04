@@ -56,6 +56,7 @@ cannot drift apart on wiring.
 | WS | 5 | WS |
 | Mic data in | 6 | SD |
 | Button (to GND) | 3 | — |
+| Button B (to GND) | 20 | — |
 
 `L/R` to GND, `VDD` to **3V3**. The amp is not involved yet — leave it
 unpowered, or at least leave GPIO10 disconnected, so nothing can make noise
