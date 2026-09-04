@@ -62,12 +62,34 @@ const char *settings_page_title(uint8_t page) {
     return (page < SETTINGS_PAGES) ? PAGE_TITLE[page] : "";
 }
 
+// The step cannot leave its range through this file - settings_init() clamps
+// what NVS hands over and bump_value() takes a modulus - but the struct
+// belongs to the caller, and every other accessor here guards its table
+// anyway. This one does too, so writing step[] directly is a bad idea rather
+// than an out-of-bounds read.
+//
+// Each page clamps the way the accessor for the same page clamps, not
+// uniformly to zero: what the panel prints has to be the value actually in
+// force. settings_volume_gain() and settings_screen_contrast() saturate at the
+// top step, settings_eyes_emotion() falls back to the first, and the text
+// follows each of them.
 const char *settings_value_text(const settings_t *s, uint8_t page) {
     switch (page) {
-        case SETTINGS_PAGE_VOLUME: return VOLUME_TEXT[s->step[SETTINGS_PAGE_VOLUME]];
-        case SETTINGS_PAGE_SCREEN: return SCREEN_TEXT[s->step[SETTINGS_PAGE_SCREEN]];
-        case SETTINGS_PAGE_EYES:   return EYES_TEXT[s->step[SETTINGS_PAGE_EYES]];
-        default:                   return "";
+        case SETTINGS_PAGE_VOLUME: {
+            const uint8_t step = s->step[SETTINGS_PAGE_VOLUME];
+            return VOLUME_TEXT[(step < SETTINGS_VOLUME_STEPS) ? step
+                                                             : SETTINGS_VOLUME_STEPS - 1];
+        }
+        case SETTINGS_PAGE_SCREEN: {
+            const uint8_t step = s->step[SETTINGS_PAGE_SCREEN];
+            return SCREEN_TEXT[(step < SETTINGS_SCREEN_STEPS) ? step
+                                                              : SETTINGS_SCREEN_STEPS - 1];
+        }
+        case SETTINGS_PAGE_EYES: {
+            const uint8_t step = s->step[SETTINGS_PAGE_EYES];
+            return EYES_TEXT[(step < SETTINGS_EYES_STEPS) ? step : 0];
+        }
+        default: return "";
     }
 }
 

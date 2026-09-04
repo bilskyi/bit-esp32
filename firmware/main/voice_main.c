@@ -119,27 +119,30 @@
 #define PREBUFFER_CODED 3200
 
 #define DEBOUNCE_MS 25
-// Never block forever on a send. The button is polled in the same loop, so an
-// unbounded wait means a release is never noticed and the device stays stuck
-// in "listening" until it is reset - which is exactly what happened.
-// Sends wait indefinitely on purpose.
+// Bounded, but generously.
 //
-// A bounded wait looks safer and is not: the timeout is handed straight to the
+// An expired poll is not a retry. The timeout is handed straight to the
 // transport's poll_write, and a poll that expires makes esp_transport_write()
 // return 0, which the client treats as a fatal write error and tears the
 // connection down. A full TCP send buffer for a few hundred milliseconds is
 // ordinary on WiFi, so a 400 ms bound killed roughly every other upload.
 //
-// Blocking here is safe because the button is sampled by its own task, so a
-// stalled send can no longer hide a release.
-// Bounded, but generously.
+// Unbounded is worse in the other direction: a send that never returns holds
+// the client lock forever, and the log fills with "Could not lock ws-client
+// ... for CLOSE" while the device sits there unable to even hang up. It also
+// used to leave the device stuck in "listening", because the button was read
+// in the same loop and a release was never noticed - button_task samples the
+// pins on its own now, so the debounced state stays fresh through a stall
+// even though the task that acts on it does not.
 //
-// An expired poll makes the client tear the connection down, so this must sit
-// well above a normal stall - at 400 ms it killed every other upload. But an
-// unbounded wait is worse: a send that never returns holds the client lock
-// forever, and the log fills with "Could not lock ws-client ... for CLOSE"
-// while the device sits there unable to even hang up. Five seconds means a
-// truly stuck link costs one reconnect instead of a wedge.
+// Twelve seconds sits well above any ordinary stall and still bounds the
+// wedge: a truly stuck link costs one reconnect. It is also exactly how long
+// net_task can be blind to the button, because it reads it between sends and
+// not during one - so twelve is the number any argument about what a stall
+// can hide has to use, including the accepted risk above button_outside_menu()
+// that a menu opened and closed inside one such stall is never seen there. An
+// earlier revision of this comment said five, and the constant has not been
+// five for some time.
 #define SEND_TIMEOUT pdMS_TO_TICKS(12000)
 // Longest the device will wait on the server before re-arming the button.
 #define STUCK_TIMEOUT_MS 20000
@@ -1489,7 +1492,7 @@ static void play_beep(int32_t *frame, int32_t gain) {
 
 static void audio_out_task(void *arg) {
     // The play buffer now holds compressed audio, so the same RAM rides out
-    // four times as long a gap: 48 KB is about six seconds of speech.
+    // four times as long a gap: 32 KB is about four seconds of speech.
     static uint8_t coded[BLOCK_SAMPLES / 2];
     static int16_t pcm[BLOCK_SAMPLES];
     static int32_t frame[BLOCK_SAMPLES * 2];
@@ -1855,8 +1858,6 @@ static void net_task(void *arg) {
     menu_mask_t mask = {0};
     TickType_t press_start = 0;
 
-    TickType_t busy_since = 0;
-
     while (true) {
         // The button, minus anything the settings menu has taken. The whole
         // argument for the gate, and for the latch inside it, is above
@@ -1875,17 +1876,14 @@ static void net_task(void *arg) {
         // perfectly well and cut it off. Only genuine silence from the server
         // counts as stuck.
         if (s_state == ST_IDLE) {
-            busy_since = now;
             s_last_activity = now;
         } else if ((now - s_last_activity) > pdMS_TO_TICKS(STUCK_TIMEOUT_MS)) {
             ESP_LOGW(TAG, "no data from server for %d s in state %d, forcing idle",
                      STUCK_TIMEOUT_MS / 1000, (int)s_state);
             s_reply_finished = false;
             s_state = ST_IDLE;
-            busy_since = now;
             s_last_activity = now;
         }
-        (void)busy_since;
 
         if (down != held) {
             held = down;

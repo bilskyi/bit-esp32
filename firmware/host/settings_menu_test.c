@@ -449,6 +449,61 @@ static void test_init_clamps_nonsense_from_nvs(void) {
     CHECK(!s.open, "init opened the menu");
 }
 
+// settings_value_text() is the one accessor handed a caller-owned struct, so
+// it is the one that can be given a step no gesture could produce. Nothing in
+// settings_menu.c writes such a step - this is what a future caller reaching
+// into step[] the way this test does would get, and the point of the check is
+// that removing the guard turns it from a clamp into a read past the table,
+// which the ASan build would then catch here rather than on a board.
+static void test_an_out_of_range_step_clamps_instead_of_reading_past_a_table(void) {
+    settings_t s = fresh();
+    const uint8_t pages[3] = {SETTINGS_PAGE_VOLUME, SETTINGS_PAGE_SCREEN, SETTINGS_PAGE_EYES};
+    const uint8_t nonsense[3] = {SETTINGS_VOLUME_STEPS, 100, 255};
+
+    for (size_t p = 0; p < 3; p++) {
+        const uint8_t page = pages[p];
+        const uint8_t n = settings_page_steps(page);
+        for (size_t k = 0; k < 3; k++) {
+            s.step[page] = nonsense[k];
+            const char *v = settings_value_text(&s, page);
+            CHECK(strlen(v) > 0 && strlen(v) <= 12,
+                  "page %u step %u gave \"%s\"", page, nonsense[k], v);
+
+            // It must be one of that page's own labels, which is what says it
+            // clamped rather than landing on whatever followed the table.
+            bool known = false;
+            for (uint8_t i = 0; i < n; i++) {
+                s.step[page] = i;
+                if (strcmp(v, settings_value_text(&s, page)) == 0) known = true;
+            }
+            CHECK(known, "page %u step %u gave \"%s\", which is not one of its labels",
+                  page, nonsense[k], v);
+        }
+        s.step[page] = 0;
+    }
+
+    // And it clamps where the value does, so what the panel prints is the
+    // setting actually in force rather than some other label off the table.
+    s.step[SETTINGS_PAGE_VOLUME] = 200;
+    const char *loud = settings_value_text(&s, SETTINGS_PAGE_VOLUME);
+    s.step[SETTINGS_PAGE_VOLUME] = SETTINGS_VOLUME_STEPS - 1;
+    CHECK(strcmp(loud, settings_value_text(&s, SETTINGS_PAGE_VOLUME)) == 0,
+          "an out-of-range volume read as \"%s\", not as the top step whose gain it gets", loud);
+
+    s.step[SETTINGS_PAGE_SCREEN] = 200;
+    const char *bright = settings_value_text(&s, SETTINGS_PAGE_SCREEN);
+    s.step[SETTINGS_PAGE_SCREEN] = SETTINGS_SCREEN_STEPS - 1;
+    CHECK(strcmp(bright, settings_value_text(&s, SETTINGS_PAGE_SCREEN)) == 0,
+          "an out-of-range brightness read as \"%s\", not as the top step whose contrast it gets",
+          bright);
+
+    s.step[SETTINGS_PAGE_EYES] = 200;
+    const char *pose = settings_value_text(&s, SETTINGS_PAGE_EYES);
+    s.step[SETTINGS_PAGE_EYES] = 0;
+    CHECK(strcmp(pose, settings_value_text(&s, SETTINGS_PAGE_EYES)) == 0,
+          "an out-of-range eyes step read as \"%s\", not as the first, whose pose it gets", pose);
+}
+
 int main(void) {
     test_a_short_b_hold_does_not_open();
     test_a_two_second_b_hold_opens_on_the_first_page();
@@ -474,6 +529,7 @@ int main(void) {
     test_every_label_is_short_ascii_and_distinct();
     test_a_muted_step_asks_for_no_beep();
     test_init_clamps_nonsense_from_nvs();
+    test_an_out_of_range_step_clamps_instead_of_reading_past_a_table();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
