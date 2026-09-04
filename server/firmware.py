@@ -43,6 +43,24 @@ CHIP_ID_ESP32C3 = 5
 # themselves quick.
 OTA_REPLY_TIMEOUT_S = 30.0
 
+# How many bytes may be in flight before the device has to say where it is.
+# Must equal OL_ACK_EVERY in firmware/main/ota_logic.h - the two halves of one
+# window, and a mismatch stalls every transfer.
+#
+# This is not throughput tuning, it is the fix for a measured failure. Without
+# it the server empties a megabyte into the socket as fast as TCP allows; the
+# device's websocket client answers PING from the same task that runs its data
+# handler, so while that handler writes flash no PONG goes out, and uvicorn's
+# default keepalive - ping every 20 s, close 20 s after silence - closes the
+# connection. Measured on the board: the socket died 31.4 seconds in, with no
+# ota_end and no commit.
+ACK_EVERY = 32768
+
+# Long enough for the device to erase and write a 32 KB round with a slow
+# link under it, short enough that a device which has wedged does not hold
+# the request open. Overridable on the registry for the tests.
+OTA_ACK_TIMEOUT_S = 30.0
+
 # A megabyte is the real size; four is room to grow without letting a stray
 # upload become a memory problem. The body is held in memory rather than
 # streamed straight through, because the device needs the total size in
@@ -97,6 +115,12 @@ class DeviceLink:
         self.ws = ws
         self.version: str | None = None
         self.replies: asyncio.Queue[dict] = asyncio.Queue()
+        # Kept apart from `replies` on purpose. An ack shares the ota_ prefix
+        # with the frames that end a transfer, and on one queue it would end
+        # the wait for an outcome and report success for something the device
+        # never confirmed.
+        self.acks: asyncio.Queue[dict] = asyncio.Queue()
+        self.have = 0  # bytes the device has confirmed writing
 
 
 class DeviceRegistry:
@@ -112,6 +136,7 @@ class DeviceRegistry:
         self._links: dict[str, DeviceLink] = {}
         self._pushing = False
         self.reply_timeout_s = OTA_REPLY_TIMEOUT_S
+        self.ack_timeout_s = OTA_ACK_TIMEOUT_S
 
     def register(self, surface: str, ws: WebSocket) -> DeviceLink:
         if surface in self._links:
@@ -169,11 +194,33 @@ class DeviceRegistry:
             log.info("%s says it is running %s", surface, link.version)
             return True
 
+        if kind == "ota_ack":
+            # Only enqueued here. wait_ack() is the single writer of
+            # link.have, so there is one place that decides how far the
+            # device has got rather than two that can disagree.
+            link.acks.put_nowait(control)
+            return True
+
         if isinstance(kind, str) and kind.startswith("ota_"):
             link.replies.put_nowait(control)
             return True
 
         return False
+
+    async def wait_ack(self, link: DeviceLink) -> bool:
+        """Wait for the device to say where it is. False when it never does.
+
+        The one writer of link.have: an ack that never gets waited for never
+        moves the mark, which is what keeps the window honest.
+        """
+        try:
+            frame = await asyncio.wait_for(link.acks.get(), self.ack_timeout_s)
+        except (asyncio.TimeoutError, TimeoutError):
+            return False
+        have = frame.get("have")
+        if isinstance(have, int) and have > link.have:
+            link.have = have
+        return True
 
     async def await_outcome(self, link: DeviceLink) -> dict:
         """The device's verdict, or a timeout of our own making."""
@@ -250,6 +297,12 @@ def register_firmware_routes(app: FastAPI, require_login) -> None:
         async def pump():
             try:
                 log.warning("pushing %d bytes of firmware %s to %s", total, version, DEVICE_SURFACE)
+                # A stale ack from an abandoned transfer would let this one
+                # run a window ahead of the device.
+                link.have = 0
+                while not link.acks.empty():
+                    link.acks.get_nowait()
+
                 await link.ws.send_text(
                     json.dumps({"type": "ota_begin", "size": total, "version": version})
                 )
@@ -257,6 +310,15 @@ def register_firmware_routes(app: FastAPI, require_login) -> None:
 
                 sent = 0
                 for start in range(0, total, OTA_CHUNK):
+                    # Never more than one window outstanding. The device acks
+                    # on crossing ACK_EVERY, so a tail shorter than a window
+                    # is never acked and is never waited for either.
+                    while sent - link.have >= ACK_EVERY:
+                        if not await registry.wait_ack(link):
+                            raise RuntimeError(
+                                f"the device stopped acking at {link.have} of {total} bytes"
+                            )
+
                     await link.ws.send_bytes(body[start : start + OTA_CHUNK])
                     sent = min(start + OTA_CHUNK, total)
                     yield json.dumps({"sent": sent, "total": total}) + "\n"

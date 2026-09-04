@@ -268,3 +268,28 @@ class BrokenWebSocket(FakeWebSocket):
 
     async def send_bytes(self, data: bytes) -> None:
         raise ConnectionResetError("the device went away")
+
+class PacingWebSocket(FakeWebSocket):
+    """A device that acks like the firmware does, so a paced push completes.
+
+    The real one acks every OL_ACK_EVERY bytes from inside its websocket
+    client's own task. Here the ack is pushed straight onto the link's queue
+    the moment the threshold is crossed, which is the same contract without
+    the flash writes.
+    """
+
+    def __init__(self, every: int) -> None:
+        super().__init__()
+        self.every = every
+        self.link = None  # set by the test once the link exists
+        self._acked = 0
+
+    async def send_bytes(self, data: bytes) -> None:
+        await super().send_bytes(data)
+        if self.link is not None and len(self.blob) - self._acked >= self.every:
+            self._acked = len(self.blob)
+            self.link.acks.put_nowait({"type": "ota_ack", "have": self._acked})
+
+
+class SilentWebSocket(FakeWebSocket):
+    """Takes bytes and never acks - a device wedged in a flash write."""

@@ -345,6 +345,75 @@ static void test_xfer_reset_allows_a_retry(void) {
     CHECK(x.received == 0u, "received not cleared: %u", (unsigned)x.received);
 }
 
+// ------------------------------------------------------------ the acks
+//
+// Why these exist at all: the websocket client dispatches DATA to the
+// application from its own task, and it answers PING from that same task
+// (esp_websocket_client.c:1108 dispatches, 1118-1143 sends the PONG). An
+// unpaced megabyte keeps that task inside the application's handler writing
+// flash, no PONG goes out, and uvicorn's default keepalive - ping every 20 s,
+// close 20 s later - kills the connection. Measured on the board: the socket
+// died 31.4 s into a transfer. The window gives the task its loop back.
+
+static void test_ack_is_not_due_before_the_threshold(void) {
+    ol_xfer_t x;
+    ol_xfer_reset(&x);
+    ol_xfer_begin(&x, CAP, CAP);
+    ol_xfer_write(&x, OL_ACK_EVERY - 1);
+    CHECK(!ol_xfer_take_ack(&x), "acked early");
+}
+
+static void test_ack_is_due_exactly_at_the_threshold(void) {
+    ol_xfer_t x;
+    ol_xfer_reset(&x);
+    ol_xfer_begin(&x, CAP, CAP);
+    ol_xfer_write(&x, OL_ACK_EVERY);
+    CHECK(ol_xfer_take_ack(&x), "not acked at the threshold");
+}
+
+static void test_ack_is_taken_once_per_threshold(void) {
+    ol_xfer_t x;
+    ol_xfer_reset(&x);
+    ol_xfer_begin(&x, CAP, CAP);
+    ol_xfer_write(&x, OL_ACK_EVERY);
+    CHECK(ol_xfer_take_ack(&x), "first ack missing");
+    // Taking it is what makes it not owed again - otherwise every write past
+    // the first threshold would ack, and the window would stop pacing.
+    CHECK(!ol_xfer_take_ack(&x), "acked twice for the same bytes");
+    ol_xfer_write(&x, OL_ACK_EVERY);
+    CHECK(ol_xfer_take_ack(&x), "second window not acked");
+}
+
+static void test_ack_survives_a_write_larger_than_the_threshold(void) {
+    ol_xfer_t x;
+    ol_xfer_reset(&x);
+    ol_xfer_begin(&x, CAP, CAP);
+    ol_xfer_write(&x, OL_ACK_EVERY * 3);
+    CHECK(ol_xfer_take_ack(&x), "not acked after a big write");
+    // One ack, not three: the server only needs to know where the device is,
+    // and it reads `have` rather than counting acks.
+    CHECK(!ol_xfer_take_ack(&x), "a single write owed more than one ack");
+}
+
+static void test_no_ack_is_owed_on_a_fresh_transfer(void) {
+    ol_xfer_t x;
+    ol_xfer_reset(&x);
+    ol_xfer_begin(&x, CAP, CAP);
+    CHECK(!ol_xfer_take_ack(&x), "acked with nothing received");
+}
+
+static void test_reset_clears_the_ack_point(void) {
+    ol_xfer_t x;
+    ol_xfer_reset(&x);
+    ol_xfer_begin(&x, CAP, CAP);
+    ol_xfer_write(&x, OL_ACK_EVERY);
+    ol_xfer_take_ack(&x);
+    ol_xfer_reset(&x);
+    ol_xfer_begin(&x, CAP, CAP);
+    ol_xfer_write(&x, OL_ACK_EVERY);
+    CHECK(ol_xfer_take_ack(&x), "a retry never acks");
+}
+
 static void test_xfer_a_zero_length_write_is_harmless(void) {
     ol_xfer_t x;
     ol_xfer_reset(&x);
@@ -409,6 +478,12 @@ int main(void) {
     test_xfer_rejects_a_second_end();
     test_xfer_reset_allows_a_retry();
     test_xfer_a_zero_length_write_is_harmless();
+    test_ack_is_not_due_before_the_threshold();
+    test_ack_is_due_exactly_at_the_threshold();
+    test_ack_is_taken_once_per_threshold();
+    test_ack_survives_a_write_larger_than_the_threshold();
+    test_no_ack_is_owed_on_a_fresh_transfer();
+    test_reset_clears_the_ack_point();
 
     test_step_and_verdict_text_cover_every_value();
 

@@ -139,6 +139,7 @@ void ol_xfer_reset(ol_xfer_t *x) {
     x->state = OL_XFER_IDLE;
     x->expected = 0;
     x->received = 0;
+    x->acked = 0;
 }
 
 ol_step_t ol_xfer_begin(ol_xfer_t *x, uint32_t size, uint32_t capacity) {
@@ -158,6 +159,7 @@ ol_step_t ol_xfer_begin(ol_xfer_t *x, uint32_t size, uint32_t capacity) {
     x->state = OL_XFER_ACTIVE;
     x->expected = size;
     x->received = 0;
+    x->acked = 0;
     return OL_STEP_OK;
 }
 
@@ -185,6 +187,12 @@ ol_step_t ol_xfer_end(ol_xfer_t *x) {
 
     x->state = OL_XFER_DONE;
     return OL_STEP_OK;
+}
+
+bool ol_xfer_take_ack(ol_xfer_t *x) {
+    if (x->received - x->acked < OL_ACK_EVERY) return false;
+    x->acked = x->received;
+    return true;
 }
 
 const char *ol_step_text(ol_step_t s) {

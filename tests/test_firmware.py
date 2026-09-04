@@ -25,7 +25,7 @@ tested on the registry.
 import json
 import struct
 
-from tests.fakes import BrokenWebSocket, FakeWebSocket
+from tests.fakes import BrokenWebSocket, FakeWebSocket, PacingWebSocket, SilentWebSocket
 from tests.test_main import client  # noqa: F401 - see the note below
 
 # client() lives in test_main.py rather than conftest.py, and is imported
@@ -34,6 +34,7 @@ from tests.test_main import client  # noqa: F401 - see the note below
 # copying it here would leave two of them to drift apart.
 
 from server.firmware import (
+    ACK_EVERY,
     CHIP_ID_ESP32C3,
     HEADER_MIN,
     OTA_CHUNK,
@@ -292,6 +293,82 @@ def test_push_gives_up_waiting_rather_than_hanging():
         r = c.post("/firmware/push", content=firmware())  # nobody ever answers
 
     assert lines(r)[-1]["outcome"] == "timeout"
+
+
+def test_push_paces_itself_and_stops_when_the_device_goes_quiet():
+    """Unpaced, this is what killed a real transfer 31.4 s in.
+
+    The device's websocket client answers PING from the same task that runs
+    its data handler, so a flood keeps it from answering and the server's
+    keepalive closes the socket. The window is the fix, and the thing to pin
+    here is that the server actually stops rather than emptying the whole
+    body into a socket nobody is reading.
+    """
+    body = firmware(size=ACK_EVERY * 4)
+    with client(device_token=TOKEN) as c:
+        login(c)
+        c.app.state.devices.ack_timeout_s = 0.3
+        fake, _ = connected(c, SilentWebSocket())
+
+        r = c.post("/firmware/push", content=body)
+
+    assert lines(r)[-1]["outcome"] == "error"
+    assert "ack" in lines(r)[-1]["reason"].lower()
+    # One window in flight and not a byte more.
+    assert len(fake.blob) == ACK_EVERY, f"sent {len(fake.blob)} with nobody acking"
+    # And no ota_end: the transfer was abandoned, not finished.
+    assert [f["type"] for f in fake.frames] == ["ota_begin", "ota_abort"]
+
+
+def test_push_completes_when_the_device_acks():
+    body = firmware(size=ACK_EVERY * 3 + 1234)
+    with client(device_token=TOKEN) as c:
+        login(c)
+        fake = PacingWebSocket(ACK_EVERY)
+        _, link = connected(c, fake)
+        fake.link = link
+        link.replies.put_nowait({"type": "ota_ready"})
+
+        r = c.post("/firmware/push", content=body)
+
+    assert bytes(fake.blob) == body
+    assert [f["type"] for f in fake.frames] == ["ota_begin", "ota_end"]
+    assert lines(r)[-1]["outcome"] == "ota_ready"
+
+
+def test_a_tail_shorter_than_a_window_does_not_wait_for_an_ack():
+    """The device only acks on crossing the threshold, so the last partial
+    window is never acked. A server that waited for it would stall on every
+    transfer whose size is not a multiple of the window."""
+    body = firmware(size=ACK_EVERY + 7)
+    with client(device_token=TOKEN) as c:
+        login(c)
+        c.app.state.devices.ack_timeout_s = 0.3
+        fake = PacingWebSocket(ACK_EVERY)
+        _, link = connected(c, fake)
+        fake.link = link
+        link.replies.put_nowait({"type": "ota_ready"})
+
+        r = c.post("/firmware/push", content=body)
+
+    assert bytes(fake.blob) == body
+    assert lines(r)[-1]["outcome"] == "ota_ready"
+
+
+def test_an_ack_is_not_mistaken_for_an_outcome():
+    """ota_ack shares the ota_ prefix with the terminal frames. Routed onto
+    the same queue it would end the wait and report success for a transfer
+    the device never confirmed."""
+    with client(device_token=TOKEN) as c:
+        login(c)
+        c.app.state.devices.reply_timeout_s = 0.3
+        _, link = connected(c)
+        link.acks.put_nowait({"type": "ota_ack", "have": 4096})
+
+        r = c.post("/firmware/push", content=firmware())
+
+    assert lines(r)[-1]["outcome"] == "timeout"
+    assert link.replies.empty(), "an ack landed on the outcome queue"
 
 
 def test_a_socket_that_dies_mid_transfer_is_reported_not_raised():

@@ -914,11 +914,36 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
             ota_mark_valid("frame from the server");
 
             if (e->op_code == 0x02 && ota_active()) {
-                // Firmware, not speech. Blocking here is the backpressure:
-                // this task stops draining the socket while the flash is
-                // busy, which is what TCP's window is for.
+                // Firmware, not speech.
                 if (ota_write(e->data_ptr, (size_t)e->data_len) != ESP_OK) {
                     s_ota_outcome = OTA_OUTCOME_FAILED;
+                    break;
+                }
+
+                // Pace the sender, every OL_ACK_EVERY bytes.
+                //
+                // TCP backpressure alone was the first design and it does not
+                // work here, which was measured rather than argued: the
+                // socket died 31.4 s into an unpaced megabyte. This task is
+                // the client's own, and the client answers PING from it -
+                // esp_websocket_client.c:1108 dispatches this event, 1118-1143
+                // sends the PONG - so while this handler writes flash no PONG
+                // goes out, and uvicorn's default 20 s ping with a 20 s
+                // timeout closes the connection. The window returns the task
+                // to its loop between rounds.
+                //
+                // Sent from here rather than from link_task, which is the one
+                // rule this breaks and it is safe to: the client's locks are
+                // recursive (xSemaphoreTakeRecursive) and this is the very
+                // task that holds them, so re-entering send_text() from
+                // inside its callback takes a lock it already owns. link_task
+                // runs at 1 Hz, which cannot pace 32 KB rounds.
+                if (ota_take_ack()) {
+                    char ack[64];
+                    const int n = snprintf(ack, sizeof(ack),
+                                           "{\"type\":\"ota_ack\",\"have\":%u}",
+                                           (unsigned)ota_received());
+                    if (n > 0) esp_websocket_client_send_text(s_ws, ack, n, SEND_TIMEOUT);
                 }
                 break;
             }

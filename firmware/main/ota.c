@@ -139,6 +139,16 @@ uint32_t ota_capacity(void) {
 }
 
 bool ota_active(void) { return s_xfer.state == OL_XFER_ACTIVE; }
+
+bool ota_take_ack(void) {
+    if (!ol_xfer_take_ack(&s_xfer)) return false;
+    // One line per 32 KB - 34 of them for a megabyte. Deliberately not per
+    // write: this console is synchronous USB Serial/JTAG, and logging on a
+    // hot path has already cost this project a socket once (see the log-level
+    // note at the top of app_main).
+    ESP_LOGI(TAG, "%u / %u bytes", (unsigned)s_xfer.received, (unsigned)s_xfer.expected);
+    return true;
+}
 uint32_t ota_received(void) { return s_xfer.received; }
 uint32_t ota_expected(void) { return s_xfer.expected; }
 const char *ota_last_error(void) { return s_error; }

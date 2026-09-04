@@ -97,10 +97,27 @@ typedef enum {
     OL_XFER_DONE,
 } ol_xfer_state_t;
 
+// How many bytes may arrive before the device owes the sender an ack.
+//
+// This is the whole of the flow control, and it is not an optimisation. The
+// websocket client dispatches DATA to the application from its own task and
+// answers PING from that same task; an unpaced megabyte keeps that task
+// inside the application's handler writing flash, no PONG goes out, and a
+// server keepalive closes the connection. Measured on the board before this
+// existed: the socket died 31.4 seconds into a transfer, with uvicorn's
+// default ping/timeout of 20 s each. The window hands the task its own loop
+// back between rounds.
+//
+// 32 KB is eight 4096-byte frames - one frame being the device's receive
+// buffer, so eight is enough in flight to keep the flash busy and few enough
+// that the pause comes well inside a keepalive period.
+#define OL_ACK_EVERY 32768
+
 typedef struct {
     ol_xfer_state_t state;
     uint32_t expected;
     uint32_t received;
+    uint32_t acked;  // `received` as of the last ack taken
 } ol_xfer_t;
 
 typedef enum {
@@ -122,5 +139,14 @@ void ol_xfer_reset(ol_xfer_t *x);
 ol_step_t ol_xfer_begin(ol_xfer_t *x, uint32_t size, uint32_t capacity);
 ol_step_t ol_xfer_write(ol_xfer_t *x, uint32_t n);
 ol_step_t ol_xfer_end(ol_xfer_t *x);
+
+// True when at least OL_ACK_EVERY bytes have arrived since the last ack was
+// taken, and records this point as acked. Taking it is what stops the next
+// write owing another one - a peek would ack on every write past the first
+// threshold and the window would stop pacing anything.
+//
+// One ack per crossing, however large the write: the sender reads `have` off
+// the ack rather than counting them.
+bool ol_xfer_take_ack(ol_xfer_t *x);
 
 const char *ol_step_text(ol_step_t s);

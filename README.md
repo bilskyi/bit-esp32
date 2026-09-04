@@ -91,10 +91,21 @@ frames are JSON control messages.
 | device → server | `{"type":"hello","version":"v0.3.0"}` | on every connect. `esp_app_get_description()->version`, which is `git describe` output |
 | server → device | `{"type":"ota_begin","size":1117200,"version":"v0.3.0"}` | a firmware image follows. `size` is mandatory: `esp_ota_begin(OTA_SIZE_UNKNOWN)` erases the whole 1.94 MB partition up front instead of lazily by sector |
 | server → device | binary | the image, in 4096-byte frames — the device's own receive buffer size |
+| device → server | `{"type":"ota_ack","have":32768}` | 32 KB arrived and were written. The server sends no more than one 32 KB window past the last ack |
 | server → device | `{"type":"ota_end"}` | that was all of it: verify and commit |
 | server → device | `{"type":"ota_abort"}` | never mind, discard it |
 | device → server | `{"type":"ota_ready"}` | committed, restarting into it |
 | device → server | `{"type":"ota_failed","reason":"..."}` | refused, and why |
+
+`ota_ack` is flow control, not bookkeeping, and it is there because the
+obvious alternative was measured and failed. Letting TCP alone do the pacing
+emptied a megabyte into the socket as fast as the window allowed; the device
+answers `PING` from the same task that runs its data handler, so while that
+handler wrote flash no `PONG` went out, and uvicorn's default keepalive - ping
+every 20 s, close 20 s after silence - closed the connection **31.4 seconds
+into the transfer**, with no `ota_end` and no commit. `ACK_EVERY` in
+`server/firmware.py` and `OL_ACK_EVERY` in `firmware/main/ota_logic.h` are the
+two halves of one window and must stay equal.
 
 **Binary frames mean firmware while a transfer is running, and reply audio the
 rest of the time.** There is no second socket and no second TLS session: the

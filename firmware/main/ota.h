@@ -93,6 +93,13 @@ esp_err_t ota_end(void);
 void ota_abort(void);
 
 bool ota_active(void);
+
+// True when the sender is owed an ack, at most once per OL_ACK_EVERY bytes.
+// Also logs progress, which is the only progress this path has: a transfer
+// that dies half way otherwise says nothing about how far it got, and that
+// is exactly the question the first failed transfer could not answer.
+bool ota_take_ack(void);
+
 uint32_t ota_received(void);
 uint32_t ota_expected(void);
 
