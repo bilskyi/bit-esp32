@@ -119,6 +119,29 @@ The gauge is drawn as cells with a two-pixel gap: filled for steps reached,
 outlined for steps not. Outlined rather than absent, so the scale's length is
 visible at any setting.
 
+**A cell is a step of loudness or light, not a step of the enum.** Steps are
+numbered from zero, so a page's top step is `steps - 1` and drawing `step`
+cells filled leaves the last one unreachable - which is what shipped here
+first, on both value pages, and reads as a scale with a dead segment at the
+end. What the gauge shows is the value in force as a share of the loudest or
+brightest the page can be, and that share depends on whether the page has an
+off:
+
+| Page | Cells | Filled | Bottom step | Top step |
+|---|---|---|---|---|
+| `VOLUME` | `steps - 1` = 5 | `step` | `muted`, empty | `0 dB`, all five |
+| `SCREEN` | `steps` = 4 | `step + 1` | `Low`, one of four | `Max`, all four |
+
+`muted` is a real zero - nothing is coming out of the speaker - so an empty
+gauge is the honest drawing of it, and the five cells above it are the five
+audible levels. `Low` is not: the panel is lit at `0x10`, and a gauge with
+nothing in it would say the screen is off while the owner is reading it.
+
+`settings_page_gauge()` in `settings_menu.c` is the only place that knows
+this, beside the step table it is derived from. `settings_screen.c` asks for
+a cell count and a filled count and draws them; it does not get to decide
+what a step means, any more than it decides what a step is worth in decibels.
+
 **The hint line is permanent, and says only the non-obvious half.** Pressing
 `B` moves the bar, which teaches itself. Leaving does not, and this is a
 screen someone sees a few times a year.
@@ -429,8 +452,15 @@ uses for `setup_screen` and `provision_logic`:
 - values persisting across an open/close cycle, and defaults when NVS is
   empty;
 - the render, checked the way `setup_screen_test.c` checks its own: text
-  inside the panel, nothing drawn past an edge, the gauge's cell count
-  matching the step count, the page dots matching the page.
+  inside the panel, nothing drawn past an edge, the gauge's cells matching
+  what `settings_page_gauge()` reports, the page dots matching the page.
+
+The gauge tests carry their expected numbers written out rather than computed
+from the same expression the renderer uses - the dead last cell survived a
+test that asserted `filled == s.step[page]` against a renderer that drew
+`s->step[page]`, which is a test of self-consistency and not of the design.
+So: the top step fills every cell, `muted` fills none, `Low` fills exactly
+one.
 
 The gain table is a pure function and gets a test that walks it: monotonic,
 step 0 exactly zero, step 5 exactly `0x7fff`.
