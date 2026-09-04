@@ -142,6 +142,67 @@ Fixed by closing the socket before restarting — the closing handshake waits
 for what went before it — rather than by lengthening the delay, which would
 only move the same race.
 
+## 7. The happy path, end to end, with both fixes in
+
+Pushed from the web app, over the Railway deployment, onto a device
+running `438956f`:
+
+```
+I    (216) boot: Loaded app from partition at offset 0x20000
+W (142279) ota: update started: 1122288 bytes into ota_1 (capacity 2031616)
+             … 34 windows, heap 43940-47616 …
+W (263709) ota: update committed to ota_1; the next boot runs it unproven
+W (264436) voice: restarting into the new image
+I    (237) boot: Loaded app from partition at offset 0x210000
+W    (252) ota: this image is unproven: 10 minutes to reach the server
+I   (5940) voice: socket connected
+W  (23187) ota: image accepted (frame from the server)
+I  (23252) ota: image proved good; the deadline is off
+```
+
+1,122,288 bytes in 121.4 s — **9.0 KB/s**, a little better than the 7.5 KB/s
+of the earlier run and the same shape of cost. **Free heap held between 43,940
+and 47,616 bytes across all 34 windows**, which is the number the spec asked
+for and could not get from a laptop. No downward trend across the transfer, so
+nothing is leaking per window.
+
+The panel reported `ota_ready` rather than `timeout`, which is the closing
+handshake from item 6 doing its job.
+
+**The frame that proves an image is usually a PONG.** `image accepted` landed
+17 seconds after the socket opened, not immediately: nothing
+application-level arrives spontaneously, so the first inbound frame is the
+answer to the device's own 20-second keepalive ping. That still satisfies the
+definition — a WebSocket frame of any kind can only arrive after a handshake
+the server accepted, and the handshake is where the token is checked, as the
+403s in item 5 show. Worth writing down because "waited 17 s doing nothing
+visible" looks like a fault and is not one, and because it is 17 seconds
+against a 600-second deadline.
+
+## Two bugs found by using it, not by testing it
+
+Neither showed up in 446 server tests or 12 host runs. Both are recorded in
+`438956f`.
+
+**A failed update came out of the speaker.** The binary path was guarded on
+`ota_active()` — whether a transfer is *healthy* — rather than on whether the
+sender is sending firmware at all. When a write fails, `ota_write()` aborts
+the transfer, that guard goes false, and every remaining frame of the image
+falls into the branch that treats binary as reply audio. About five seconds of
+noise came out of the amplifier, which is exactly the play buffer's depth.
+
+**Two pushes interleaved into one partition.** The server's one-push-at-a-time
+slot lives as long as its HTTP request and no longer. A browser that reloads
+cancels the request and frees the slot while the device, told nothing, is
+still receiving; the next push then writes into the first transfer's byte
+stream. Two different images into one partition, an overrun, and the abort
+above. Every push now opens with `ota_abort` rather than assuming the device
+is idle.
+
+The two together are one lesson: **the device's transfer state and the
+sender's idea of it are separate things**, and every place that assumed
+otherwise was wrong.
+
 ## What this leaves undone
 
 - **Versions are still not distinguishable.** Both the good and the

@@ -35,11 +35,15 @@ All nine tasks are done and committed. What was verified, and how:
 | Whole path, no board | a real uvicorn against `scripts/fake_device.py --await-ota`: 1,117,200 bytes, `bytes match`, `ota_ready`, and the push saw `{"done": true, "outcome": "ota_ready"}` |
 | Web | 56 vitest tests, `tsc -b` clean, bundle builds, and the repo's own shots harness reports no layout problems across ten viewport/scheme combinations |
 
-**Not done, and each is somebody's decision rather than an oversight:**
+**Since flashed and verified on hardware (4 Sep 2026).** All five board-only
+items are closed; the evidence is in
+`docs/superpowers/measurements/2026-09-04-over-the-air-on-the-board.md`. Two
+of them contradicted the design and both fixes shipped: TCP backpressure
+alone lost a transfer at 31.4 s, and two bugs were found by using the feature
+rather than by testing it — a failed update playing firmware through the
+speaker, and two pushes interleaving into one partition.
 
-- **The cable flash.** Nothing here has touched the board. That is step 2 of
-  the order of operations, and steps 4 and 5 after it — an update actually
-  landing, and rollback actually firing — cannot be done from a laptop.
+**Not done, and each is somebody's decision rather than an oversight:**
 - **The first git tag.** Which version number this is belongs to whoever owns
   the release. Until then `git describe` gives a bare hash.
 - **`GITHUB_REPO`.** Empty in `web/src/firmwareApi.ts`, because there is no
