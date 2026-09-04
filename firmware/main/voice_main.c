@@ -192,16 +192,19 @@ static volatile bool s_button_b_down = false;
 // The settings carousel. Seeded once in app_main, before face_task exists.
 // After that face_task is its only writer here, and it is also the only task
 // that draws, so the screen can never disagree with the state behind it.
-// Task 6 adds a second writer - audio_out_task clearing beep_requested - and
-// will need its own answer to the paragraph below for the two fields it
-// shares; this one covers the one field that crosses a task boundary today.
+//
+// Task 6 needed two more things out of this struct for the audio path - the
+// playback gain and the request for a demonstration tone - and kept the rule
+// rather than bending it. Neither is read from here by another task:
+// face_task publishes both below, each in the shape it actually has. So this
+// is still one writer, and there is still no lock.
 //
 // Deliberately not volatile. settings_tick() takes a plain settings_t *, so a
 // volatile struct could only be passed to it by casting the qualifier away at
 // every call, which buys the appearance of safety and none of it. Instead the
-// single bit that other tasks need is published separately, below: one bit,
-// one writer, and the sharing is visible in the declaration rather than
-// inferred from a struct several tasks happen to reach into.
+// facts other tasks need are published separately, below: each written by one
+// task, and the sharing visible in the declaration rather than inferred from
+// a struct several tasks happen to reach into.
 static settings_t s_settings;
 
 // Whether the menu is up, published by face_task for the tasks that must not
@@ -216,6 +219,41 @@ static settings_t s_settings;
 // switch to -Os or IPO could take any of them away silently. The gate that
 // keeps the menu out of the conversation depends on this read being fresh.
 static volatile bool s_menu_open = false;
+
+// The Q15 playback gain the volume page is currently showing, published by
+// face_task for audio_out_task to scale the reply with.
+//
+// A fact rather than an event: whoever reads it wants the value that is true
+// now, and int32_t is naturally aligned on this part, so the read is a single
+// load and cannot tear. Publishing it keeps settings_menu.h out of the audio
+// path entirely, and keeps s_settings to one reader as well as one writer.
+//
+// Seeded in app_main immediately after settings_init(), not only here and not
+// in face_task. On a device whose OLED does not answer, face_task is never
+// created - so nothing would ever publish, and every reply would be
+// multiplied by whatever this initialiser says. The initialiser is unity, the
+// value settings_menu.h guarantees for the top step, so even that failure
+// sounds exactly like the device did before this task existed. Zero would
+// have been a permanently, silently muted device with no symptom but silence,
+// which is the one outcome worth engineering against here.
+static volatile int32_t s_play_gain = 0x7fff;
+
+// A tone the volume page has asked for: raised by face_task, cleared by
+// audio_out_task when it plays one.
+//
+// An event rather than a fact, and it crosses in the opposite direction to
+// s_play_gain, which is why it is a flag of its own instead of a second read
+// of s_settings. face_task clears s_settings.beep_requested itself and raises
+// this, so the struct keeps its single writer. The same shape as
+// s_abort_playback and s_reply_finished below, for the same reason.
+//
+// What it deliberately does not defend against: two taps close enough that
+// the second raises the flag while the first tone is still playing. That beep
+// is lost. A lock on the audio path to save a duplicate blip, on a control
+// the user is already operating by ear and can simply tap again, would be a
+// bad trade.
+static volatile bool s_beep_pending = false;
+
 // Set by net_task when the user presses during a reply; audio_out acts on it.
 static volatile bool s_abort_playback = false;
 // True while the speaker is actually producing sound. Owned by audio_out_task.
@@ -1048,9 +1086,28 @@ static void face_task(void *arg) {
         settings_tick(&s_settings, s_button_down && menu_input,
                       s_button_b_down && menu_input, t);
 
-        // Publish the one bit the other tasks need, from the task that owns
-        // the state, immediately after the tick that can change it.
+        // Publish what the other tasks need, from the task that owns the
+        // state, immediately after the tick that can change it.
         s_menu_open = s_settings.open;
+        // Unconditionally, every frame, rather than only on a change: the
+        // write is a single aligned store and comparing first would cost a
+        // load to save it. And before the beep is handed on below - the tap
+        // that asks for a tone is the same tap that changed the step, and a
+        // tone at the level before it demonstrates nothing.
+        s_play_gain = settings_volume_gain(s_settings.step[SETTINGS_PAGE_VOLUME]);
+
+        // Hand the tone to the task that owns the amplifier. Cleared here so
+        // s_settings keeps its single writer, and raised as a flag of its own
+        // so audio_out_task never has to reach into the struct - the whole
+        // argument is at s_beep_pending's declaration.
+        //
+        // No check for whether a reply is playing: audio_out_task knows that
+        // and this task does not. Nothing here can tell whether s_playing
+        // will still be true by the time the flag is read.
+        if (s_settings.beep_requested) {
+            s_settings.beep_requested = false;
+            s_beep_pending = true;
+        }
 
         // Brightness is applied as it changes rather than on the way out, so
         // the value can be judged by looking at it. Only on a change: the
@@ -1284,12 +1341,102 @@ static void audio_in_task(void *arg) {
     }
 }
 
+// A short blip at the level the volume page is showing, so the setting can be
+// judged by ear. A volume control you cannot hear while setting it is a guess.
+//
+// It is played from audio_out_task and nowhere else. The amplifier's mute pin
+// belongs to that task, the I2S channel is created once at boot and never
+// re-initialised - re-init is what pops - and the drain before muting is what
+// keeps the tail of a word. Reaching around all three from the menu's own
+// context is how the pop comes back.
+#define BEEP_HZ 660
+#define BEEP_MS 150
+#define BEEP_RAMP_MS 20
+// About -12 dBFS before the volume gain: the same headroom playback_main.c
+// chose for the bring-up tone, for the same reason. Loud enough to judge
+// across a room, quiet enough that a mistake does not arrive at full scale.
+#define BEEP_AMPLITUDE 8000
+
+// `frame` is the caller's own I2S staging buffer, borrowed rather than
+// duplicated: this runs on audio_out_task, nothing else can be using it, and
+// a second static copy would cost 4 KB of BSS on a part whose free heap fell
+// to 30 KB the moment wss:// was switched on.
+static void play_beep(int32_t *frame, int32_t gain) {
+    if (gain == 0) return;  // at muted, silence is the value being demonstrated
+
+    const int total = (SAMPLE_RATE * BEEP_MS) / 1000;      // 2400 samples
+    const int ramp = (SAMPLE_RATE * BEEP_RAMP_MS) / 1000;  // 320 samples
+    // 16000 / 660 truncates to 24, which is 666.7 Hz rather than 660. Nobody
+    // can hear that, and a whole number of samples per period is what lets
+    // the phase be the sample index and nothing else - no accumulator to
+    // carry across a block boundary, and no drift for it to accumulate.
+    const int period = SAMPLE_RATE / BEEP_HZ;
+
+    amp_enable(true);
+    for (int done = 0; done < total; done += BLOCK_SAMPLES) {
+        const int n = (total - done < BLOCK_SAMPLES) ? (total - done) : BLOCK_SAMPLES;
+        for (int i = 0; i < n; i++) {
+            const int at = done + i;
+
+            // The envelope, in Q8: up across the first `ramp` samples, down
+            // across the last. It reaches exactly zero at both ends - at == 0
+            // gives 0, and at == total - 1 gives 256 / 320, which truncates
+            // to 0 - so the waveform starts and ends at silence. That is the
+            // whole point of it: a tone that begins at full amplitude is a
+            // step, and a step is a click. The same argument as fill_tone()
+            // in playback_main.c, in integers instead of floats.
+            int32_t env = 256;
+            if (at < ramp) env = (at * 256) / ramp;
+            else if (at > total - ramp) env = ((total - at) * 256) / ramp;
+
+            // A triangle in Q8, from -256 up to +256 and back. At 660 Hz
+            // through a speaker this small it is indistinguishable from a
+            // sine, and it needs no table, no float and no <math.h>.
+            //
+            // Both halves span the full 512 counts, which is why the 4 is
+            // there. Half of that - the first draft - climbs from -256 only
+            // as far as 0, jumps to +256, falls back to 0 and jumps to -256
+            // again: two sawtooths with a full-scale discontinuity twice per
+            // period. That is a buzz, not a tone, and it would have been
+            // heard before it was read.
+            const int p = at % period;
+            const int tri = (p < period / 2)
+                                ? (p * 4 * 256) / period - 256
+                                : 256 - ((p - period / 2) * 4 * 256) / period;
+
+            // The widest intermediate here is 8000 * 32767 = 262,136,000, an
+            // eighth of what int32_t holds, so none of the three products
+            // needs a wider type.
+            int32_t v = (BEEP_AMPLITUDE * tri) >> 8;
+            v = (v * env) >> 8;
+            v = (v * gain) >> 15;
+            frame[i * 2] = v << 16;
+            frame[i * 2 + 1] = 0;
+        }
+        size_t written = 0;
+        i2s_channel_write(s_tx, frame, (size_t)n * 2 * sizeof(int32_t), &written,
+                          portMAX_DELAY);
+    }
+    // The same drain the end of a reply uses, and deliberately the same
+    // constant rather than a second one: i2s_channel_write returns once the
+    // samples are in the DMA ring, not once they have been heard, so cutting
+    // the amp on that boundary would truncate the fade-out back into the
+    // click the fade-out exists to avoid.
+    vTaskDelay(pdMS_TO_TICKS(DRAIN_MS));
+    amp_enable(false);
+}
+
 static void audio_out_task(void *arg) {
     // The play buffer now holds compressed audio, so the same RAM rides out
     // four times as long a gap: 48 KB is about six seconds of speech.
     static uint8_t coded[BLOCK_SAMPLES / 2];
     static int16_t pcm[BLOCK_SAMPLES];
     static int32_t frame[BLOCK_SAMPLES * 2];
+    // The gain actually in force at the last sample written. Carried across
+    // blocks so a change made mid-reply is a ramp rather than a step, and
+    // seeded from the published value so the first block of the first reply
+    // is already at the right level.
+    int32_t gain = s_play_gain;
     bool playing = false;
     TickType_t play_started = 0;
     uint32_t played_bytes = 0;
@@ -1314,6 +1461,20 @@ static void audio_out_task(void *arg) {
             s_abort_playback = false;
             ESP_LOGI(TAG, "playback aborted");
             continue;
+        }
+
+        // The tone the volume page asked for. Here, above the receive, because
+        // this is the one point in the loop where the amplifier is idle and
+        // this task is not holding samples it already owes the speaker.
+        if (s_beep_pending) {
+            s_beep_pending = false;
+            // Not over a reply: if audio is already coming out, the reply is
+            // the demonstration. s_playing cannot change under this test -
+            // this task is the only thing that writes it, and the beep runs
+            // to completion here before the loop can turn it on.
+            if (!s_playing) {
+                play_beep(frame, s_play_gain);
+            }
         }
 
         size_t got = xStreamBufferReceive(s_play_buf, coded, sizeof(coded), pdMS_TO_TICKS(20));
@@ -1351,6 +1512,14 @@ static void audio_out_task(void *arg) {
                     vTaskDelay(pdMS_TO_TICKS(10));
                 }
                 if (s_abort_playback) continue;  // handled at the top, amp stays shut
+                // Start this reply at the level the menu is showing rather
+                // than ramping to it from wherever the last one ended. The
+                // ramp below is for a change made *during* a reply; used here
+                // it would put 32 ms of the previous setting at the front of
+                // the new one - which after "set it to muted" is a burst of
+                // full-volume speech, the one thing that setting exists to
+                // prevent.
+                gain = s_play_gain;
                 amp_enable(true);
                 playing = true;
                 s_playing = true;
@@ -1362,14 +1531,45 @@ static void audio_out_task(void *arg) {
             // This is why the face needed no mouth: the reply's own loudness
             // squashes the eyes on every syllable, from the samples that are
             // about to be played rather than from a guess about timing.
+            //
+            // Before the volume scaling, deliberately. The eyes squash on the
+            // reply's own syllables; measure after the gain and the face goes
+            // still at low volume, saying the assistant is mumbling when it is
+            // only quiet - and stops moving altogether at muted, where the
+            // face is the only thing left to show anything is happening.
             s_audio_level = block_level(pcm, n);
 
+            // Apply the volume setting, ramping to it across the block instead
+            // of stepping between two samples. A step in the coefficient is a
+            // step in the waveform, and a step is a click - the same reason
+            // fill_tone() in playback_main.c ramps its ends.
+            //
+            // The ramp lands exactly on `want` at the last sample, and `gain`
+            // carries that into the next block, so the level is continuous
+            // across a block boundary as well as within one. One block is
+            // 32 ms, which is fast enough that a tap on B is heard as an
+            // immediate change and slow enough that no edge survives it.
+            //
+            // All of this fits in int32_t, so nothing here calls into libgcc
+            // for a 64-bit divide on the audio path: both gains are Q15 and so
+            // at most 32767, i is at most BLOCK_SAMPLES - 1 = 511, and
+            // 32767 * 511 = 16,743,937. The sample product is the wider one at
+            // 32768 * 32767 = 1,073,709,056, and that still leaves a bit to
+            // spare.
+            const int32_t want = s_play_gain;
+            // n is two samples per coded byte and so always even, never 1; the
+            // guard is here so that a future change to the decoder cannot
+            // quietly turn this into a division by zero.
+            const int32_t last = (n > 1) ? (int32_t)(n - 1) : 1;
             for (size_t i = 0; i < n; i++) {
+                const int32_t g = gain + ((want - gain) * (int32_t)i) / last;
+                const int32_t v = ((int32_t)pcm[i] * g) >> 15;
                 // int16 into the top half of a 32-bit slot; left channel only,
                 // which is what the amplifier selects with SD driven high.
-                frame[i * 2] = (int32_t)pcm[i] << 16;
+                frame[i * 2] = v << 16;
                 frame[i * 2 + 1] = 0;
             }
+            gain = want;
             size_t written = 0;
             i2s_channel_write(s_tx, frame, n * 2 * sizeof(int32_t), &written, portMAX_DELAY);
             played_bytes += (uint32_t)(n * sizeof(int16_t));
@@ -1840,6 +2040,13 @@ void app_main(void) {
     device_config_t cfg;
     config_load(&cfg);
     settings_init(&s_settings, cfg.volume, cfg.screen, cfg.eyes);
+    // Publish the volume here too, not only from face_task. face_task
+    // republishes it on every frame from now on - but face_task is not
+    // created at all on a device whose OLED does not answer, and
+    // audio_out_task is. Without this line that device would play every reply
+    // at whatever s_play_gain's initialiser happens to say, with nothing on
+    // the panel to explain it, because there is no panel.
+    s_play_gain = settings_volume_gain(s_settings.step[SETTINGS_PAGE_VOLUME]);
 
     // The panel is optional, and it is asked about before WiFi so there is a
     // face to watch while the radio associates.
