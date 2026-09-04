@@ -68,14 +68,19 @@ static void draw_centred(uint8_t *fb, int y, const char *s) {
     ss_draw_text(fb, (FACE_W - text_width(s)) / 2, y, s);
 }
 
-// One cell per step, filled up to `filled`. Outlined rather than absent for
-// the rest, so the scale's length reads at any setting.
-static void draw_gauge(uint8_t *fb, int y, int h, uint8_t steps, uint8_t filled) {
-    if (steps == 0) return;
-    const int cell = (GAUGE_W - CELL_GAP * (steps - 1)) / steps;
-    const int used = cell * steps + CELL_GAP * (steps - 1);
+// `cells` cells, filled up to `filled`. Outlined rather than absent for the
+// rest, so the scale's length reads at any setting.
+//
+// How many cells a page has and how many of them the current step fills is
+// settings_page_gauge()'s to say, not this file's: a cell is a level of
+// loudness or light, and only the value tables know how a step number maps
+// onto one.
+static void draw_gauge(uint8_t *fb, int y, int h, uint8_t cells, uint8_t filled) {
+    if (cells == 0) return;
+    const int cell = (GAUGE_W - CELL_GAP * (cells - 1)) / cells;
+    const int used = cell * cells + CELL_GAP * (cells - 1);
     const int x0 = GAUGE_X + (GAUGE_W - used) / 2;
-    for (uint8_t i = 0; i < steps; i++) {
+    for (uint8_t i = 0; i < cells; i++) {
         const int x = x0 + i * (cell + CELL_GAP);
         if (i < filled) fill_rect(fb, x, y, cell, h);
         else frame_rect(fb, x, y, cell, h);
@@ -138,7 +143,9 @@ void settings_screen_render(uint8_t *fb, const settings_t *s) {
         // nothing here a hint could say that the WiFi page has not already
         // said on the way past.
     } else {
-        draw_gauge(fb, ROW_GAUGE, GAUGE_H, settings_page_steps(page), s->step[page]);
+        uint8_t cells = 0, filled = 0;
+        settings_page_gauge(page, s->step[page], &cells, &filled);
+        draw_gauge(fb, ROW_GAUGE, GAUGE_H, cells, filled);
         draw_centred(fb, ROW_VALUE, settings_value_text(s, page));
         draw_centred(fb, ROW_HINT, "hold A to exit");
     }

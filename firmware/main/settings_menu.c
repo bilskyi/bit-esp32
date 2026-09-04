@@ -39,8 +39,42 @@ static const uint8_t PAGE_STEPS[SETTINGS_PAGES] = {
     SETTINGS_VOLUME_STEPS, SETTINGS_SCREEN_STEPS, SETTINGS_EYES_STEPS, 0,
 };
 
+// What a gauge cell means, per page. `drawn` is false for a page whose value
+// is shown some other way - EYES draws the pose itself - or has no value at
+// all. `zero_is_off` says step 0 produces nothing, which is what decides
+// whether the bottom of the scale is an empty gauge or one filled cell.
+static const struct {
+    bool drawn;
+    bool zero_is_off;
+} PAGE_GAUGE[SETTINGS_PAGES] = {
+    {true, true},    // VOLUME: `muted`, then five audible levels
+    {true, false},   // SCREEN: four brightnesses and no off
+    {false, false},  // EYES: the pose is the gauge
+    {false, false},  // WIFI: nothing to show
+};
+
 uint8_t settings_page_steps(uint8_t page) {
     return (page < SETTINGS_PAGES) ? PAGE_STEPS[page] : 0;
+}
+
+void settings_page_gauge(uint8_t page, uint8_t step, uint8_t *cells, uint8_t *filled) {
+    *cells = 0;
+    *filled = 0;
+    if (page >= SETTINGS_PAGES || !PAGE_GAUGE[page].drawn) return;
+
+    const uint8_t steps = PAGE_STEPS[page];
+    // Clamped the way settings_volume_gain() and settings_screen_contrast()
+    // clamp, for the same reason settings_value_text() does: the gauge has to
+    // show the value actually in force.
+    const uint8_t at = (step < steps) ? step : (uint8_t)(steps - 1);
+
+    if (PAGE_GAUGE[page].zero_is_off) {
+        *cells = (uint8_t)(steps - 1);
+        *filled = at;
+    } else {
+        *cells = steps;
+        *filled = (uint8_t)(at + 1);
+    }
 }
 
 int32_t settings_volume_gain(uint8_t step) {

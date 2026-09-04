@@ -34,6 +34,19 @@ static int checks = 0;
 #define TEST_DOT_TOP 56
 #define TEST_DOT_ROWS 5
 
+// Two rows through the gauge, and the reason each one is where it is.
+//
+// TEST_GAUGE_BORDER sits inside the gauge's top border, which is solid across
+// a cell's whole width whether that cell is filled or outlined - so counting
+// runs there counts cells, whatever their state.
+//
+// TEST_GAUGE_MID is clear of both borders. There a filled cell is one run and
+// an outlined cell is two, its left and right edges, so runs at this row come
+// to `2 * cells - filled` - which inverts to a filled count the tests below
+// read straight off the panel.
+#define TEST_GAUGE_BORDER 13
+#define TEST_GAUGE_MID 20
+
 static bool lit_at(const uint8_t *fb, int x, int y) {
     if (x < 0 || y < 0 || x >= FACE_W || y >= FACE_H) return false;
     return (fb[(y / 8) * FACE_W + x] >> (y % 8)) & 1;
@@ -123,32 +136,100 @@ static void test_the_current_page_has_the_fattest_dot(void) {
     }
 }
 
-static void test_the_gauge_has_one_cell_per_step(void) {
+// Reads the gauge back off the panel: how many cells it drew, and how many of
+// them are filled.
+static void gauge_of(const uint8_t *fb, int *cells, int *filled) {
+    *cells = count_runs(fb, TEST_GAUGE_BORDER);
+    *filled = 2 * *cells - count_runs(fb, TEST_GAUGE_MID);
+}
+
+// A cell is a level of loudness or light, not an entry in the enum. The volume
+// page has five audible levels above `muted`; the screen page has four
+// brightnesses and no off. Written out rather than derived from
+// SETTINGS_VOLUME_STEPS and SETTINGS_SCREEN_STEPS, because the relation
+// between a step count and a cell count is the thing under test.
+static void test_the_gauge_draws_a_cell_per_level(void) {
     uint8_t fb[FACE_FB_BYTES];
-    for (uint8_t page = 0; page < SETTINGS_PAGES; page++) {
-        const uint8_t steps = settings_page_steps(page);
-        if (steps == 0) continue;          // the wifi page has no gauge
-        if (page == SETTINGS_PAGE_EYES) continue;  // it previews the pose instead
-        settings_t s = opened_on(page);
+    const struct { uint8_t page; int cells; } want[] = {
+        {SETTINGS_PAGE_VOLUME, 5},
+        {SETTINGS_PAGE_SCREEN, 4},
+    };
+    for (size_t i = 0; i < sizeof(want) / sizeof(want[0]); i++) {
+        settings_t s = opened_on(want[i].page);
         settings_screen_render(fb, &s);
-        const uint8_t filled = s.step[page];
+        CHECK(count_runs(fb, TEST_GAUGE_BORDER) == want[i].cells,
+              "page %u drew %d cells, expected %d", want[i].page,
+              count_runs(fb, TEST_GAUGE_BORDER), want[i].cells);
+    }
+}
 
-        // Row 13 sits inside the gauge's top border, which is solid across a
-        // cell's whole width whether the cell is filled or outlined - so this
-        // only proves the cells are all there and evenly spaced, not that an
-        // unfilled one is actually outlined rather than solid.
-        CHECK(count_runs(fb, 13) == steps,
-              "page %u drew %d cells for %u steps at the border row", page, count_runs(fb, 13), steps);
+// The one the owner reported: at the loudest and the brightest setting the
+// scale still had an empty segment on the end, on both pages. Steps count from
+// zero, so the top step is `steps - 1`, and a renderer handed the step number
+// as a filled count can never fill the last cell.
+static void test_the_top_step_fills_every_cell(void) {
+    uint8_t fb[FACE_FB_BYTES];
+    const uint8_t pages[] = {SETTINGS_PAGE_VOLUME, SETTINGS_PAGE_SCREEN};
+    for (size_t i = 0; i < sizeof(pages) / sizeof(pages[0]); i++) {
+        settings_t s = opened_on(pages[i]);
+        s.step[pages[i]] = (uint8_t)(settings_page_steps(pages[i]) - 1);
+        settings_screen_render(fb, &s);
+        int cells = 0, filled = 0;
+        gauge_of(fb, &cells, &filled);
+        CHECK(filled == cells, "page %u at its top step filled %d of %d cells",
+              pages[i], filled, cells);
+    }
+}
 
-        // Row 20 is clear of both borders. There a filled cell is one solid
-        // run and an outlined cell is two - its left and right edges - so
-        // this is the row where filled and outlined actually look different,
-        // and the one a fill_rect standing in for frame_rect would not
-        // survive.
-        const int expected = filled + 2 * (steps - filled);
-        CHECK(count_runs(fb, 20) == expected,
-              "page %u drew %d runs at mid-gauge, expected %d (filled=%u of %u steps)",
-              page, count_runs(fb, 20), expected, filled, steps);
+// `muted` is a real zero - nothing leaves the speaker - so the honest drawing
+// of it is a scale with nothing in it.
+static void test_muted_leaves_the_volume_gauge_empty(void) {
+    uint8_t fb[FACE_FB_BYTES];
+    settings_t s = opened_on(SETTINGS_PAGE_VOLUME);
+    s.step[SETTINGS_PAGE_VOLUME] = 0;
+    settings_screen_render(fb, &s);
+    int cells = 0, filled = 0;
+    gauge_of(fb, &cells, &filled);
+    CHECK(filled == 0, "muted filled %d of %d cells", filled, cells);
+}
+
+// `Low` is not a zero: the panel is lit, and the owner is reading it. An empty
+// gauge there would say the screen is off.
+static void test_the_dimmest_screen_still_lights_one_cell(void) {
+    uint8_t fb[FACE_FB_BYTES];
+    settings_t s = opened_on(SETTINGS_PAGE_SCREEN);
+    s.step[SETTINGS_PAGE_SCREEN] = 0;
+    settings_screen_render(fb, &s);
+    int cells = 0, filled = 0;
+    gauge_of(fb, &cells, &filled);
+    CHECK(filled == 1, "the dimmest screen filled %d of %d cells", filled, cells);
+}
+
+// With both ends pinned by the tests above, one more cell per step is what is
+// left to check: no step repeating the one below it, and no step jumping two.
+// An outlined cell has to actually be outlined for this to read at all, so it
+// is also what a fill_rect standing in for frame_rect would not survive.
+static void test_each_step_fills_one_more_cell(void) {
+    uint8_t fb[FACE_FB_BYTES];
+    const uint8_t pages[] = {SETTINGS_PAGE_VOLUME, SETTINGS_PAGE_SCREEN};
+    for (size_t i = 0; i < sizeof(pages) / sizeof(pages[0]); i++) {
+        const uint8_t page = pages[i];
+        settings_t s = opened_on(page);
+        int previous = -1;
+        for (uint8_t step = 0; step < settings_page_steps(page); step++) {
+            s.step[page] = step;
+            settings_screen_render(fb, &s);
+            int cells = 0, filled = 0;
+            gauge_of(fb, &cells, &filled);
+            if (previous >= 0) {
+                CHECK(filled == previous + 1,
+                      "page %u went from %d filled cells at step %u to %d at step %u",
+                      page, previous, step - 1, filled, step);
+            }
+            CHECK(filled >= 0 && filled <= cells,
+                  "page %u step %u filled %d of %d cells", page, step, filled, cells);
+            previous = filled;
+        }
     }
 }
 
@@ -288,7 +369,11 @@ int main(void) {
     test_render_clears_what_was_there();
     test_the_page_dots_count_the_pages();
     test_the_current_page_has_the_fattest_dot();
-    test_the_gauge_has_one_cell_per_step();
+    test_the_gauge_draws_a_cell_per_level();
+    test_the_top_step_fills_every_cell();
+    test_muted_leaves_the_volume_gauge_empty();
+    test_the_dimmest_screen_still_lights_one_cell();
+    test_each_step_fills_one_more_cell();
     test_nothing_is_drawn_outside_the_framebuffer();
     test_the_hold_bar_grows_and_disappears();
     test_the_eyes_page_draws_a_face_not_a_gauge();

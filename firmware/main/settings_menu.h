@@ -90,3 +90,14 @@ const char *settings_value_text(const settings_t *s, uint8_t page);
 
 // How many steps a page has, or 0 for a page that holds no value.
 uint8_t settings_page_steps(uint8_t page);
+
+// How many gauge cells a page draws, and how many of them are filled at
+// `step`. Both are 0 for a page that draws no gauge.
+//
+// A cell is a level of loudness or light, not a step of the enum: steps are
+// numbered from zero, and whether step 0 is an off or the bottom of a range
+// differs per page. `muted` produces nothing, so it is an empty gauge and the
+// five cells above it are the five audible levels; `Low` is the dimmest lit
+// panel, so it is one cell of four. A step past the end fills what the value
+// accessors clamp to, so the gauge and the printed value cannot disagree.
+void settings_page_gauge(uint8_t page, uint8_t step, uint8_t *cells, uint8_t *filled);

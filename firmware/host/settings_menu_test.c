@@ -388,6 +388,68 @@ static void test_the_gain_table_is_monotonic_and_ends_exactly(void) {
     CHECK(settings_volume_gain(200) == 32767, "an out-of-range step is not clamped loud");
 }
 
+// The gauge mapping, on its own, without a framebuffer in the way. What the
+// screen test asserts about pixels, this asserts about the two numbers the
+// renderer is handed - so a failure says which of the two is wrong.
+//
+// The expected numbers are written out rather than computed from
+// SETTINGS_VOLUME_STEPS and SETTINGS_SCREEN_STEPS: the relation between a step
+// count and a cell count is what this pins down, and a test that derives it
+// the way the code derives it only proves the code agrees with itself.
+static void test_the_gauge_maps_a_step_to_filled_cells(void) {
+    uint8_t cells = 0, filled = 0;
+
+    // Volume: `muted` is an off, so the five cells are the five audible
+    // levels and the step number is the filled count unchanged.
+    const uint8_t volume_filled[SETTINGS_VOLUME_STEPS] = {0, 1, 2, 3, 4, 5};
+    for (uint8_t step = 0; step < SETTINGS_VOLUME_STEPS; step++) {
+        settings_page_gauge(SETTINGS_PAGE_VOLUME, step, &cells, &filled);
+        CHECK(cells == 5, "the volume page has %u cells, expected 5", cells);
+        CHECK(filled == volume_filled[step],
+              "volume step %u filled %u cells, expected %u", step, filled,
+              volume_filled[step]);
+    }
+
+    // Screen: there is no off, so `Low` is one cell of four and `Max` is all
+    // four.
+    const uint8_t screen_filled[SETTINGS_SCREEN_STEPS] = {1, 2, 3, 4};
+    for (uint8_t step = 0; step < SETTINGS_SCREEN_STEPS; step++) {
+        settings_page_gauge(SETTINGS_PAGE_SCREEN, step, &cells, &filled);
+        CHECK(cells == 4, "the screen page has %u cells, expected 4", cells);
+        CHECK(filled == screen_filled[step],
+              "screen step %u filled %u cells, expected %u", step, filled,
+              screen_filled[step]);
+    }
+}
+
+// The pages that draw no gauge say so, and a step out of range fills what the
+// value accessors clamp to rather than a cell that is not there. Same argument
+// as settings_value_text(): what the panel shows has to be the value actually
+// in force.
+static void test_a_page_without_a_gauge_and_a_step_past_the_end(void) {
+    uint8_t cells = 9, filled = 9;
+
+    settings_page_gauge(SETTINGS_PAGE_EYES, 0, &cells, &filled);
+    CHECK(cells == 0 && filled == 0, "the eyes page asked for %u of %u cells",
+          filled, cells);
+
+    settings_page_gauge(SETTINGS_PAGE_WIFI, 0, &cells, &filled);
+    CHECK(cells == 0 && filled == 0, "the wifi page asked for %u of %u cells",
+          filled, cells);
+
+    settings_page_gauge(SETTINGS_PAGES, 0, &cells, &filled);
+    CHECK(cells == 0 && filled == 0, "a page past the end asked for %u of %u cells",
+          filled, cells);
+
+    // settings_volume_gain() saturates at the top step, so the gauge does too.
+    settings_page_gauge(SETTINGS_PAGE_VOLUME, 200, &cells, &filled);
+    CHECK(cells == 5 && filled == 5,
+          "an out-of-range volume step filled %u of %u cells", filled, cells);
+    settings_page_gauge(SETTINGS_PAGE_SCREEN, 200, &cells, &filled);
+    CHECK(cells == 4 && filled == 4,
+          "an out-of-range brightness filled %u of %u cells", filled, cells);
+}
+
 static void test_the_contrast_table_is_monotonic_and_tops_out_where_init_does(void) {
     CHECK(settings_screen_contrast(SETTINGS_SCREEN_STEPS - 1) == 0xcf,
           "the top step is not the init value: 0x%02x",
@@ -525,6 +587,8 @@ int main(void) {
     test_a_partway_press_does_not_borrow_pre_flip_time();
     test_a_press_that_predates_an_opening_flip_does_not_tap();
     test_the_gain_table_is_monotonic_and_ends_exactly();
+    test_the_gauge_maps_a_step_to_filled_cells();
+    test_a_page_without_a_gauge_and_a_step_past_the_end();
     test_the_contrast_table_is_monotonic_and_tops_out_where_init_does();
     test_every_label_is_short_ascii_and_distinct();
     test_a_muted_step_asks_for_no_beep();
