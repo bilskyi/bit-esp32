@@ -161,6 +161,17 @@
 // anything. The cost of being generous is only that a device with a router
 // that is genuinely away waits twenty seconds to be told what to do, and it
 // has already been waiting since boot.
+//
+// There is one window where it shows and means nothing is wrong, and it was
+// seen rather than missed: provision_stop() stops the radio, so the
+// wifi_connect() after a successful setup is a genuine association, and for
+// the couple of seconds it takes the uptime is long past this threshold while
+// the boot stage is still at the panel. So the line appears under the eyes
+// immediately after someone has finished setting the device up. Left alone
+// deliberately - telling this test that provisioning just ended means
+// publishing a timestamp for it to read, and paying that for a two-second
+// cosmetic artefact would spend the property that makes the test good, which
+// is that face_task decides it alone. Expected on the bench, not a fault.
 #define BOOT_HINT_MS 20000
 // How long the socket task may wait for room in the play buffer.
 // Short on purpose. The server now paces the reply to roughly real time, so
@@ -2209,8 +2220,10 @@ void app_main(void) {
     //
     // The price, said plainly because nothing else says it: a board whose OLED
     // did not answer has no face_task, so it has no menu, and with the five
-    // taps gone it has no way into provisioning at all. Putting the way in on
-    // a screen is what costs that.
+    // taps gone it has no way *back* into provisioning once it has
+    // credentials. An unconfigured one still raises its access point unaided,
+    // which is the only reason a panel-less board can be set up at all.
+    // Putting the way in on a screen is what costs that.
     wifi_connect(cfg.ssid, cfg.pass);
 
     ws_start(cfg.uri);

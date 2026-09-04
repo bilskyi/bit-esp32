@@ -730,8 +730,10 @@ than losing an animation. This firmware already reboots for a clean slate.
 signals are identical. *(27 Aug, about the silence hold.)* It was handled by
 cost instead: nothing is erased on the way in, and the access point returns to
 the saved network five minutes after the last HTTP request. Both are still
-true, and since 3 Sept a stuck `B` also cannot take a device out of the setup
-screen at all — that hold times nothing until the button has been seen up.
+true, and since 3 Sept a `B` already stuck when the setup screen appears
+cannot take a device out of that screen — that hold times nothing until the
+button has been seen up. One that jams after a release during the session
+times normally and does exit.
 
 ---
 
