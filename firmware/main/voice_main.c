@@ -44,6 +44,8 @@
 #include "ota_logic.h"
 #include "provision.h"
 #include "provision_logic.h"
+#include "settings_menu.h"
+#include "settings_screen.h"
 #include "setup_screen.h"
 #include "secrets.h"
 #include "ssd1306.h"
@@ -54,6 +56,13 @@
 #define PIN_DOUT GPIO_NUM_7
 #define PIN_MUTE GPIO_NUM_10
 #define PIN_BUTTON GPIO_NUM_3
+// The second button, wired to ground exactly like the first.
+//
+// GPIO 20 is U0RXD, and it is free only because the console is not on UART0 -
+// CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y. On a board with a CP2102 or CH340
+// bridge this pin is driven by the bridge and a button on it would fight an
+// output. It is not a strapping pin, so a press during reset is harmless.
+#define PIN_BUTTON_B GPIO_NUM_20
 // Onboard LED. Verified on this board: it lights when the pin is driven LOW.
 //
 // GPIO 8 is a strapping pin, which is why the spec warns against using it.
@@ -112,27 +121,30 @@
 #define PREBUFFER_CODED 3200
 
 #define DEBOUNCE_MS 25
-// Never block forever on a send. The button is polled in the same loop, so an
-// unbounded wait means a release is never noticed and the device stays stuck
-// in "listening" until it is reset - which is exactly what happened.
-// Sends wait indefinitely on purpose.
+// Bounded, but generously.
 //
-// A bounded wait looks safer and is not: the timeout is handed straight to the
+// An expired poll is not a retry. The timeout is handed straight to the
 // transport's poll_write, and a poll that expires makes esp_transport_write()
 // return 0, which the client treats as a fatal write error and tears the
 // connection down. A full TCP send buffer for a few hundred milliseconds is
 // ordinary on WiFi, so a 400 ms bound killed roughly every other upload.
 //
-// Blocking here is safe because the button is sampled by its own task, so a
-// stalled send can no longer hide a release.
-// Bounded, but generously.
+// Unbounded is worse in the other direction: a send that never returns holds
+// the client lock forever, and the log fills with "Could not lock ws-client
+// ... for CLOSE" while the device sits there unable to even hang up. It also
+// used to leave the device stuck in "listening", because the button was read
+// in the same loop and a release was never noticed - button_task samples the
+// pins on its own now, so the debounced state stays fresh through a stall
+// even though the task that acts on it does not.
 //
-// An expired poll makes the client tear the connection down, so this must sit
-// well above a normal stall - at 400 ms it killed every other upload. But an
-// unbounded wait is worse: a send that never returns holds the client lock
-// forever, and the log fills with "Could not lock ws-client ... for CLOSE"
-// while the device sits there unable to even hang up. Five seconds means a
-// truly stuck link costs one reconnect instead of a wedge.
+// Twelve seconds sits well above any ordinary stall and still bounds the
+// wedge: a truly stuck link costs one reconnect. It is also exactly how long
+// net_task can be blind to the button, because it reads it between sends and
+// not during one - so twelve is the number any argument about what a stall
+// can hide has to use, including the accepted risk above button_outside_menu()
+// that a menu opened and closed inside one such stall is never seen there. An
+// earlier revision of this comment said five, and the constant has not been
+// five for some time.
 #define SEND_TIMEOUT pdMS_TO_TICKS(12000)
 // Longest the device will wait on the server before re-arming the button.
 #define STUCK_TIMEOUT_MS 20000
@@ -142,6 +154,30 @@
 // rebuilds the client at 15 s - short enough to be there when someone is
 // standing in front of a device that is plainly not working.
 #define OFFLINE_HINT_MS 8000
+// The same offer, for a device that never got as far as having a socket at
+// all: this many milliseconds since boot with no IP yet.
+//
+// Ten times the measured boot-to-IP on a saved network, which is 2.0 s from
+// power-on to an address, and far past any retry inside that: association and
+// DHCP on a router that is merely slow are seconds, not tens of seconds. So a
+// healthy boot has reached FACE_BOOT_WIFI long before this and the hint can
+// never flash on the way past - which matters, because a line that appears
+// during every normal power-on is furniture, and furniture teaches nobody
+// anything. The cost of being generous is only that a device with a router
+// that is genuinely away waits twenty seconds to be told what to do, and it
+// has already been waiting since boot.
+//
+// There is one window where it shows and means nothing is wrong, and it was
+// seen rather than missed: provision_stop() stops the radio, so the
+// wifi_connect() after a successful setup is a genuine association, and for
+// the couple of seconds it takes the uptime is long past this threshold while
+// the boot stage is still at the panel. So the line appears under the eyes
+// immediately after someone has finished setting the device up. Left alone
+// deliberately - telling this test that provisioning just ended means
+// publishing a timestamp for it to read, and paying that for a two-second
+// cosmetic artefact would spend the property that makes the test good, which
+// is that face_task decides it alone. Expected on the bench, not a fault.
+#define BOOT_HINT_MS 20000
 // How long the socket task may wait for room in the play buffer.
 // Short on purpose. The server now paces the reply to roughly real time, so
 // the buffer should almost never be full; blocking this task for seconds left
@@ -164,9 +200,6 @@ static esp_websocket_client_handle_t s_ws;
 static volatile bool s_trial_in_progress = false;
 static volatile uint8_t s_trial_reason = 0;
 #define WIFI_TRIAL_DONE_BIT BIT1
-// Set by the hold-to-reset gesture. Only wifi_start()'s wait consumes it, and
-// only to stop waiting - it is a request to go and provision, not a state.
-#define WIFI_PROVISION_BIT BIT2
 
 typedef enum { ST_IDLE, ST_LISTENING, ST_THINKING, ST_SPEAKING } state_t;
 static volatile state_t s_state = ST_IDLE;
@@ -180,6 +213,96 @@ static volatile uint32_t s_slowest_send = 0;
 static volatile TickType_t s_last_activity = 0;
 // Debounced button state, owned by button_task.
 static volatile bool s_button_down = false;
+// Debounced second button, owned by button_task alongside the first.
+static volatile bool s_button_b_down = false;
+// The settings carousel. Seeded once in app_main, before face_task exists.
+// After that face_task is its only writer here, and it is also the only task
+// that draws, so the screen can never disagree with the state behind it.
+//
+// Task 6 needed two more things out of this struct for the audio path - the
+// playback gain and the request for a demonstration tone - and kept the rule
+// rather than bending it. Neither is read from here by another task:
+// face_task publishes both below, each in the shape it actually has. So this
+// is still one writer, and there is still no lock.
+//
+// Deliberately not volatile. settings_tick() takes a plain settings_t *, so a
+// volatile struct could only be passed to it by casting the qualifier away at
+// every call, which buys the appearance of safety and none of it. Instead the
+// facts other tasks need are published separately, below: each written by one
+// task, and the sharing visible in the declaration rather than inferred from
+// a struct several tasks happen to reach into.
+static settings_t s_settings;
+
+// Whether the menu is up, published by face_task for the one task that must
+// not mistake a press meant for the menu for a question.
+//
+// volatile because net_task reads it in a loop it does not write it from, and
+// without the qualifier the compiler is entitled to hoist the read out of that
+// loop. It happens not to today - the address escapes to other translation
+// units, every iteration passes through an external call, the part is unicore,
+// and the build is -Og with no LTO - but not one of those reasons is recorded
+// in the object code, and a switch to -Os or IPO could take any of them away
+// silently. The gate that keeps the menu out of the conversation depends on
+// this read being fresh.
+static volatile bool s_menu_open = false;
+
+// Unity in Q15. settings_menu.h guarantees this is exactly what the top
+// volume step returns, so this is a documented contract rather than a
+// duplicated constant - and it is named because two places depend on it: the
+// initialiser just below, and the passthrough in audio_out_task.
+#define PLAY_GAIN_UNITY 0x7fff
+
+// The Q15 playback gain the volume page is currently showing, published by
+// face_task for audio_out_task to scale the reply with.
+//
+// A fact rather than an event: whoever reads it wants the value that is true
+// now, and int32_t is naturally aligned on this part, so the read is a single
+// load and cannot tear. Publishing it keeps settings_menu.h out of the audio
+// path entirely, and keeps s_settings to one reader as well as one writer.
+//
+// Seeded in app_main immediately after settings_init(), not only here and not
+// in face_task. On a device whose OLED does not answer, face_task is never
+// created - so nothing would ever publish, and every reply would be
+// multiplied by whatever this initialiser says. The initialiser is unity, the
+// value settings_menu.h guarantees for the top step, so even that failure
+// sounds exactly like the device did before this task existed. Zero would
+// have been a permanently, silently muted device with no symptom but silence,
+// which is the one outcome worth engineering against here.
+static volatile int32_t s_play_gain = PLAY_GAIN_UNITY;
+
+// A tone the volume page has asked for: raised by face_task, cleared by
+// audio_out_task when it plays one.
+//
+// An event rather than a fact, and it crosses in the opposite direction to
+// s_play_gain, which is why it is a flag of its own instead of a second read
+// of s_settings. face_task clears s_settings.beep_requested itself and raises
+// this, so the struct keeps its single writer. The same shape as
+// s_abort_playback and s_reply_finished below, for the same reason.
+//
+// The rule this exists to keep: the last thing you hear is the level you
+// settled on. That is the whole reason the page makes a sound, and neither
+// obvious ordering manages it. A tone occupies about 210 ms once the drain is
+// counted, while B debounces at 25 ms and the menu ticks every 40, so a tap
+// landing inside a tone is the ordinary case rather than the awkward one.
+//
+// Clearing the flag *before* the tone queues them: a brisk walk stacks up
+// blips that lag the panel, and because the gain is read when a tone starts
+// rather than when the tap happened, they come out at whatever the newest
+// level is by then - several identical ones, arriving after the user has
+// stopped pressing.
+//
+// Clearing it *after* the tone throws away every tap that arrived during one,
+// so a quick double-tap plays the level you passed through and never the one
+// you stopped on. Which breaks the rule in the other direction.
+//
+// So audio_out_task does neither on its own: it clears, plays, and looks
+// again. Taps during a tone coalesce into one re-raise, and the tone that
+// answers them reads s_play_gain as it *starts*. Queue depth one, always at
+// the newest level, and a trailing tone that can never announce a level the
+// user has already left - if they have walked on to muted by then it is
+// silent, which is exactly the value being demonstrated.
+static volatile bool s_beep_pending = false;
+
 // Set by net_task when the user presses during a reply; audio_out acts on it.
 static volatile bool s_abort_playback = false;
 // True while the speaker is actually producing sound. Owned by audio_out_task.
@@ -237,11 +360,6 @@ static volatile uint8_t s_face_emotion = FACE_EMO_NEUTRAL;
 // counts as the conversation being alive.
 static volatile uint32_t s_face_emotion_seq = 0;
 static volatile bool s_face_startle = false;
-// How far through the hold-to-reset gesture the button is, 0-100. Owned by
-// net_task, read by face_task, the same shape as the two above. Zero means
-// not counting, and face.c treats zero as leaving no trace at all - releasing
-// the button has to cost nothing.
-static volatile uint8_t s_face_reset_pct = 0;
 // Mean absolute sample of the last audio block, either direction.
 static volatile uint16_t s_audio_level = 0;
 // How far boot has got. Set by the three places that already log these very
@@ -430,8 +548,11 @@ static void audio_init(void) {
     ESP_ERROR_CHECK(gpio_config(&mute));
     ESP_ERROR_CHECK(gpio_set_level(PIN_MUTE, 0));  // muted before anything else
 
+    // Both buttons in one call: they want the identical mode, pull and
+    // interrupt setting, and a second config with the same body is a second
+    // place for them to drift apart.
     gpio_config_t btn = {
-        .pin_bit_mask = 1ULL << PIN_BUTTON,
+        .pin_bit_mask = (1ULL << PIN_BUTTON) | (1ULL << PIN_BUTTON_B),
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -699,18 +820,17 @@ static void wifi_connect(const char *ssid, const char *pass) {
     // falling back to an access point would turn a two-minute outage into a
     // device that has stopped being a voice companion.
     //
-    // What changed is that it stops being unreachable while it waits. The
-    // hold-to-reset gesture sets WIFI_PROVISION_BIT, and without it in this
-    // wait the task holding the boot sequence never returns - so the button
-    // would be undetectable in exactly the situation that needs it.
-    const EventBits_t up = xEventGroupWaitBits(
-        s_wifi_events, WIFI_CONNECTED_BIT | WIFI_PROVISION_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
-    if (up & WIFI_CONNECTED_BIT) {
-        ESP_LOGI(TAG, "wifi up");
-        s_boot_stage = FACE_BOOT_WIFI;  // eyes half open: an IP, but no server yet
-    } else {
-        ESP_LOGW(TAG, "giving up on \"%s\": provisioning was asked for", ssid);
-    }
+    // Nothing wakes this early any more, and nothing needs to. The five-tap
+    // gesture used to set a bit here so this wait would return and the boot
+    // sequence could reach a reboot; the settings menu reboots from inside
+    // face_task instead, and a reboot does not need this wait to return.
+    // What keeps the device reachable while it sits here is that face_task and
+    // button_task are both running by now - see the note above the call to
+    // this function in app_main.
+    xEventGroupWaitBits(s_wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE,
+                        portMAX_DELAY);
+    ESP_LOGI(TAG, "wifi up");
+    s_boot_stage = FACE_BOOT_WIFI;  // eyes half open: an IP, but no server yet
 }
 
 // --------------------------------------------------------------- websocket
@@ -992,6 +1112,23 @@ static void led_task(void *arg) {
 static void face_task(void *arg) {
     face_init(&s_face, now_ms());
 
+    // app_main seeded s_settings from NVS before this task was created, so
+    // the two settings that are visible from outside can be applied here,
+    // before the first frame is drawn, rather than a frame or two into the
+    // boot animation.
+    face_set_resting(&s_face, settings_eyes_emotion(s_settings.step[SETTINGS_PAGE_EYES]));
+    // The contrast write's result is discarded on purpose, here and in the
+    // loop, while ssd1306_flush()'s is checked and logged. Not an oversight
+    // and not a double standard: the only way this write fails is a panel
+    // that has stopped answering, and the flush a few lines below will fail
+    // in the same frame and say so - once on the way down and once on the way
+    // back, which is the whole point of the way it says it. A second error
+    // path here would report the same fact in a way that does not know it is
+    // the same fact.
+    (void)ssd1306_set_contrast(&s_panel,
+                               settings_screen_contrast(s_settings.step[SETTINGS_PAGE_SCREEN]));
+    uint8_t shown_screen_step = s_settings.step[SETTINGS_PAGE_SCREEN];
+
     face_state_t shown = FACE_ST_IDLE;
     uint32_t emotion_seq = 0;
     bool button = false;
@@ -1028,7 +1165,10 @@ static void face_task(void *arg) {
             face_set_emotion(&s_face, (face_emotion_t)s_face_emotion, t);
         }
 
-        const bool down = s_button_down;
+        // Either button. The face's reaction to a press is "something is
+        // being asked of me", and that is as true of the one that opens the
+        // menu as of the one that records a question.
+        const bool down = s_button_down || s_button_b_down;
         if (down != button) {
             face_set_button(&s_face, down, t);
             button = down;
@@ -1046,7 +1186,101 @@ static void face_task(void *arg) {
             face_feed_energy(&s_face, s_audio_level);
         }
 
-        // One task draws, and it chooses which of the two things to draw.
+        // The menu is driven from here because this task already ticks at a
+        // fixed 40 ms and already owns the panel. 40 ms against a 25 ms
+        // debounce and a 1 s hold has room to spare.
+        //
+        // Except while provisioning. That screen is showing an access point
+        // name, an address and a code that someone is copying into a phone,
+        // and the menu would cover all three. The gesture is starved of
+        // input rather than the menu hidden at the moment it would be drawn:
+        // a menu that opened behind the setup screen and then appeared when
+        // provisioning ended would be worse than either, and hiding it would
+        // also leave B meaning two things at once, now that app_main's
+        // provisioning loop reads a B hold as the way out of that screen.
+        //
+        // Starved, not skipped, so the machine keeps ticking: a menu that was
+        // already open when provisioning started still has its twenty-second
+        // idle timeout, and that is what closes it.
+        const bool menu_input = !provision_is_active();
+        settings_tick(&s_settings, s_button_down && menu_input,
+                      s_button_b_down && menu_input, t);
+
+        // Publish what the other tasks need, from the task that owns the
+        // state, immediately after the tick that can change it.
+        s_menu_open = s_settings.open;
+        // Unconditionally, every frame, rather than only on a change: the
+        // write is a single aligned store and comparing first would cost a
+        // load to save it. And before the beep is handed on below - the tap
+        // that asks for a tone is the same tap that changed the step, and a
+        // tone at the level before it demonstrates nothing.
+        s_play_gain = settings_volume_gain(s_settings.step[SETTINGS_PAGE_VOLUME]);
+
+        // Hand the tone to the task that owns the amplifier. Cleared here so
+        // s_settings keeps its single writer, and raised as a flag of its own
+        // so audio_out_task never has to reach into the struct - the whole
+        // argument is at s_beep_pending's declaration.
+        //
+        // No check for whether a reply is playing: audio_out_task knows that
+        // and this task does not. Nothing here can tell whether s_playing
+        // will still be true by the time the flag is read.
+        if (s_settings.beep_requested) {
+            s_settings.beep_requested = false;
+            s_beep_pending = true;
+        }
+
+        // Brightness is applied as it changes rather than on the way out, so
+        // the value can be judged by looking at it. Only on a change: the
+        // contrast command is an I2C transaction, and one per frame would
+        // cost a write the flush below has spent effort avoiding.
+        if (s_settings.step[SETTINGS_PAGE_SCREEN] != shown_screen_step) {
+            shown_screen_step = s_settings.step[SETTINGS_PAGE_SCREEN];
+            // Discarded for the reason given at the top of this task.
+            (void)ssd1306_set_contrast(&s_panel, settings_screen_contrast(shown_screen_step));
+        }
+
+        if (s_settings.wifi_requested) {
+            s_settings.wifi_requested = false;
+            // This path does not save. Anything changed on the volume,
+            // brightness or eyes pages during this visit is lost across the
+            // restart, because leaving through the WiFi page is not leaving
+            // through the exit hold and only the exit hold raises
+            // save_requested. Defensible - you came to this page to redo the
+            // network, not to keep a volume change - but not obvious, so it
+            // is written down here and on the bench sheet rather than being
+            // discovered and filed as a bug.
+            ESP_LOGW(TAG, "settings: wifi setup requested, restarting into provisioning");
+            config_request_provisioning();
+            vTaskDelay(pdMS_TO_TICKS(100));  // let the log line reach the console
+            esp_restart();
+        }
+
+        if (s_settings.save_requested) {
+            s_settings.save_requested = false;
+            // The commit below is a flash write, which on this part means the
+            // instruction cache is disabled for its duration: every task
+            // running from flash stalls for it, not just this one. Tens of
+            // milliseconds, once per menu close, so the cost is a dropped
+            // frame and possibly a brief audible artefact if a reply happens
+            // to be playing - worth it for a write that happens on the way
+            // out instead of on every press.
+            face_set_resting(&s_face, settings_eyes_emotion(s_settings.step[SETTINGS_PAGE_EYES]));
+            const esp_err_t serr = config_save_settings(s_settings.step[SETTINGS_PAGE_VOLUME],
+                                                        s_settings.step[SETTINGS_PAGE_SCREEN],
+                                                        s_settings.step[SETTINGS_PAGE_EYES]);
+            if (serr != ESP_OK) {
+                // The values are live and already applied; losing them at the
+                // next boot is worth less than making a reboot of it.
+                ESP_LOGW(TAG, "settings: nvs write failed (%s)", esp_err_to_name(serr));
+            } else {
+                ESP_LOGI(TAG, "settings: saved vol=%u bright=%u eyes=%u",
+                         s_settings.step[SETTINGS_PAGE_VOLUME],
+                         s_settings.step[SETTINGS_PAGE_SCREEN],
+                         s_settings.step[SETTINGS_PAGE_EYES]);
+            }
+        }
+
+        // One task draws, and it chooses which of the three things to draw.
         //
         // setup_screen.c renders into a buffer it is handed and never touches
         // the panel, so this is the only writer either way and no lock is
@@ -1054,31 +1288,64 @@ static void face_task(void *arg) {
         // borrowing face_t's private one: reaching into another module's
         // state is exactly what its no-dependency rule exists to prevent.
         // 1 KB of BSS, not heap.
+        //
+        // settings_screen.c has the same contract, and shares the same
+        // buffer rather than taking a second kilobyte: the setup screen and
+        // the settings menu cannot be up at the same instant, because only
+        // one of these arms runs per frame.
         static uint8_t s_setup_fb[FACE_FB_BYTES];
         const uint8_t *fb;
-        if (provision_is_active()) {
+        if (s_settings.open) {
+            settings_screen_render(s_setup_fb, &s_settings);
+            fb = s_setup_fb;
+        } else if (provision_is_active()) {
             setup_screen_t s;
             provision_screen(&s);
             setup_screen_render(s_setup_fb, &s);
             fb = s_setup_fb;
         } else {
-            face_set_reset_progress(&s_face, s_face_reset_pct, t);
+            // The bar across the eyes is the menu's hold. face.c still calls
+            // it reset progress because the tap countdown is what it was
+            // drawn for; what it warns about now is that a hold on B is about
+            // to take the panel away from the face, and it is given while
+            // there is still time to let go.
+            face_set_reset_progress(&s_face, s_settings.hold_pct, t);
             face_tick(&s_face, t);
             fb = face_framebuffer(&s_face);
 
             // A gesture nobody can discover is knowledge that lives in one
             // person's head. Say it on the panel in the one situation where
             // it is needed - the device visibly stuck with no server - and
-            // nowhere else, so it does not become furniture.
+            // nowhere else, so it does not become furniture. Since the five
+            // taps went, this line is the only place the way into setup is
+            // taught at all, so it has to fire in every shape of that
+            // situation rather than most of them.
+            //
+            // There are two shapes, and only one of them has a timer.
+            // s_offline_since is link_task's, and link_task is not created
+            // until wifi_connect() returns - so on a device that never
+            // reached a network it is never set, and the hint used to stay
+            // off the panel in exactly the case that most needs it: eyes shut,
+            // router off, nothing on screen to say what to do. Seeding that
+            // timer earlier is not the fix, because link_task also reboots the
+            // device REBOOT_AFTER_MS after it starts running.
+            //
+            // s_boot_stage is what this task has instead, and it needs nobody
+            // else: it stays at FACE_BOOT_PANEL until an IP arrives, so still
+            // being below FACE_BOOT_WIFI after BOOT_HINT_MS *is* "never got
+            // onto a network". It goes away by itself the moment one does.
             //
             // The face's own buffer is not written to: it is copied and the
             // line goes on the copy. face.c owns f->fb and this is the whole
             // reason setup_screen.c renders into a buffer it is handed.
             const TickType_t off = s_offline_since;
-            if (off != 0 &&
-                (uint32_t)(xTaskGetTickCount() - off) * portTICK_PERIOD_MS > OFFLINE_HINT_MS) {
+            const bool link_died =
+                off != 0 &&
+                (uint32_t)(xTaskGetTickCount() - off) * portTICK_PERIOD_MS > OFFLINE_HINT_MS;
+            const bool never_linked = s_boot_stage < FACE_BOOT_WIFI && t > BOOT_HINT_MS;
+            if (link_died || never_linked) {
                 memcpy(s_setup_fb, fb, FACE_FB_BYTES);
-                ss_draw_text(s_setup_fb, 0, FACE_H - SS_GLYPH_H, "5 presses = setup");
+                ss_draw_text(s_setup_fb, 0, FACE_H - SS_GLYPH_H, "hold B: settings");
                 fb = s_setup_fb;
             }
         }
@@ -1212,6 +1479,25 @@ static void audio_in_task(void *arg) {
         // directly stops recording the instant it is released, so a three
         // second question stays three seconds instead of growing to twenty-two
         // and burying the uplink in audio nobody asked for.
+        //
+        // Deliberately the raw button, not button_outside_menu(). This is the
+        // one reader outside the menu that is not gated, so the reason has to
+        // be the strong one rather than the obvious one.
+        //
+        // A mask here would be a *second* mask, latched independently of
+        // net_task's. The two can disagree - they are lifted by whichever
+        // loop next sees the button released, and these loops do not run
+        // together - and a disagreement in this direction stops the
+        // microphone feeding while net_task still believes the utterance is
+        // live. It then sends "end" on silence and spends an STT call on
+        // nothing, which is the very cost the gate was added to avoid.
+        //
+        // The obvious reason is real but small: this is a level test guarded
+        // by ST_LISTENING, the only way that state is reached with the menu
+        // up is an utterance net_task is already about to end, and the audio
+        // in that gap belongs to the question the release path is flushing.
+        // In the ordinary path that gap is one 10 ms iteration; it is only
+        // large when net_task is stuck in a send.
         if (s_state != ST_LISTENING || !s_button_down) continue;
 
         const size_t n = got / sizeof(int32_t) / 2;
@@ -1239,12 +1525,107 @@ static void audio_in_task(void *arg) {
     }
 }
 
+// A short blip at the level the volume page is showing, so the setting can be
+// judged by ear. A volume control you cannot hear while setting it is a guess.
+//
+// It is played from audio_out_task and nowhere else. The amplifier's mute pin
+// belongs to that task, the I2S channel is created once at boot and never
+// re-initialised - re-init is what pops - and the drain before muting is what
+// keeps the tail of a word. Reaching around all three from the menu's own
+// context is how the pop comes back.
+#define BEEP_HZ 660
+#define BEEP_MS 150
+#define BEEP_RAMP_MS 20
+// About -12 dBFS before the volume gain: the same headroom playback_main.c
+// chose for the bring-up tone, for the same reason. Loud enough to judge
+// across a room, quiet enough that a mistake does not arrive at full scale.
+#define BEEP_AMPLITUDE 8000
+
+// `frame` is the caller's own I2S staging buffer, borrowed rather than
+// duplicated: this runs on audio_out_task, nothing else can be using it, and
+// a second static copy would cost 4 KB of BSS on a part whose free heap fell
+// to 30 KB the moment wss:// was switched on.
+static void play_beep(int32_t *frame, int32_t gain) {
+    if (gain == 0) return;  // at muted, silence is the value being demonstrated
+
+    const int total = (SAMPLE_RATE * BEEP_MS) / 1000;      // 2400 samples
+    const int ramp = (SAMPLE_RATE * BEEP_RAMP_MS) / 1000;  // 320 samples
+    // 16000 / 660 truncates to 24, which is 666.7 Hz rather than 660. Nobody
+    // can hear that, and a whole number of samples per period is what lets
+    // the phase be the sample index and nothing else - no accumulator to
+    // carry across a block boundary, and no drift for it to accumulate.
+    const int period = SAMPLE_RATE / BEEP_HZ;
+
+    amp_enable(true);
+    for (int done = 0; done < total; done += BLOCK_SAMPLES) {
+        const int n = (total - done < BLOCK_SAMPLES) ? (total - done) : BLOCK_SAMPLES;
+        for (int i = 0; i < n; i++) {
+            const int at = done + i;
+
+            // The envelope, in Q8: up across the first `ramp` samples, down
+            // across the last. It reaches exactly zero at both ends - at == 0
+            // gives 0, and at == total - 1 gives 256 / 320, which truncates
+            // to 0 - so the waveform starts and ends at silence. That is the
+            // whole point of it: a tone that begins at full amplitude is a
+            // step, and a step is a click. The same argument as fill_tone()
+            // in playback_main.c, in integers instead of floats.
+            int32_t env = 256;
+            if (at < ramp) env = (at * 256) / ramp;
+            else if (at > total - ramp) env = ((total - at) * 256) / ramp;
+
+            // A triangle in Q8, from -256 up to +256 and back. At 660 Hz
+            // through a speaker this small it is indistinguishable from a
+            // sine, and it needs no table, no float and no <math.h>.
+            //
+            // Both halves span the full 512 counts, which is why the 4 is
+            // there. Half of that - the first draft - climbs from -256 only
+            // as far as 0, jumps to +256, falls back to 0 and jumps to -256
+            // again: two sawtooths with a full-scale discontinuity twice per
+            // period. That is a buzz, not a tone, and it would have been
+            // heard before it was read.
+            const int p = at % period;
+            const int tri = (p < period / 2)
+                                ? (p * 4 * 256) / period - 256
+                                : 256 - ((p - period / 2) * 4 * 256) / period;
+
+            // The widest value here is not one of the three products - it
+            // is the I2S slot itself, 8000 << 16 = 524,288,000, a quarter of
+            // what int32_t holds. The products are all smaller, the largest
+            // being 8000 * 32767 = 262,136,000, so none of them needs a
+            // wider type either.
+            int32_t v = (BEEP_AMPLITUDE * tri) >> 8;
+            v = (v * env) >> 8;
+            v = (v * gain) >> 15;
+            frame[i * 2] = v << 16;
+            frame[i * 2 + 1] = 0;
+        }
+        size_t written = 0;
+        i2s_channel_write(s_tx, frame, (size_t)n * 2 * sizeof(int32_t), &written,
+                          portMAX_DELAY);
+    }
+    // The same drain the end of a reply uses, and deliberately the same
+    // constant rather than a second one: i2s_channel_write returns once the
+    // samples are in the DMA ring, not once they have been heard, so cutting
+    // the amp on that boundary would truncate the fade-out back into the
+    // click the fade-out exists to avoid.
+    vTaskDelay(pdMS_TO_TICKS(DRAIN_MS));
+    amp_enable(false);
+}
+
 static void audio_out_task(void *arg) {
     // The play buffer now holds compressed audio, so the same RAM rides out
-    // four times as long a gap: 48 KB is about six seconds of speech.
+    // four times as long a gap: 32 KB is about four seconds of speech.
     static uint8_t coded[BLOCK_SAMPLES / 2];
     static int16_t pcm[BLOCK_SAMPLES];
     static int32_t frame[BLOCK_SAMPLES * 2];
+    // The gain actually in force at the last sample written. Carried across
+    // blocks so a change made mid-reply is a ramp rather than a step.
+    //
+    // The initialiser is defensive only. Every reply re-seeds this at its
+    // first block, below, so nothing depends on what it starts at - but a
+    // plausible value costs nothing and an uninitialised one would be a
+    // multiplier on the first thing anyone hears.
+    int32_t gain = s_play_gain;
     bool playing = false;
     TickType_t play_started = 0;
     uint32_t played_bytes = 0;
@@ -1269,6 +1650,42 @@ static void audio_out_task(void *arg) {
             s_abort_playback = false;
             ESP_LOGI(TAG, "playback aborted");
             continue;
+        }
+
+        // The tone the volume page asked for. Here, above the receive, because
+        // this is the one point in the loop where the amplifier is idle and
+        // this task is not holding samples it already owes the speaker.
+        //
+        // A loop rather than an if, with the clear at the top of it: that is
+        // what makes the queue exactly one deep. Every tap arriving during a
+        // tone re-raises the flag and they fold into each other; when the tone
+        // ends, one more plays, and it reads s_play_gain as it starts - so it
+        // says where the user stopped, not what asked for it. The argument in
+        // full is at the flag's declaration.
+        //
+        // Nothing here can lose a raise, and the guarantee is the ordering
+        // rather than the scheduling: the flag is cleared *before* play_beep,
+        // so any raise from that instant onwards is still standing when the
+        // loop tests again. That holds however the two tasks happen to be
+        // scheduled against each other. face_task's priority 2 against this
+        // task's 5 means it cannot preempt the gap between play_beep returning
+        // and the test at all - but that is a second reason, not the one being
+        // relied on, so changing either priority cannot reopen the question. A
+        // tap arriving after the final test waits for the next pass of the
+        // outer loop, 20 ms later.
+        //
+        // Nor can it run away. Nothing in play_beep touches the flag, so every
+        // extra pass costs a fresh debounced press inside the previous tone.
+        // Stop pressing, and at most one more tone plays. Never two.
+        while (s_beep_pending) {
+            s_beep_pending = false;
+            // Not over a reply: if audio is already coming out, the reply is
+            // the demonstration. s_playing cannot change under this test -
+            // this task is the only thing that writes it, and the beep runs
+            // to completion here before the loop can turn it on.
+            if (!s_playing) {
+                play_beep(frame, s_play_gain);
+            }
         }
 
         size_t got = xStreamBufferReceive(s_play_buf, coded, sizeof(coded), pdMS_TO_TICKS(20));
@@ -1306,6 +1723,14 @@ static void audio_out_task(void *arg) {
                     vTaskDelay(pdMS_TO_TICKS(10));
                 }
                 if (s_abort_playback) continue;  // handled at the top, amp stays shut
+                // Start this reply at the level the menu is showing rather
+                // than ramping to it from wherever the last one ended. The
+                // ramp below is for a change made *during* a reply; used here
+                // it would put 32 ms of the previous setting at the front of
+                // the new one - which after "set it to muted" is a burst of
+                // full-volume speech, the one thing that setting exists to
+                // prevent.
+                gain = s_play_gain;
                 amp_enable(true);
                 playing = true;
                 s_playing = true;
@@ -1317,14 +1742,79 @@ static void audio_out_task(void *arg) {
             // This is why the face needed no mouth: the reply's own loudness
             // squashes the eyes on every syllable, from the samples that are
             // about to be played rather than from a guess about timing.
+            //
+            // Before the volume scaling, deliberately. The eyes squash on the
+            // reply's own syllables; measure after the gain and the face goes
+            // still at low volume, saying the assistant is mumbling when it is
+            // only quiet - and stops moving altogether at muted, where the
+            // face is the only thing left to show anything is happening.
             s_audio_level = block_level(pcm, n);
 
-            for (size_t i = 0; i < n; i++) {
-                // int16 into the top half of a 32-bit slot; left channel only,
-                // which is what the amplifier selects with SD driven high.
-                frame[i * 2] = (int32_t)pcm[i] << 16;
-                frame[i * 2 + 1] = 0;
+            // Apply the volume setting, ramping to it across the block instead
+            // of stepping between two samples. A step in the coefficient is a
+            // step in the waveform, and a step is a click - the same reason
+            // fill_tone() in playback_main.c ramps its ends.
+            //
+            // The ramp lands exactly on `want` at the last sample, and `gain`
+            // carries that into the next block, so the level is continuous
+            // across a block boundary as well as within one. One block is
+            // 32 ms, which is fast enough that a tap on B is heard as an
+            // immediate change and slow enough that no edge survives it.
+            //
+            // All of this fits in int32_t, so nothing here calls into libgcc
+            // for a 64-bit divide on the audio path: both gains are Q15 and so
+            // at most 32767, i is at most BLOCK_SAMPLES - 1 = 511, and
+            // 32767 * 511 = 16,743,937. The sample product is wider at
+            // 32768 * 32767 = 1,073,709,056, but the widest value on this path
+            // is neither - it is the slot itself, 32767 << 16 = 2,147,418,112,
+            // which leaves 65,535 counts, 0.003% of the type. Tight, and
+            // deliberately still tighter than the line it replaced: the shift
+            // by 15 clamps v to +-32767, where the old (int32_t)pcm[i] << 16
+            // could reach INT32_MIN exactly. The passthrough below is that old
+            // line, so it is the one case that still touches the end stop.
+            const int32_t want = s_play_gain;
+
+            if (want == gain && want == PLAY_GAIN_UNITY) {
+                // The top step is supposed to leave the reply alone, and
+                // (pcm * 32767) >> 15 does not: it alters exactly half of all
+                // int16 inputs by one count and carries half a count of DC
+                // with it. Inaudible at -90 dBFS, and forced by a Q15 table
+                // whose top entry cannot be 32768 - but the design document
+                // promises "a device nobody configures sounds exactly as it
+                // does today", and this is the step such a device runs at. So
+                // that promise is kept literally, here, rather than approxi-
+                // mately: at a constant top-step gain the samples are copied
+                // through untouched.
+                //
+                // It is also the cheap path on the setting most devices will
+                // sit at - 512 multiply-and-shift pairs a block that no longer
+                // happen. The general path below covers every other gain, and
+                // every block where the gain is still moving, including a ramp
+                // that ends at unity.
+                for (size_t i = 0; i < n; i++) {
+                    // int16 into the top half of a 32-bit slot; left channel
+                    // only, which is what the amplifier selects with SD high.
+                    frame[i * 2] = (int32_t)pcm[i] << 16;
+                    frame[i * 2 + 1] = 0;
+                }
+            } else {
+                // n is two samples per coded byte and so always even, never 1.
+                // The guard makes a single-sample block non-fatal rather than
+                // correct: it would avoid the division by zero, but that
+                // sample would play at the old gain and the next block would
+                // start at the new one - an unramped step, which is exactly
+                // the click the ramp exists to prevent. It is here so that a
+                // future change to the decoder cannot crash the audio task
+                // while someone works out what it should sound like.
+                const int32_t last = (n > 1) ? (int32_t)(n - 1) : 1;
+                for (size_t i = 0; i < n; i++) {
+                    const int32_t g = gain + ((want - gain) * (int32_t)i) / last;
+                    const int32_t v = ((int32_t)pcm[i] * g) >> 15;
+                    frame[i * 2] = v << 16;
+                    frame[i * 2 + 1] = 0;
+                }
             }
+            gain = want;
             size_t written = 0;
             i2s_channel_write(s_tx, frame, n * 2 * sizeof(int32_t), &written, portMAX_DELAY);
             played_bytes += (uint32_t)(n * sizeof(int16_t));
@@ -1397,142 +1887,107 @@ static void audio_out_task(void *arg) {
     }
 }
 
-// Samples the button and nothing else, so its timing cannot be affected by a
-// send that is waiting on the network.
+// Samples both buttons and nothing else, so their timing cannot be affected
+// by a send that is waiting on the network. One task for two pins: the reason
+// it exists in the first place is the same for both.
 static void button_task(void *arg) {
-    bool stable = false;
-    TickType_t changed = 0;
+    struct { gpio_num_t pin; bool stable; TickType_t changed; volatile bool *out; } b[2] = {
+        {PIN_BUTTON, false, 0, &s_button_down},
+        {PIN_BUTTON_B, false, 0, &s_button_b_down},
+    };
 
     while (true) {
-        const bool down = gpio_get_level(PIN_BUTTON) == 0;
         const TickType_t now = xTaskGetTickCount();
-        if (down != stable && (now - changed) > pdMS_TO_TICKS(DEBOUNCE_MS)) {
-            stable = down;
-            changed = now;
-            s_button_down = down;
+        for (int i = 0; i < 2; i++) {
+            const bool down = gpio_get_level(b[i].pin) == 0;
+            if (down != b[i].stable && (now - b[i].changed) > pdMS_TO_TICKS(DEBOUNCE_MS)) {
+                b[i].stable = down;
+                b[i].changed = now;
+                *b[i].out = down;
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
 
-// Hold the button, stay quiet, and the device goes off to be reconfigured.
-//
-// The silence is what makes this safe. A held button is also how you ask a
-// long question, and s_audio_level already knows whether anyone is talking -
-// block_level() computes it per block and the eyes are already driven by it -
-// so gating on quiet means an ordinary question can never trigger a reset,
-// because a question is not silence.
-//
-// A stuck button cannot be told apart from a deliberate silent hold. The
-// signals are identical and no scheme distinguishes them, so it is handled by
-// cost instead: the access point times out back to the saved network, and
-// nothing is erased on the way in.
-#define RESET_TAPS 5
-#define RESET_WINDOW_MS 3000
-// The face starts showing the count from here, so the gesture cannot complete
-// without warning.
-#define RESET_TAPS_VISIBLE 3
-
 // Below this, a press was not a question - nobody says anything in a fifth of
-// a second - so the utterance is cancelled rather than ended. Without it each
-// tap of the reset gesture would run start/end and cost a Groq STT call on a
-// rate-limited tier, five per gesture, plus five round trips on the link that
-// is this project's blocking problem.
+// a second - so the utterance is cancelled rather than ended. It was added
+// when the reset gesture's taps each cost a Groq STT call; that gesture is
+// gone, and this stays for the reason that outlived it. An accidental brush
+// against the button should not spend a round trip on the link that is this
+// project's blocking problem.
 #define SHORT_PRESS_MS 200
 
-// Counting presses inside a window, in the one place both callers can share.
+// The button as everything outside the settings menu must see it: the
+// debounced level, minus any press the menu has taken for itself.
 //
-// There are two, and they never run at once: net_task counts them to *enter*
-// provisioning while the device is working, and app_main counts them to
-// *leave* it while it is provisioning - net_task does not exist yet at that
-// point, it is created after the radio is up. Each keeps its own instance
-// rather than sharing state, because the same run of taps must not be seen
-// by both.
+// The menu is worked with A as much as with B - A walks the pages, a
+// one-second A hold closes it - and to a task that reads s_button_down every
+// one of those is a press like any other. Ungated, walking the carousel
+// spends a start/cancel round trip per page, and closing the menu by hand
+// sends a second of room tone to be transcribed.
+//
+// Two things beyond "nothing while the menu is open" have to be true, and the
+// latch is what makes the second of them true.
+//
+// Opening the menu part-way through an utterance arrives at net_task as a
+// release, so the question ends through the path that already exists and the
+// server gets its "end" rather than being left waiting. That is what the
+// design asks for and it is better than a cancel.
+//
+// And the press that closed the menu is still physically down at the moment
+// the menu goes away. Without the latch it would arrive as a fresh press edge
+// - a start to net_task - the instant someone finished the gesture that means
+// "I am done". So the mask outlives the menu and is lifted only by an actual
+// release: exactly the remainder of that one physical press is discarded, not
+// the button.
+//
+// net_task is the only caller left. The other two went with the five-tap
+// gesture: one task deleted outright, and app_main's way out of provisioning
+// now reads B, which the menu cannot be holding because face_task starves it
+// of input for as long as that screen is up. The state stays a parameter
+// rather than a static inside this function because it records where one
+// loop is in one physical press, and a second reader would not be in the same
+// place - it would have to bring its own, exactly as this one does.
+//
+// net_task polls at 10 ms against a 25 ms debounce, so it cannot miss the
+// release that lifts the mask - except while it is inside a send, which can
+// take up to SEND_TIMEOUT. A menu opened and closed entirely inside one such
+// stall is never seen here at all; that fails safe, to the behaviour from
+// before the menu existed.
+//
+// What this deliberately does not do is give the menu the interrupt. While it
+// is open, A cannot stop a reply that is playing, because the interrupt path
+// needs the press edge this removes. The reply is audible and the way to stop
+// it is to close the menu first, which is a second's hold.
 typedef struct {
-    uint8_t taps;
-    TickType_t first;
-    bool was_down;
-} tap_counter_t;
+    bool masked;
+} menu_mask_t;
 
-// Feed it the debounced button every loop. Returns how many presses are in the
-// current run, or 0 once the window lapses.
-static uint8_t tap_count(tap_counter_t *c, bool down, TickType_t now) {
-    if (c->taps > 0 && (uint32_t)(now - c->first) * portTICK_PERIOD_MS > RESET_WINDOW_MS) {
-        c->taps = 0;
+static bool button_outside_menu(menu_mask_t *m) {
+    const bool raw = s_button_down;
+    if (s_menu_open) {
+        m->masked = true;
+    } else if (!raw) {
+        m->masked = false;
     }
-    if (down && !c->was_down) {  // the press edge, not the hold
-        if (c->taps == 0) c->first = now;
-        c->taps++;
-    }
-    c->was_down = down;
-    return c->taps;
-}
-
-// Watches for the same five-tap gesture while wifi_connect() below is still
-// blocked waiting for a network. net_task is where the gesture normally
-// lives, but it is not created until wifi_connect() returns - so a device
-// that cannot reach its saved network had no way out at all: the wait has
-// no timeout by design, and nothing was listening for the one thing that
-// was supposed to end it early. That is the bug behind "it just sits there
-// with its eyes shut and won't go into setup."
-//
-// Scoped tightly: created just before wifi_connect(), deleted right after it
-// returns. It does not set WIFI_PROVISION_BIT and rely on wifi_connect()
-// waking up on its own - esp_restart() below makes that moot, and racing
-// app_main's wake-up against this task's own restart would risk falling
-// through to ws_start() with no network for one extra boot cycle before the
-// NVS request took effect. A clean reboot sidesteps that race rather than
-// handling it.
-static void boot_gesture_task(void *arg) {
-    tap_counter_t taps = {0};
-    while (true) {
-        const TickType_t now = xTaskGetTickCount();
-        const uint8_t n = tap_count(&taps, s_button_down, now);
-        s_face_reset_pct = (n >= RESET_TAPS_VISIBLE) ? (uint8_t)((n * 100u) / RESET_TAPS) : 0;
-        if (n >= RESET_TAPS) {
-            ESP_LOGW(TAG, "five taps while stuck connecting; restarting into provisioning");
-            config_request_provisioning();
-            vTaskDelay(pdMS_TO_TICKS(100));  // let the log line reach the console
-            esp_restart();
-        }
-        vTaskDelay(pdMS_TO_TICKS(20));  // fast enough not to miss a tap
-    }
+    return raw && !m->masked;
 }
 
 static void net_task(void *arg) {
     static uint8_t chunk[1024];
     bool held = false;
-    tap_counter_t taps_in = {0};
+    menu_mask_t mask = {0};
     TickType_t press_start = 0;
 
-    TickType_t busy_since = 0;
-
     while (true) {
-        const bool down = s_button_down;
+        // The button, minus anything the settings menu has taken. The whole
+        // argument for the gate, and for the latch inside it, is above
+        // button_outside_menu(); the short version is that A works the menu
+        // as well as it works push-to-talk, and this task must not confuse
+        // the two.
+        const bool down = button_outside_menu(&mask);
         const TickType_t now = xTaskGetTickCount();
-
-        const uint8_t taps = tap_count(&taps_in, down, now);
-        s_face_reset_pct = (taps >= RESET_TAPS_VISIBLE)
-                               ? (uint8_t)((taps * 100u) / RESET_TAPS)
-                               : 0;
-
-        if (taps >= RESET_TAPS) {
-            ESP_LOGW(TAG, "hold-to-reset completed; restarting into provisioning");
-            // A hold in ST_LISTENING is also an utterance in flight. Abandon it
-            // the way the interrupt path already does, so the server is not left
-            // waiting on audio that will never arrive.
-            if (esp_websocket_client_is_connected(s_ws)) {
-                esp_websocket_client_send_text(s_ws, "{\"type\":\"cancel\"}", 17, SEND_TIMEOUT);
-            }
-            xStreamBufferReset(s_mic_buf);
-            s_state = ST_IDLE;
-            s_face_reset_pct = 0;
-
-            config_request_provisioning();
-            xEventGroupSetBits(s_wifi_events, WIFI_PROVISION_BIT);
-            vTaskDelay(pdMS_TO_TICKS(100));  // let the cancel leave and the log flush
-            esp_restart();
-        }
 
         // Last-resort unwedge, measured from the last thing the server sent
         // rather than from the button press.
@@ -1543,17 +1998,14 @@ static void net_task(void *arg) {
         // perfectly well and cut it off. Only genuine silence from the server
         // counts as stuck.
         if (s_state == ST_IDLE) {
-            busy_since = now;
             s_last_activity = now;
         } else if ((now - s_last_activity) > pdMS_TO_TICKS(STUCK_TIMEOUT_MS)) {
             ESP_LOGW(TAG, "no data from server for %d s in state %d, forcing idle",
                      STUCK_TIMEOUT_MS / 1000, (int)s_state);
             s_reply_finished = false;
             s_state = ST_IDLE;
-            busy_since = now;
             s_last_activity = now;
         }
-        (void)busy_since;
 
         if (down != held) {
             held = down;
@@ -1632,10 +2084,10 @@ static void net_task(void *arg) {
                 while ((got = xStreamBufferReceive(s_mic_buf, chunk, sizeof(chunk), 0)) > 0) {
                     esp_websocket_client_send_bin(s_ws, (char *)chunk, got, SEND_TIMEOUT);
                 }
-                // A press too short to have said anything is not a question -
-                // it is a miss, or one tap of the reset gesture. Cancelling
-                // costs the server nothing; ending would spend an STT call on
-                // a fifth of a second of room tone, five times per gesture.
+                // A press too short to have said anything is not a question,
+                // it is a brush against the button. Cancelling costs the
+                // server nothing; ending would spend an STT call on a fifth
+                // of a second of room tone.
                 const uint32_t press_ms = (uint32_t)(now - press_start) * portTICK_PERIOD_MS;
                 if (press_ms < SHORT_PRESS_MS) {
                     esp_websocket_client_send_text(s_ws, "{\"type\":\"cancel\"}", 17, SEND_TIMEOUT);
@@ -1716,6 +2168,31 @@ void app_main(void) {
 
     audio_init();
 
+    // Read before the panel, not after it, and the menu is seeded here rather
+    // than inside face_task.
+    //
+    // face_task runs at a higher priority than app_main, so it starts the
+    // instant xTaskCreate returns and has drawn its first frame before the
+    // next line of this function executes. Anything it reads at startup has
+    // to be true *before* it is created, not a few milliseconds later:
+    // seeding the menu from inside face_task would have read a zeroed config
+    // every single time, and left the panel at its dimmest step and the
+    // volume at muted with no way to notice but the symptom.
+    //
+    // Doing it here also means the values still arrive on a device with no
+    // OLED, where face_task is never created at all but audio_out_task still
+    // reads the volume.
+    device_config_t cfg;
+    config_load(&cfg);
+    settings_init(&s_settings, cfg.volume, cfg.screen, cfg.eyes);
+    // Publish the volume here too, not only from face_task. face_task
+    // republishes it on every frame from now on - but face_task is not
+    // created at all on a device whose OLED does not answer, and
+    // audio_out_task is. Without this line that device would play every reply
+    // at whatever s_play_gain's initialiser happens to say, with nothing on
+    // the panel to explain it, because there is no panel.
+    s_play_gain = settings_volume_gain(s_settings.step[SETTINGS_PAGE_VOLUME]);
+
     // The panel is optional, and it is asked about before WiFi so there is a
     // face to watch while the radio associates.
     //
@@ -1752,15 +2229,12 @@ void app_main(void) {
     // Before anything that touches the radio, including provisioning.
     wifi_init_stack();
 
-    device_config_t cfg;
-    config_load(&cfg);
-
-    // Two ways in: nothing is configured, or the hold-to-reset gesture asked
-    // for it before restarting. Note what is deliberately absent - failing to
-    // connect is not one of them. A device that knows a network waits for it,
-    // because a router rebooting is worth waiting out and an access point that
-    // appeared on its own would turn a two-minute outage into a device that
-    // had stopped being a voice companion.
+    // Two ways in: nothing is configured, or the settings menu's WiFi page
+    // asked for it before restarting. Note what is deliberately absent -
+    // failing to connect is not one of them. A device that knows a network
+    // waits for it, because a router rebooting is worth waiting out and an
+    // access point that appeared on its own would turn a two-minute outage
+    // into a device that had stopped being a voice companion.
     const bool asked = config_take_provisioning_request();
     if (pl_decide(config_is_provisioned(&cfg), asked, false) == PL_MODE_PROVISION) {
         if (provision_start() == ESP_OK) {
@@ -1771,36 +2245,97 @@ void app_main(void) {
             // not lose the window they never had.
             ota_deadline_suspend(true);
             // Four ways out: a successful trial plus its grace window, five
-            // minutes with nobody using the page, the same five taps that got
-            // here, or provisioning stopping on its own. Only the first is the
-            // happy one.
+            // minutes with nobody using the page, the same B hold that opens
+            // settings everywhere else, or provisioning stopping on its own.
+            // Only the first is the happy one.
             //
-            // The taps are counted here rather than in net_task because
-            // net_task does not exist yet - it is created once the radio is
-            // up, which is after this returns.
-            tap_counter_t taps_out = {0};
-            uint8_t shown = 0;
+            // The hold is timed here rather than in face_task because the
+            // settings menu is not up while the setup screen is: this screen
+            // owns the panel, and SS_STATUS_LEAVING is how it says so. The two
+            // meanings of a B hold cannot collide either, because face_task
+            // starves the menu's gesture of input for exactly as long as
+            // provision_is_active() - so while this loop runs, a hold on B can
+            // only mean this.
+            //
+            // A B that is already down when this screen appears is not this
+            // gesture, so nothing is timed until the button has been seen up.
+            // The menu's WiFi page reboots into provisioning after a one-second
+            // B hold, which means the press that asked for setup is very often
+            // still down when setup arrives, and inheriting it would carry
+            // someone straight back out of the screen they just asked for.
+            // Exactly that press is discarded, not the button - the same rule
+            // set_open() applies to a press that predates a change of meaning,
+            // and stricter in the one way that matters here. set_open()
+            // restarts the clock, which would still take someone out of setup
+            // two seconds into a hold they never released; this times nothing
+            // at all until the button has been seen up.
+            //
+            // Keeping B down after this loop breaks undoes nothing. face_task
+            // stops starving the menu the moment provision_stop() returns and
+            // reads the still-down button as a fresh press, so two more
+            // seconds of it open settings, warned by the same countdown - B
+            // meaning what it means everywhere else, not a gesture misfiring.
+            //
+            // One case cannot show the warning: a menu that was already open
+            // when provisioning started keeps the panel, because face_task
+            // draws it ahead of the setup screen, so SS_STATUS_LEAVING goes to
+            // a screen nobody can see. The hold still works and still cannot
+            // mean anything else, and the menu's own twenty-second idle timeout
+            // ends the window. It needs B held from power-on and is very likely
+            // unreachable, but it was never ruled out, so it is written down
+            // rather than assumed away.
+            TickType_t held_since = 0;
+            bool timing = false;
+            bool armed = !s_button_b_down;
+            bool warned = false;
             while (provision_is_active() && !provision_complete() && !provision_idle_expired()) {
-                const uint8_t taps = tap_count(&taps_out, s_button_down, xTaskGetTickCount());
-                if (taps >= RESET_TAPS) {
-                    ESP_LOGW(TAG, "five taps: leaving setup without configuring");
+                const TickType_t now = xTaskGetTickCount();
+                if (!s_button_b_down) {
+                    timing = false;
+                    armed = true;
+                } else if (armed && !timing) {
+                    timing = true;
+                    held_since = now;
+                }
+
+                const uint32_t held =
+                    timing ? (uint32_t)(now - held_since) * portTICK_PERIOD_MS : 0;
+                if (held >= SETTINGS_OPEN_MS) {
+                    ESP_LOGW(TAG, "B held: leaving setup without configuring");
                     break;
                 }
-                // Same warning the entry gesture gives, in the only place this
-                // screen has for it: a gesture that fires with no notice is
+
+                // The same warning the entry gesture gives, in the only place
+                // this screen has for it: a gesture that fires with no notice is
                 // exactly what the countdown exists to prevent.
-                if (taps >= RESET_TAPS_VISIBLE && taps != shown) {
+                //
+                // It writes over whatever provision.c last put there, and a
+                // release restores SS_STATUS_WAITING rather than what was
+                // showing - so a hold that overlaps a trial loses
+                // SS_STATUS_TRYING until provision.c writes the outcome. The
+                // taps did this too, but they needed three presses inside
+                // three seconds; 800 ms of a button that does nothing else on
+                // this screen is easier to reach by accident, and what an idle
+                // fiddle leaves behind is "leaving setup...".
+                const uint8_t pct = (uint8_t)((held * 100u) / SETTINGS_OPEN_MS);
+                if (pct >= SETTINGS_WARN_PCT && !warned) {
                     provision_set_status(SS_STATUS_LEAVING);
-                    shown = taps;
-                } else if (taps == 0 && shown != 0) {
+                    warned = true;
+                } else if (pct < SETTINGS_WARN_PCT && warned) {
                     provision_set_status(SS_STATUS_WAITING);
-                    shown = 0;
+                    warned = false;
                 }
-                vTaskDelay(pdMS_TO_TICKS(20));  // fast enough not to miss a tap
+                vTaskDelay(pdMS_TO_TICKS(20));
             }
             provision_stop();
             ota_deadline_suspend(false);
-            config_load(&cfg);  // pick up whatever was just saved
+            // Pick up whatever was just saved. Deliberately not re-seeding
+            // the settings menu from it: provisioning writes the network and
+            // the server URI and never the three settings, so there is
+            // nothing new to take, and settings_init() is a construction
+            // call - it zeroes the gesture state along with the values, which
+            // is not a thing to do to a live menu.
+            config_load(&cfg);
         } else {
             // Nothing else to try. Fall through and attempt whatever is
             // configured: with no credentials that waits forever, which is at
@@ -1809,13 +2344,20 @@ void app_main(void) {
         }
     }
 
-    // See boot_gesture_task: net_task does not exist yet to catch the reset
-    // gesture, and wifi_connect() waits with no timeout, so this is the only
-    // window where the button would otherwise be undetectable.
-    TaskHandle_t boot_gesture = NULL;
-    xTaskCreate(boot_gesture_task, "boot_gesture", 2048, NULL, 4, &boot_gesture);
+    // No gesture task is needed here any more. face_task is created above as
+    // soon as the panel answers, and button_task right after it, both long
+    // before this line - so holding B opens settings even while wifi_connect()
+    // is still waiting for a network it will never find. That window, with the
+    // device stuck on a network that is not there, is the entire reason a
+    // second gesture watcher used to be created and deleted around this call.
+    //
+    // The price, said plainly because nothing else says it: a board whose OLED
+    // did not answer has no face_task, so it has no menu, and with the five
+    // taps gone it has no way *back* into provisioning once it has
+    // credentials. An unconfigured one still raises its access point unaided,
+    // which is the only reason a panel-less board can be set up at all.
+    // Putting the way in on a screen is what costs that.
     wifi_connect(cfg.ssid, cfg.pass);
-    vTaskDelete(boot_gesture);
 
     ws_start(cfg.uri);
 

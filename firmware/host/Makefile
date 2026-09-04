@@ -52,6 +52,12 @@ $(BUILD)/setup_screen_test: ../main/setup_screen.c ../main/setup_screen.h setup_
 $(BUILD)/ota_logic_test: ../main/ota_logic.c ../main/ota_logic.h ota_logic_test.c | $(BUILD)
 	$(CC) $(CFLAGS) -o $@ ../main/ota_logic.c ota_logic_test.c
 
+$(BUILD)/settings_menu_test: ../main/settings_menu.c ../main/settings_menu.h ../main/face.c settings_menu_test.c | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ ../main/settings_menu.c ../main/face.c settings_menu_test.c
+
+$(BUILD)/settings_screen_test: ../main/settings_screen.c ../main/settings_screen.h ../main/settings_menu.c ../main/setup_screen.c ../main/face.c settings_screen_test.c | $(BUILD)
+	$(CC) $(CFLAGS) -o $@ ../main/settings_screen.c ../main/settings_menu.c ../main/setup_screen.c ../main/face.c settings_screen_test.c
+
 $(ASAN_BUILD)/face_test: ../main/face.c ../main/face.h face_test.c | $(ASAN_BUILD)
 	$(CC) $(ASAN_CFLAGS) -o $@ ../main/face.c face_test.c
 
@@ -64,20 +70,30 @@ $(ASAN_BUILD)/setup_screen_test: ../main/setup_screen.c ../main/setup_screen.h s
 $(ASAN_BUILD)/ota_logic_test: ../main/ota_logic.c ../main/ota_logic.h ota_logic_test.c | $(ASAN_BUILD)
 	$(CC) $(ASAN_CFLAGS) -o $@ ../main/ota_logic.c ota_logic_test.c
 
-test: $(BUILD)/face_test $(BUILD)/provision_logic_test $(BUILD)/setup_screen_test $(BUILD)/ota_logic_test
+$(ASAN_BUILD)/settings_menu_test: ../main/settings_menu.c ../main/settings_menu.h ../main/face.c settings_menu_test.c | $(ASAN_BUILD)
+	$(CC) $(ASAN_CFLAGS) -o $@ ../main/settings_menu.c ../main/face.c settings_menu_test.c
+
+$(ASAN_BUILD)/settings_screen_test: ../main/settings_screen.c ../main/settings_screen.h ../main/settings_menu.c ../main/setup_screen.c ../main/face.c settings_screen_test.c | $(ASAN_BUILD)
+	$(CC) $(ASAN_CFLAGS) -o $@ ../main/settings_screen.c ../main/settings_menu.c ../main/setup_screen.c ../main/face.c settings_screen_test.c
+
+test: $(BUILD)/face_test $(BUILD)/provision_logic_test $(BUILD)/setup_screen_test $(BUILD)/ota_logic_test $(BUILD)/settings_menu_test $(BUILD)/settings_screen_test
 	@./$(BUILD)/face_test
 	@./$(BUILD)/provision_logic_test
 	@./$(BUILD)/setup_screen_test
 	@./$(BUILD)/ota_logic_test
+	@./$(BUILD)/settings_menu_test
+	@./$(BUILD)/settings_screen_test
 ifneq ($(ASAN),0)
 test: asan
 endif
 
-asan: $(ASAN_BUILD)/face_test $(ASAN_BUILD)/provision_logic_test $(ASAN_BUILD)/setup_screen_test $(ASAN_BUILD)/ota_logic_test
+asan: $(ASAN_BUILD)/face_test $(ASAN_BUILD)/provision_logic_test $(ASAN_BUILD)/setup_screen_test $(ASAN_BUILD)/ota_logic_test $(ASAN_BUILD)/settings_menu_test $(ASAN_BUILD)/settings_screen_test
 	@./$(ASAN_BUILD)/face_test
 	@./$(ASAN_BUILD)/provision_logic_test
 	@./$(ASAN_BUILD)/setup_screen_test
 	@./$(ASAN_BUILD)/ota_logic_test
+	@./$(ASAN_BUILD)/settings_menu_test
+	@./$(ASAN_BUILD)/settings_screen_test
 
 preview: $(BUILD)/face_preview preview-template.html
 	@./$(BUILD)/face_preview preview-template.html $(BUILD)/face-preview.html

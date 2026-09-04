@@ -708,6 +708,7 @@ void face_init(face_t *f, uint32_t now_ms) {
 
     f->state = FACE_ST_IDLE;
     f->emotion = FACE_EMO_NEUTRAL;
+    f->resting = FACE_EMO_NEUTRAL;
     f->now = now_ms;
     f->last_tick = now_ms;
     f->state_since = now_ms;
@@ -755,6 +756,17 @@ void face_set_emotion(face_t *f, face_emotion_t emotion, uint32_t now_ms) {
     if (emotion >= FACE_EMO_COUNT) return;
     f->emotion = emotion;
     f->last_activity = now_ms;  // a fresh emotion means the conversation is alive
+}
+
+// No now_ms, unlike the setters around it - deliberately. Those report
+// something happening at a moment (a fresh emotion, a press, a countdown
+// tick) and the moment matters to the animation. This is a preference loaded
+// once from settings, with nothing for the clock to do; giving it a now_ms
+// to match the others would invite a caller to believe it touches timing
+// when it does not.
+void face_set_resting(face_t *f, face_emotion_t e) {
+    if (e >= FACE_EMO_COUNT) return;
+    f->resting = e;
 }
 
 void face_set_button(face_t *f, bool down, uint32_t now_ms) {
@@ -915,7 +927,7 @@ void face_tick(face_t *f, uint32_t now_ms) {
         } else if (idle_ms > 90000u) {
             emo = FACE_EMO_SLEEPY;
         } else if (idle_ms > 45000u) {
-            emo = FACE_EMO_NEUTRAL;
+            emo = f->resting;
         }
     }
 

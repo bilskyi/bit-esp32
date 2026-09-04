@@ -27,7 +27,8 @@ endif()
 # Provisioning is part of the real device only. The bring-up sketches exist to
 # isolate one piece of hardware each, and a WiFi stack in them would defeat it.
 if(SKETCH STREQUAL "voice")
-    list(APPEND SKETCH_SRCS "provision_logic.c" "setup_screen.c" "config_store.c" "provision.c")
+    list(APPEND SKETCH_SRCS "provision_logic.c" "setup_screen.c" "config_store.c" "provision.c"
+                            "settings_menu.c" "settings_screen.c")
     # Updating over the air is the real device only, for the same reason.
     # ota_logic.c is pure and also built by host/Makefile.
     list(APPEND SKETCH_SRCS "ota_logic.c" "ota.c")

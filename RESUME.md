@@ -350,6 +350,7 @@ token and `SERVER_URI`. Only that last line differs between LAN and cloud.
 | Amp data out | 7 | MAX98357A `DIN` |
 | Amp shutdown | 10 | MAX98357A `SD` |
 | Button to GND | 3 | push-to-talk |
+| Button B to GND | 20 | settings: hold 2 s |
 | Status LED | 8 | onboard, **lights on LOW** |
 | I2C SDA | 0 | SSD1306 `SDA` |
 | I2C SCL | 1 | SSD1306 `SCL` |
@@ -357,8 +358,25 @@ token and `SERVER_URI`. Only that last line differs between LAN and cloud.
 Mic on **3V3**, amp on **5V**. The OLED takes 3V3 too. Do not use GPIO 9
 (BOOT), 18/19 (USB), 2 (strapping).
 
+GPIO 20 is U0RXD and is free only because the console is USB-Serial-JTAG. A
+board with a CP2102 or CH340 bridge cannot use it. GPIO 21 is the last free
+pin after it.
+
 GPIO 0 and 1 are the 32 kHz crystal pins, which is only a problem if the RTC
 is told to use one. `CONFIG_RTC_CLK_SRC_INT_RC=y`, so they are genuinely free.
+
+**The OLED is no longer entirely optional, and neither is button B.** The
+device still runs without a panel — it did for two days — and a board that has
+never been configured still raises its own access point unaided, so a headless
+board can be given a network from a phone. What it cannot do since 3 Sept is
+*re-*provision: the way into setup is the settings menu, the menu is drawn on
+the panel and opened with `B`, and the five-tap gesture that needed neither is
+gone. A board with stale credentials and no panel — or with GPIO 20 unwired,
+which is the CP2102/CH340 case above — waits for a network that is not there
+until someone erases NVS over USB. (The four-digit code that unlocks the
+server URI field is on the panel and in the console log, and the WiFi fields
+are not locked at all, so a headless board can still take a new network — just
+not a new `SERVER_URI` without the cable.)
 
 ## Measured, so nobody re-derives it
 
@@ -643,8 +661,12 @@ endpoint nothing ever called. And a successful trial did not end provisioning �
 `PROV_GRACE_MS` was a constant nothing consumed, so a correctly configured
 device sat in its own access point for five more minutes. All three are fixed.
 
-**Not yet tried on the board:** the hold-to-reset gesture, because
-`RESET_SILENCE_LEVEL` is still the unmeasured placeholder. See "Agreed next".
+**Never tried on the board, and now moot:** the hold-to-reset gesture. It was
+never bench-tested because `RESET_SILENCE_LEVEL` was an unmeasured placeholder;
+five taps replaced it on 28 Aug, and the taps were retired on 3 Sept. Neither
+exists in the tree. **The way into setup, as of 3 Sept, is: hold `B` two
+seconds to open the settings menu, tap `A` to the `WIFI` page, hold `B` again.**
+Design: `docs/superpowers/specs/2026-09-03-two-button-settings-design.md`.
 
 The network used to be compiled into `secrets.h`. Now NVS is the source and
 `secrets.h` is the fallback for whatever NVS lacks, so a board flashed with a
@@ -665,9 +687,11 @@ The first two follow `face.c`'s rules — no ESP-IDF header, no float, no
 allocation — so `host/` builds them. That is deliberate: form parsing and
 screen layout are where the bugs are, and both are now testable on a laptop.
 
-**How it behaves.** Nothing configured, or the hold gesture asked: raise an
-**open** access point `Voice-XXXX`, show its name, `192.168.4.1` and a
-four-digit code on the panel, serve one page. Pick a network, submit, and the
+**How it behaves.** Nothing configured, or the settings menu's `WIFI` page
+asked before restarting — the asking was the silence hold, then the five taps,
+and since 3 Sept it is the menu; nothing else in this paragraph changed —
+raise an **open** access point `Voice-XXXX`, show its name, `192.168.4.1` and
+a four-digit code on the panel, serve one page. Pick a network, submit, and the
 device trials it before anything is saved. Configured and no request: connect
 and **wait forever**, exactly as before — a router rebooting is worth waiting
 out, and an AP that appeared on its own would turn a two-minute outage into a
@@ -688,20 +712,28 @@ only success signal was a web page would report "it worked" and "it broke" as
 the same silence. The page polls and is best-effort; the panel carries
 trying / connected / wrong password / not found / timed out, and says so.
 
-**The hold gesture reboots, and the spec said not to.** Hold the button and
-stay quiet for five seconds — `s_audio_level` already knows whether anyone is
-talking, so a long question can never trigger it — and the device records the
-request in NVS and restarts into provisioning. The spec wanted an in-place
-transition to keep the face's continuity. There is no safe one to write:
+**Entering provisioning reboots, and the spec said not to.** *(Written 27 Aug
+about the silence hold — hold the button and stay quiet for five seconds, with
+`s_audio_level` gating it so a long question could never trigger it. That
+gesture is gone, and so are the five taps that replaced it. The argument below
+is not: it is why the settings menu's `WIFI` page reboots instead of
+transitioning in place, and it is repeated at `config_request_provisioning()`
+in `config_store.h`.)* The device records the request in NVS and restarts into
+provisioning. The spec wanted an in-place transition to keep the face's
+continuity. There is no safe one to write:
 `wifi_start()` does one-time initialisation (`esp_netif_init`, the default
 event loop, `esp_wifi_init`), so there is no second call to make, and inventing
 a teardown that could be neither run nor reviewed here would have been worse
 than losing an animation. This firmware already reboots for a clean slate.
 
 **A stuck button cannot be distinguished from a deliberate silent hold** — the
-signals are identical. It is handled by cost instead: nothing is erased on the
-way in, and the access point returns to the saved network five minutes after
-the last HTTP request.
+signals are identical. *(27 Aug, about the silence hold.)* It was handled by
+cost instead: nothing is erased on the way in, and the access point returns to
+the saved network five minutes after the last HTTP request. Both are still
+true, and since 3 Sept a `B` already stuck when the setup screen appears
+cannot take a device out of that screen — that hold times nothing until the
+button has been seen up. One that jams after a release during the session
+times normally and does exit.
 
 ---
 
@@ -885,23 +917,20 @@ Full evidence, the ruled-out theories and the bench recipe:
 The path a user actually walks — raise the access point, pick a network on a
 phone, come up on it after a reboot — is done and recorded above. What is left:
 
-1. **Measure `RESET_SILENCE_LEVEL`.** It is 400 in `voice_main.c` and that is a
-   placeholder, said so in the comment, and it is the only thing standing
-   between the hold-to-reset gesture and a first try. Log `s_audio_level` for
-   thirty seconds with the button held in a quiet room, then again while
-   speaking at conversational distance, and put the threshold between the two
-   ranges nearer the quiet one. **If the ranges overlap, the silence gate does
-   not work in that room** and the gesture needs rethinking rather than a
-   number splitting the difference.
-2. Then hold silently — the countdown should appear and complete, and the
-   device should restart into provisioning. Hold and talk — it should never
-   complete.
-3. Enter provisioning and walk away; it should return to the saved network five
+Two items that used to head this list — measuring `RESET_SILENCE_LEVEL`, then
+holding silently to watch the countdown complete — were **struck on 3 Sept**.
+Both were work on the silence-gated hold-to-reset gesture. That gesture was
+replaced by five taps on 28 Aug and the taps were retired on 3 Sept;
+`RESET_SILENCE_LEVEL` no longer exists in the tree. The way into setup is now
+the settings menu, and what to try on the bench for it is in
+`docs/superpowers/specs/2026-09-03-two-button-settings-design.md`.
+
+1. Enter provisioning and walk away; it should return to the saved network five
    minutes after the last HTTP request.
-4. **Log the heap while the access point is up.** Nothing measures it, and this
+2. **Log the heap while the access point is up.** Nothing measures it, and this
    device runs at 55 KB free during a conversation. `httpd` with two sockets, a
    DNS task and the AP are not free.
-5. **Does the access point still hold with a phone attached and traffic
+3. **Does the access point still hold with a phone attached and traffic
    flowing, on the phone charger rather than laptop USB?** It held idle for
    40 s on USB, which is the encouraging half. An access point cannot use modem
    sleep, and this board has died twice from an awake radio.
@@ -1023,8 +1052,11 @@ fact, what the state machine believes is an opinion.
 **Still not perfect**, by the user's judgement. The remaining budget is the
 25 ms debounce plus 14-31 ms to mute plus the amplifier's own shutdown. The
 cheap next move is a shorter debounce on the press edge than on the release -
-worth ~20 ms, at the cost of making a spurious press cheaper to trigger, which
-now matters because five of them enter provisioning.
+worth ~20 ms, at the cost of making a spurious press cheaper to trigger. That
+cost was much higher when five presses entered provisioning; since 3 Sept they
+do not, and the worst a spurious press can now do is start an utterance that
+`SHORT_PRESS_MS` cancels before it costs a transcription. Re-price it before
+acting on it: the tradeoff described here is the one from 28 Aug.
 
 ---
 
