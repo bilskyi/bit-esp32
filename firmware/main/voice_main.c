@@ -340,6 +340,23 @@ typedef enum {
 } ota_outcome_t;
 static volatile ota_outcome_t s_ota_outcome = OTA_OUTCOME_NONE;
 static volatile bool s_hello_sent = false;
+// True from ota_begin until the server says the transfer is over, whether it
+// ended well or not.
+//
+// This exists because guarding the binary path on ota_active() alone was
+// wrong in a way that was loud: the moment a write fails, ota_write() aborts
+// the transfer, ota_active() goes false, and every remaining frame of the
+// image falls through to the branch that treats binary as reply audio. The
+// device then plays half a megabyte of firmware through the amplifier.
+// Measured on the board: about five seconds of noise, which is the play
+// buffer's own depth.
+//
+// So the question the binary path has to ask is not "is a transfer healthy"
+// but "is the server sending firmware at all". Cleared by ota_end, by
+// ota_abort, and by a disconnect - after which a fresh transfer has to begin
+// again anyway.
+static volatile bool s_ota_mode = false;
+static volatile uint32_t s_ota_discarded = 0;
 // When the socket last went away, for the reconnect supervisor.
 static volatile TickType_t s_offline_since = 0;
 
@@ -840,6 +857,12 @@ static void wifi_connect(const char *ssid, const char *pass) {
 static void handle_ota_frame(ol_frame_t frame, const char *body, size_t len) {
     switch (frame) {
         case OL_FRAME_BEGIN: {
+            // Set before any refusal below. Whether this device accepts the
+            // update or not, the sender is about to push an image at it, and
+            // none of those bytes are audio.
+            s_ota_mode = true;
+            s_ota_discarded = 0;
+
             // Not while there is a conversation in progress. The transfer
             // holds the socket's receive path for as long as the flash takes,
             // and a reply arriving mid-write would land in the wrong place.
@@ -859,10 +882,21 @@ static void handle_ota_frame(ol_frame_t frame, const char *body, size_t len) {
             break;
         }
         case OL_FRAME_END:
+            s_ota_mode = false;
+            if (s_ota_discarded > 0) {
+                ESP_LOGW(TAG, "discarded %lu B after the transfer failed",
+                         (unsigned long)s_ota_discarded);
+            }
             s_ota_outcome = ota_end() == ESP_OK ? OTA_OUTCOME_READY : OTA_OUTCOME_FAILED;
             break;
         case OL_FRAME_ABORT:
-            ESP_LOGW(TAG, "update abandoned by the server");
+            // Every push now opens with one of these, so most arrive with
+            // nothing to abandon. Only say so when there was something.
+            if (s_ota_mode || ota_active()) {
+                ESP_LOGW(TAG, "update abandoned by the server at %u bytes",
+                         (unsigned)ota_received());
+            }
+            s_ota_mode = false;
             ota_abort();
             break;
         case OL_FRAME_OTHER:
@@ -892,6 +926,7 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
                      (unsigned long)heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
             s_state = ST_IDLE;
             s_hello_sent = false;  // a fresh connection introduces itself again
+            s_ota_mode = false;    // a transfer cannot survive its own socket
             break;
         case WEBSOCKET_EVENT_ERROR:
             // The client fills data_ptr with a readable description of what
@@ -913,8 +948,13 @@ static void ws_event(void *arg, esp_event_base_t base, int32_t id, void *data) {
             // on every frame is the intended use - see ota.h.
             ota_mark_valid("frame from the server");
 
-            if (e->op_code == 0x02 && ota_active()) {
-                // Firmware, not speech.
+            if (e->op_code == 0x02 && s_ota_mode) {
+                // Firmware, not speech - and still not speech once the
+                // transfer has failed. See s_ota_mode.
+                if (!ota_active()) {
+                    s_ota_discarded += (uint32_t)e->data_len;
+                    break;
+                }
                 if (ota_write(e->data_ptr, (size_t)e->data_len) != ESP_OK) {
                     s_ota_outcome = OTA_OUTCOME_FAILED;
                     break;

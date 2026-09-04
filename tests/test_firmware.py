@@ -200,6 +200,25 @@ def test_push_refuses_something_far_too_large_to_be_firmware(monkeypatch):
         assert fake.texts == []
 
 
+def test_every_push_aborts_whatever_came_before_it():
+    """The slot only lives as long as the HTTP request.
+
+    A browser that reloads mid-push releases it, while the device carries on
+    receiving with no idea the sender is gone. Without an abort in front, the
+    next push interleaves into the first transfer's byte stream - which on
+    the board mixed two images into one partition and played the overflow
+    through the speaker.
+    """
+    with client(device_token=TOKEN) as c:
+        login(c)
+        c.app.state.devices.reply_timeout_s = 0.2
+        fake, _ = connected(c)
+
+        c.post("/firmware/push", content=firmware())
+
+    assert [f["type"] for f in fake.frames][:2] == ["ota_abort", "ota_begin"]
+
+
 def test_push_sends_begin_then_the_bytes_then_end():
     body = firmware()
     with client(device_token=TOKEN) as c:
@@ -209,9 +228,10 @@ def test_push_sends_begin_then_the_bytes_then_end():
 
         c.post("/firmware/push", content=body)
 
-    assert fake.frames[0]["type"] == "ota_begin"
-    assert fake.frames[0]["size"] == len(body)
-    assert fake.frames[0]["version"] == "v0.2.1"
+    assert fake.frames[0]["type"] == "ota_abort"
+    assert fake.frames[1]["type"] == "ota_begin"
+    assert fake.frames[1]["size"] == len(body)
+    assert fake.frames[1]["version"] == "v0.2.1"
     assert fake.frames[-1]["type"] == "ota_end"
     assert bytes(fake.blob) == body
     # Order matters as much as content: an image written before its begin
@@ -317,7 +337,7 @@ def test_push_paces_itself_and_stops_when_the_device_goes_quiet():
     # One window in flight and not a byte more.
     assert len(fake.blob) == ACK_EVERY, f"sent {len(fake.blob)} with nobody acking"
     # And no ota_end: the transfer was abandoned, not finished.
-    assert [f["type"] for f in fake.frames] == ["ota_begin", "ota_abort"]
+    assert [f["type"] for f in fake.frames] == ["ota_abort", "ota_begin", "ota_abort"]
 
 
 def test_push_completes_when_the_device_acks():
@@ -332,7 +352,7 @@ def test_push_completes_when_the_device_acks():
         r = c.post("/firmware/push", content=body)
 
     assert bytes(fake.blob) == body
-    assert [f["type"] for f in fake.frames] == ["ota_begin", "ota_end"]
+    assert [f["type"] for f in fake.frames] == ["ota_abort", "ota_begin", "ota_end"]
     assert lines(r)[-1]["outcome"] == "ota_ready"
 
 

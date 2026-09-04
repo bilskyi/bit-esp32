@@ -303,6 +303,19 @@ def register_firmware_routes(app: FastAPI, require_login) -> None:
                 while not link.acks.empty():
                     link.acks.get_nowait()
 
+                # Abort first, always, even though nothing here started a
+                # transfer.
+                #
+                # The push slot below only lives as long as this HTTP
+                # request. A browser that navigates away or reloads cancels
+                # the request, the slot is released - and the device, which
+                # never hears about any of that, is still receiving. A second
+                # push then interleaves its bytes into the first transfer's
+                # stream: two different images into one partition, an overrun,
+                # and on the board that came out of the speaker as five
+                # seconds of noise. So every push begins by putting the device
+                # back to a known state rather than assuming it is in one.
+                await link.ws.send_text(json.dumps({"type": "ota_abort"}))
                 await link.ws.send_text(
                     json.dumps({"type": "ota_begin", "size": total, "version": version})
                 )
@@ -333,7 +346,14 @@ def register_firmware_routes(app: FastAPI, require_login) -> None:
                         "reason": outcome.get("reason", ""),
                     }
                 ) + "\n"
-                log.warning("push finished: %s", outcome.get("type"))
+                # The reason, not just the type. Without it a refusal reads
+                # as "ota_failed" in the log and the only copy of why is in
+                # a browser tab somebody has already closed.
+                log.warning(
+                    "push finished: %s%s",
+                    outcome.get("type"),
+                    f" - {outcome['reason']}" if outcome.get("reason") else "",
+                )
             except Exception as err:  # the socket died mid-transfer
                 log.exception("push failed")
                 try:
