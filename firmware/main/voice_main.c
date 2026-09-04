@@ -220,6 +220,12 @@ static settings_t s_settings;
 // keeps the menu out of the conversation depends on this read being fresh.
 static volatile bool s_menu_open = false;
 
+// Unity in Q15. settings_menu.h guarantees this is exactly what the top
+// volume step returns, so this is a documented contract rather than a
+// duplicated constant - and it is named because two places depend on it: the
+// initialiser just below, and the passthrough in audio_out_task.
+#define PLAY_GAIN_UNITY 0x7fff
+
 // The Q15 playback gain the volume page is currently showing, published by
 // face_task for audio_out_task to scale the reply with.
 //
@@ -236,7 +242,7 @@ static volatile bool s_menu_open = false;
 // sounds exactly like the device did before this task existed. Zero would
 // have been a permanently, silently muted device with no symptom but silence,
 // which is the one outcome worth engineering against here.
-static volatile int32_t s_play_gain = 0x7fff;
+static volatile int32_t s_play_gain = PLAY_GAIN_UNITY;
 
 // A tone the volume page has asked for: raised by face_task, cleared by
 // audio_out_task when it plays one.
@@ -247,11 +253,16 @@ static volatile int32_t s_play_gain = 0x7fff;
 // this, so the struct keeps its single writer. The same shape as
 // s_abort_playback and s_reply_finished below, for the same reason.
 //
-// What it deliberately does not defend against: two taps close enough that
-// the second raises the flag while the first tone is still playing. That beep
-// is lost. A lock on the audio path to save a duplicate blip, on a control
-// the user is already operating by ear and can simply tap again, would be a
-// bad trade.
+// It coalesces rather than queues, and that is a decision, not an accident:
+// audio_out_task clears it *after* the tone, so every tap arriving during one
+// is folded into the tone already playing. A tone occupies about 210 ms once
+// the drain is counted, while B debounces at 25 ms and the menu ticks every
+// 40 - so clearing first would let a brisk walk through the six steps stack
+// up tones that lag the panel by the better part of a second and, because the
+// gain is read when a tone starts rather than when the tap happened, come out
+// at the newest level: several identical blips arriving after the user has
+// stopped pressing. The panel is the feedback for where you are. The tone
+// only has to confirm the level you settle on.
 static volatile bool s_beep_pending = false;
 
 // Set by net_task when the user presses during a reply; audio_out acts on it.
@@ -1404,9 +1415,11 @@ static void play_beep(int32_t *frame, int32_t gain) {
                                 ? (p * 4 * 256) / period - 256
                                 : 256 - ((p - period / 2) * 4 * 256) / period;
 
-            // The widest intermediate here is 8000 * 32767 = 262,136,000, an
-            // eighth of what int32_t holds, so none of the three products
-            // needs a wider type.
+            // The widest value here is not one of the three products - it
+            // is the I2S slot itself, 8000 << 16 = 524,288,000, a quarter of
+            // what int32_t holds. The products are all smaller, the largest
+            // being 8000 * 32767 = 262,136,000, so none of them needs a
+            // wider type either.
             int32_t v = (BEEP_AMPLITUDE * tri) >> 8;
             v = (v * env) >> 8;
             v = (v * gain) >> 15;
@@ -1433,9 +1446,12 @@ static void audio_out_task(void *arg) {
     static int16_t pcm[BLOCK_SAMPLES];
     static int32_t frame[BLOCK_SAMPLES * 2];
     // The gain actually in force at the last sample written. Carried across
-    // blocks so a change made mid-reply is a ramp rather than a step, and
-    // seeded from the published value so the first block of the first reply
-    // is already at the right level.
+    // blocks so a change made mid-reply is a ramp rather than a step.
+    //
+    // The initialiser is defensive only. Every reply re-seeds this at its
+    // first block, below, so nothing depends on what it starts at - but a
+    // plausible value costs nothing and an uninitialised one would be a
+    // multiplier on the first thing anyone hears.
     int32_t gain = s_play_gain;
     bool playing = false;
     TickType_t play_started = 0;
@@ -1467,7 +1483,6 @@ static void audio_out_task(void *arg) {
         // this is the one point in the loop where the amplifier is idle and
         // this task is not holding samples it already owes the speaker.
         if (s_beep_pending) {
-            s_beep_pending = false;
             // Not over a reply: if audio is already coming out, the reply is
             // the demonstration. s_playing cannot change under this test -
             // this task is the only thing that writes it, and the beep runs
@@ -1475,6 +1490,10 @@ static void audio_out_task(void *arg) {
             if (!s_playing) {
                 play_beep(frame, s_play_gain);
             }
+            // After the tone, not before it. Anything face_task raised while
+            // that tone was playing is deliberately dropped here - see the
+            // flag's declaration for why coalescing beats queueing.
+            s_beep_pending = false;
         }
 
         size_t got = xStreamBufferReceive(s_play_buf, coded, sizeof(coded), pdMS_TO_TICKS(20));
@@ -1553,21 +1572,55 @@ static void audio_out_task(void *arg) {
             // All of this fits in int32_t, so nothing here calls into libgcc
             // for a 64-bit divide on the audio path: both gains are Q15 and so
             // at most 32767, i is at most BLOCK_SAMPLES - 1 = 511, and
-            // 32767 * 511 = 16,743,937. The sample product is the wider one at
-            // 32768 * 32767 = 1,073,709,056, and that still leaves a bit to
-            // spare.
+            // 32767 * 511 = 16,743,937. The sample product is wider at
+            // 32768 * 32767 = 1,073,709,056, but the widest value on this path
+            // is neither - it is the slot itself, 32767 << 16 = 2,147,418,112,
+            // which leaves 65,535 counts, 0.003% of the type. Tight, and
+            // deliberately still tighter than the line it replaced: the shift
+            // by 15 clamps v to +-32767, where the old (int32_t)pcm[i] << 16
+            // could reach INT32_MIN exactly. The passthrough below is that old
+            // line, so it is the one case that still touches the end stop.
             const int32_t want = s_play_gain;
-            // n is two samples per coded byte and so always even, never 1; the
-            // guard is here so that a future change to the decoder cannot
-            // quietly turn this into a division by zero.
-            const int32_t last = (n > 1) ? (int32_t)(n - 1) : 1;
-            for (size_t i = 0; i < n; i++) {
-                const int32_t g = gain + ((want - gain) * (int32_t)i) / last;
-                const int32_t v = ((int32_t)pcm[i] * g) >> 15;
-                // int16 into the top half of a 32-bit slot; left channel only,
-                // which is what the amplifier selects with SD driven high.
-                frame[i * 2] = v << 16;
-                frame[i * 2 + 1] = 0;
+
+            if (want == gain && want == PLAY_GAIN_UNITY) {
+                // The top step is supposed to leave the reply alone, and
+                // (pcm * 32767) >> 15 does not: it alters exactly half of all
+                // int16 inputs by one count and carries half a count of DC
+                // with it. Inaudible at -90 dBFS, and forced by a Q15 table
+                // whose top entry cannot be 32768 - but the design document
+                // promises "a device nobody configures sounds exactly as it
+                // does today", and this is the step such a device runs at. So
+                // that promise is kept literally, here, rather than approxi-
+                // mately: at a constant top-step gain the samples are copied
+                // through untouched.
+                //
+                // It is also the cheap path on the setting most devices will
+                // sit at - 512 multiply-and-shift pairs a block that no longer
+                // happen. The general path below covers every other gain, and
+                // every block where the gain is still moving, including a ramp
+                // that ends at unity.
+                for (size_t i = 0; i < n; i++) {
+                    // int16 into the top half of a 32-bit slot; left channel
+                    // only, which is what the amplifier selects with SD high.
+                    frame[i * 2] = (int32_t)pcm[i] << 16;
+                    frame[i * 2 + 1] = 0;
+                }
+            } else {
+                // n is two samples per coded byte and so always even, never 1.
+                // The guard makes a single-sample block non-fatal rather than
+                // correct: it would avoid the division by zero, but that
+                // sample would play at the old gain and the next block would
+                // start at the new one - an unramped step, which is exactly
+                // the click the ramp exists to prevent. It is here so that a
+                // future change to the decoder cannot crash the audio task
+                // while someone works out what it should sound like.
+                const int32_t last = (n > 1) ? (int32_t)(n - 1) : 1;
+                for (size_t i = 0; i < n; i++) {
+                    const int32_t g = gain + ((want - gain) * (int32_t)i) / last;
+                    const int32_t v = ((int32_t)pcm[i] * g) >> 15;
+                    frame[i * 2] = v << 16;
+                    frame[i * 2 + 1] = 0;
+                }
             }
             gain = want;
             size_t written = 0;
