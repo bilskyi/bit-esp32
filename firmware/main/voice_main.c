@@ -253,16 +253,28 @@ static volatile int32_t s_play_gain = PLAY_GAIN_UNITY;
 // this, so the struct keeps its single writer. The same shape as
 // s_abort_playback and s_reply_finished below, for the same reason.
 //
-// It coalesces rather than queues, and that is a decision, not an accident:
-// audio_out_task clears it *after* the tone, so every tap arriving during one
-// is folded into the tone already playing. A tone occupies about 210 ms once
-// the drain is counted, while B debounces at 25 ms and the menu ticks every
-// 40 - so clearing first would let a brisk walk through the six steps stack
-// up tones that lag the panel by the better part of a second and, because the
-// gain is read when a tone starts rather than when the tap happened, come out
-// at the newest level: several identical blips arriving after the user has
-// stopped pressing. The panel is the feedback for where you are. The tone
-// only has to confirm the level you settle on.
+// The rule this exists to keep: the last thing you hear is the level you
+// settled on. That is the whole reason the page makes a sound, and neither
+// obvious ordering manages it. A tone occupies about 210 ms once the drain is
+// counted, while B debounces at 25 ms and the menu ticks every 40, so a tap
+// landing inside a tone is the ordinary case rather than the awkward one.
+//
+// Clearing the flag *before* the tone queues them: a brisk walk stacks up
+// blips that lag the panel, and because the gain is read when a tone starts
+// rather than when the tap happened, they come out at whatever the newest
+// level is by then - several identical ones, arriving after the user has
+// stopped pressing.
+//
+// Clearing it *after* the tone throws away every tap that arrived during one,
+// so a quick double-tap plays the level you passed through and never the one
+// you stopped on. Which breaks the rule in the other direction.
+//
+// So audio_out_task does neither on its own: it clears, plays, and looks
+// again. Taps during a tone coalesce into one re-raise, and the tone that
+// answers them reads s_play_gain as it *starts*. Queue depth one, always at
+// the newest level, and a trailing tone that can never announce a level the
+// user has already left - if they have walked on to muted by then it is
+// silent, which is exactly the value being demonstrated.
 static volatile bool s_beep_pending = false;
 
 // Set by net_task when the user presses during a reply; audio_out acts on it.
@@ -1482,7 +1494,25 @@ static void audio_out_task(void *arg) {
         // The tone the volume page asked for. Here, above the receive, because
         // this is the one point in the loop where the amplifier is idle and
         // this task is not holding samples it already owes the speaker.
-        if (s_beep_pending) {
+        //
+        // A loop rather than an if, with the clear at the top of it: that is
+        // what makes the queue exactly one deep. Every tap arriving during a
+        // tone re-raises the flag and they fold into each other; when the tone
+        // ends, one more plays, and it reads s_play_gain as it starts - so it
+        // says where the user stopped, not what asked for it. The argument in
+        // full is at the flag's declaration.
+        //
+        // Nothing here can lose a raise. face_task runs at priority 2 against
+        // this task's 5, so it cannot preempt the gap between play_beep
+        // returning and the test below; a tap during the tone lands after the
+        // clear and is therefore seen; and a tap arriving after the test is
+        // simply picked up by the next pass of the outer loop, 20 ms later.
+        //
+        // Nor can it run away. Nothing in play_beep touches the flag, so every
+        // extra pass costs a fresh debounced press inside the previous tone.
+        // Stop pressing, and at most one more tone plays. Never two.
+        while (s_beep_pending) {
+            s_beep_pending = false;
             // Not over a reply: if audio is already coming out, the reply is
             // the demonstration. s_playing cannot change under this test -
             // this task is the only thing that writes it, and the beep runs
@@ -1490,10 +1520,6 @@ static void audio_out_task(void *arg) {
             if (!s_playing) {
                 play_beep(frame, s_play_gain);
             }
-            // After the tone, not before it. Anything face_task raised while
-            // that tone was playing is deliberately dropped here - see the
-            // flag's declaration for why coalescing beats queueing.
-            s_beep_pending = false;
         }
 
         size_t got = xStreamBufferReceive(s_play_buf, coded, sizeof(coded), pdMS_TO_TICKS(20));
