@@ -45,8 +45,9 @@ python3 $IDF_PATH/tools/idf_tools.py install cmake ninja
 ```
 
 `Ctrl-]` exits the monitor. Switching `SKETCH` changes which `*_main.c` is
-compiled; the pin definitions and `sdkconfig` are shared, so the two sketches
-cannot drift apart on wiring.
+compiled. `sdkconfig` is shared, but each `*_main.c` defines its own pins:
+they agree on the mic, the amp and the first button, and only `voice` knows
+about the second one.
 
 ## Wiring this sketch assumes
 
@@ -56,11 +57,20 @@ cannot drift apart on wiring.
 | WS | 5 | WS |
 | Mic data in | 6 | SD |
 | Button (to GND) | 3 | — |
-| Button B (to GND) | 20 | — |
+| Button B (to GND) — `voice` only | 20 | — |
 
 `L/R` to GND, `VDD` to **3V3**. The amp is not involved yet — leave it
 unpowered, or at least leave GPIO10 disconnected, so nothing can make noise
 while you are trying to read numbers.
+
+Button B is listed so a board wired once serves every sketch; this one never
+reads GPIO 20. **Check the pin before you solder it.** GPIO 20 is `U0RXD`, and
+it is free only because the console is USB-Serial-JTAG
+(`CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`). On a board whose USB goes through a
+CP2102 or CH340 bridge that pin is driven by the bridge, and a button on it
+would fight an output — leave it unwired there. `voice` then has no B button,
+which means no settings menu and no way into WiFi setup on a board that
+already has credentials. GPIO 21 is the last free pin after it.
 
 ## What good looks like
 

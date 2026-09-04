@@ -149,6 +149,19 @@
 // rebuilds the client at 15 s - short enough to be there when someone is
 // standing in front of a device that is plainly not working.
 #define OFFLINE_HINT_MS 8000
+// The same offer, for a device that never got as far as having a socket at
+// all: this many milliseconds since boot with no IP yet.
+//
+// Ten times the measured boot-to-IP on a saved network, which is 2.0 s from
+// power-on to an address, and far past any retry inside that: association and
+// DHCP on a router that is merely slow are seconds, not tens of seconds. So a
+// healthy boot has reached FACE_BOOT_WIFI long before this and the hint can
+// never flash on the way past - which matters, because a line that appears
+// during every normal power-on is furniture, and furniture teaches nobody
+// anything. The cost of being generous is only that a device with a router
+// that is genuinely away waits twenty seconds to be told what to do, and it
+// has already been waiting since boot.
+#define BOOT_HINT_MS 20000
 // How long the socket task may wait for room in the play buffer.
 // Short on purpose. The server now paces the reply to roughly real time, so
 // the buffer should almost never be full; blocking this task for seconds left
@@ -1210,14 +1223,34 @@ static void face_task(void *arg) {
             // A gesture nobody can discover is knowledge that lives in one
             // person's head. Say it on the panel in the one situation where
             // it is needed - the device visibly stuck with no server - and
-            // nowhere else, so it does not become furniture.
+            // nowhere else, so it does not become furniture. Since the five
+            // taps went, this line is the only place the way into setup is
+            // taught at all, so it has to fire in every shape of that
+            // situation rather than most of them.
+            //
+            // There are two shapes, and only one of them has a timer.
+            // s_offline_since is link_task's, and link_task is not created
+            // until wifi_connect() returns - so on a device that never
+            // reached a network it is never set, and the hint used to stay
+            // off the panel in exactly the case that most needs it: eyes shut,
+            // router off, nothing on screen to say what to do. Seeding that
+            // timer earlier is not the fix, because link_task also reboots the
+            // device REBOOT_AFTER_MS after it starts running.
+            //
+            // s_boot_stage is what this task has instead, and it needs nobody
+            // else: it stays at FACE_BOOT_PANEL until an IP arrives, so still
+            // being below FACE_BOOT_WIFI after BOOT_HINT_MS *is* "never got
+            // onto a network". It goes away by itself the moment one does.
             //
             // The face's own buffer is not written to: it is copied and the
             // line goes on the copy. face.c owns f->fb and this is the whole
             // reason setup_screen.c renders into a buffer it is handed.
             const TickType_t off = s_offline_since;
-            if (off != 0 &&
-                (uint32_t)(xTaskGetTickCount() - off) * portTICK_PERIOD_MS > OFFLINE_HINT_MS) {
+            const bool link_died =
+                off != 0 &&
+                (uint32_t)(xTaskGetTickCount() - off) * portTICK_PERIOD_MS > OFFLINE_HINT_MS;
+            const bool never_linked = s_boot_stage < FACE_BOOT_WIFI && t > BOOT_HINT_MS;
+            if (link_died || never_linked) {
                 memcpy(s_setup_fb, fb, FACE_FB_BYTES);
                 ss_draw_text(s_setup_fb, 0, FACE_H - SS_GLYPH_H, "hold B: settings");
                 fb = s_setup_fb;
@@ -2088,7 +2121,11 @@ void app_main(void) {
             // still down when setup arrives, and inheriting it would carry
             // someone straight back out of the screen they just asked for.
             // Exactly that press is discarded, not the button - the same rule
-            // set_open() applies to a press that predates a change of meaning.
+            // set_open() applies to a press that predates a change of meaning,
+            // and stricter in the one way that matters here. set_open()
+            // restarts the clock, which would still take someone out of setup
+            // two seconds into a hold they never released; this times nothing
+            // at all until the button has been seen up.
             //
             // Keeping B down after this loop breaks undoes nothing. face_task
             // stops starving the menu the moment provision_stop() returns and
@@ -2128,6 +2165,15 @@ void app_main(void) {
                 // The same warning the entry gesture gives, in the only place
                 // this screen has for it: a gesture that fires with no notice is
                 // exactly what the countdown exists to prevent.
+                //
+                // It writes over whatever provision.c last put there, and a
+                // release restores SS_STATUS_WAITING rather than what was
+                // showing - so a hold that overlaps a trial loses
+                // SS_STATUS_TRYING until provision.c writes the outcome. The
+                // taps did this too, but they needed three presses inside
+                // three seconds; 800 ms of a button that does nothing else on
+                // this screen is easier to reach by accident, and what an idle
+                // fiddle leaves behind is "leaving setup...".
                 const uint8_t pct = (uint8_t)((held * 100u) / SETTINGS_OPEN_MS);
                 if (pct >= SETTINGS_WARN_PCT && !warned) {
                     provision_set_status(SS_STATUS_LEAVING);
