@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "esp_app_desc.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
@@ -146,7 +147,13 @@ bool ota_take_ack(void) {
     // write: this console is synchronous USB Serial/JTAG, and logging on a
     // hot path has already cost this project a socket once (see the log-level
     // note at the top of app_main).
-    ESP_LOGI(TAG, "%u / %u bytes", (unsigned)s_xfer.received, (unsigned)s_xfer.expected);
+    // Heap is on this line because the spec wanted it measured during a
+    // transfer and there was nowhere else it could be: estimates on this
+    // project have been wrong by a factor of three, and the first failed
+    // transfer could report neither how far it got nor what it cost.
+    ESP_LOGI(TAG, "%u / %u bytes, heap %u", (unsigned)s_xfer.received,
+             (unsigned)s_xfer.expected,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
     return true;
 }
 uint32_t ota_received(void) { return s_xfer.received; }

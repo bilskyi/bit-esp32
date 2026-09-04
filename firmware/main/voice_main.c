@@ -1429,8 +1429,15 @@ static void ota_link_service(void) {
     if (outcome == OTA_OUTCOME_READY) {
         static const char ready[] = "{\"type\":\"ota_ready\"}";
         esp_websocket_client_send_text(s_ws, ready, sizeof(ready) - 1, SEND_TIMEOUT);
+        // Close before restarting, and not for tidiness: send_text() returns
+        // once the bytes reach the transport, which is not the same as
+        // reaching the wire. Measured on the board - 58-92 ms RTT to Railway
+        // with modem power save on - a 200 ms delay before esp_restart() was
+        // not enough, and the server reported `timeout` for an update that
+        // had in fact committed 164 ms earlier. The closing handshake waits
+        // for what went before it.
+        esp_websocket_client_close(s_ws, pdMS_TO_TICKS(3000));
         ESP_LOGW(TAG, "restarting into the new image");
-        vTaskDelay(pdMS_TO_TICKS(200));  // let the frame leave before the link dies
         esp_restart();
     }
 
