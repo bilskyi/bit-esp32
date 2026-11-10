@@ -5,6 +5,13 @@ The ESP32-C3 is a thin audio terminal. Everything that thinks lives here.
 Push-to-talk in, spoken reply out, over one WebSocket. This half of the project
 is deliberately buildable and testable before any firmware exists.
 
+![The device's eyes: idle neutral, happy, excited, love, curious, sad; listening; thinking](docs/img/faces.png)
+
+<sub>Frames from the firmware's own `face.c` (exported by
+`make -C firmware/host face-data`), the same ones the web app animates.</sub>
+
+![The web app's chat: a reply with its emotion, latency and persona, and the live device face](docs/img/web-talk.png)
+
 ## Quick start
 
 ```bash
@@ -207,6 +214,15 @@ that has a backend**, so none of it is rendered: no file list, no fake
 connection, no invented telemetry. Each section says so in the assistant's own
 voice and says what changes when it exists. A figure appears only if the
 server really returns it.
+
+| Головна | Знання |
+|---|---|
+| ![Home: ask box, what it can reach, the live screen](docs/img/web-home.png) | ![Knowledge: extracted facts, standing instructions, documents not yet supported](docs/img/web-know.png) |
+
+![Personality: saved personas, one active per surface](docs/img/web-pers.png)
+
+<sub>Screenshots taken in `PROVIDER_MODE=mock` with a throwaway database and
+demo instructions, so the reply above is the mock LLM's.</sub>
 
 ## Running the web app
 
